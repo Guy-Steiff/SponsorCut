@@ -1,0 +1,30 @@
+# Build outputs
+build/
+app/build/
+
+# APK files
+*.apk
+*.aab
+
+# Large binary libs — distribute separately or via Git LFS
+app/libs/*.aar
+
+# Local config
+local.properties
+*.keystore
+*.jks
+
+# IDE
+.idea/
+*.iml
+.gradle/
+gradle/wrapper/gradle-wrapper.jar
+
+# Build reports
+build/reports/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
