@@ -26,7 +26,10 @@ object FileResolver {
     fun uriToFile(context: Context, uri: Uri): File {
         val input = context.contentResolver.openInputStream(uri)
             ?: error("Cannot open URI")
-        val file = File(context.cacheDir, "input_${System.currentTimeMillis()}.mp4")
+        // Preserve the original extension so FfmpegEngine can use the right container
+        val sourceName = getDisplayName(context, uri)
+        val ext = sourceName.substringAfterLast('.', "mp4").lowercase().ifBlank { "mp4" }
+        val file = File(context.cacheDir, "input_${System.currentTimeMillis()}.$ext")
         file.outputStream().use { output -> input.copyTo(output) }
         return file
     }
@@ -50,13 +53,21 @@ object FileResolver {
         return "${base}_clean_${ts}${ext}"
     }
 
+    private fun mimeTypeFor(fileName: String): String = when {
+        fileName.endsWith(".mkv", ignoreCase = true) -> "video/x-matroska"
+        fileName.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
+        fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+        fileName.endsWith(".aac", ignoreCase = true) -> "audio/aac"
+        fileName.endsWith(".opus", ignoreCase = true) -> "audio/ogg"
+        else -> "video/mp4"
+    }
+
     fun createOutputTargetInTree(context: Context, treeUri: Uri, fileName: String): OutputTarget {
         val tree = DocumentFile.fromTreeUri(context, treeUri)
             ?: error("Cannot open tree URI: $treeUri")
         val existing = tree.findFile(fileName)
         existing?.delete()
-        val mimeType = if (fileName.endsWith(".mkv")) "video/x-matroska" else "video/mp4"
-        val doc = tree.createFile(mimeType, fileName)
+        val doc = tree.createFile(mimeTypeFor(fileName), fileName)
             ?: error("Cannot create file in tree: $fileName")
         val path = treeUri.lastPathSegment?.let { "$it/$fileName" } ?: fileName
         return OutputTarget.UriTarget(doc.uri, path)
@@ -104,20 +115,28 @@ object FileResolver {
     }
 
     private fun createFallbackTarget(context: Context, fileName: String): OutputTarget {
+        val mime = mimeTypeFor(fileName)
+        val isAudio = mime.startsWith("audio/")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/SponsorCut")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH,
+                    if (isAudio) "Music/SponsorCut" else "Movies/SponsorCut")
             }
-            val insertUri = context.contentResolver.insert(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
-            ) ?: error("MediaStore insert failed")
+            val collection = if (isAudio)
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            else
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            val insertUri = context.contentResolver.insert(collection, values)
+                ?: error("MediaStore insert failed")
             Log.i(TAG, "Output target (MediaStore): $insertUri")
-            return OutputTarget.UriTarget(insertUri, "Movies/SponsorCut/$fileName")
+            val folder = if (isAudio) "Music/SponsorCut" else "Movies/SponsorCut"
+            return OutputTarget.UriTarget(insertUri, "$folder/$fileName")
         } else {
             val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                Environment.getExternalStoragePublicDirectory(
+                    if (isAudio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES),
                 "SponsorCut"
             )
             dir.mkdirs()
