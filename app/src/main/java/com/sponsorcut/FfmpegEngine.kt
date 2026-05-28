@@ -59,6 +59,14 @@ object FfmpegEngine {
         frameAccurate: Boolean = false,
         onProgress: ((step: String) -> Unit)? = null
     ) {
+        val phases = arrayOf(".", "..", "...")
+        var phaseIdx = 0
+
+        fun updatePhase(message: String) {
+            onProgress?.invoke("$message ${phases[phaseIdx]}")
+            phaseIdx = (phaseIdx + 1) % phases.size
+        }
+
         if (segments.isEmpty()) return
 
         // Build keep-ranges (gaps between sponsor segments)
@@ -87,10 +95,11 @@ object FfmpegEngine {
                 }
 
                 val partFile = File(cacheDir, "part_${idx}_${System.currentTimeMillis()}.mp4")
-                onProgress?.invoke("Part ${idx + 1}/$total: %.1fs – %s".format(
-                    keepStart,
-                    if (duration == null) "end" else "%.1fs".format(keepEnd)
-                ))
+//                onProgress?.invoke("Part ${idx + 1}/$total: %.1fs – %s".format(
+//                    keepStart,
+//                    if (duration == null) "end" else "%.1fs".format(keepEnd)
+//                ))
+                updatePhase("Processing part ${idx + 1}/$total")
 
                 val rc: Int
                 if (frameAccurate) {
