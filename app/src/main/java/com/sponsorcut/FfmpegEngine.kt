@@ -95,11 +95,10 @@ object FfmpegEngine {
                 }
 
                 val partFile = File(cacheDir, "part_${idx}_${System.currentTimeMillis()}.mp4")
-//                onProgress?.invoke("Part ${idx + 1}/$total: %.1fs – %s".format(
-//                    keepStart,
-//                    if (duration == null) "end" else "%.1fs".format(keepEnd)
-//                ))
-                updatePhase("Processing part ${idx + 1}/$total")
+                updatePhase("Part ${idx + 1}/$total: %.1fs → %s".format(
+                    keepStart,
+                    if (duration == null) "end" else "%.1fs".format(keepEnd)
+                ))
 
                 val rc: Int
                 if (frameAccurate) {
