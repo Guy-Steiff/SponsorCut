@@ -1,3 +1,4 @@
+content = """\
 package com.sponsorcut
 
 import android.content.ContentValues
@@ -138,3 +139,9 @@ object FileResolver {
         }
     }
 }
+"""
+
+with open('/Users/gsm/projects/sponsorcut/app/src/main/java/com/sponsorcut/FileResolver.kt', 'w') as f:
+    f.write(content)
+print('Written', len(content), 'bytes')
+
