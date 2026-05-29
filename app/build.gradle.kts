@@ -24,6 +24,15 @@ android {
         jvmTarget = "17"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "/Users/gsm/sponsorcut-release.jks")
+            storePassword = System.getenv("KEYSTORE_PASS") ?: "sponsorcut123"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "sponsorcut"
+            keyPassword = System.getenv("KEY_PASS") ?: "sponsorcut123"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -31,6 +40,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }
@@ -47,4 +57,3 @@ dependencies {
     // ffmpeg-kit replaces mobile-ffmpeg; AAR included in libs/ for reproducible builds.
     implementation(files("libs/mobile-ffmpeg-full-gpl-4.4.LTS.aar"))
 }
-
