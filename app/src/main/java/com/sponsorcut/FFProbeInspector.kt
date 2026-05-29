@@ -74,8 +74,17 @@ object FFProbeInspector {
             return fromJson
         }
 
-        Log.e(TAG, "All inspection methods failed for ${file.name}")
-        return null
+        // Last resort: return a minimal VideoInfo so processing can still proceed.
+        // Unknown codec defaults to stream-copy in TranscodePolicy (fail-open).
+        Log.w(TAG, "All inspection methods failed for ${file.name} — returning minimal VideoInfo")
+        return VideoInfo(
+            videoCodec = "unknown",
+            width = null, height = null, fps = null, pixFmt = null,
+            videoBitrate = null, videoIndex = null,
+            audioCodec = "unknown",
+            sampleRate = null, audioBitrate = null, audioChannels = null, audioIndex = null,
+            durationSec = null, containerBitrate = null
+        )
     }
 
     // ── Primary: ffprobe -of json ────────────────────────────────────────────
@@ -89,9 +98,11 @@ object FFProbeInspector {
                 outputLines.append(message.text)
             }
 
-            val rc = FFprobe.execute(
-                "-v quiet -of json -show_streams -show_format \"${file.absolutePath}\""
-            )
+            val rc = FFprobe.execute(arrayOf(
+                "-v", "quiet", "-of", "json",
+                "-show_streams", "-show_format",
+                file.absolutePath
+            ))
 
             Config.enableLogCallback(null)
             Config.setLogLevel(prevLevel)

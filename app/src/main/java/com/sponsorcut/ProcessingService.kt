@@ -80,6 +80,7 @@ class ProcessingService : Service() {
 
         Thread {
             var tempOutput: File? = null
+            var outputTarget: OutputTarget? = null
             // Acquire CPU wake lock — keeps processing running when screen turns off
             wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sponsorcut:processing")
@@ -92,25 +93,31 @@ class ProcessingService : Service() {
                 DiagLog.append("Service", "Input cached: ${inputFile.absolutePath} size=${inputFile.length()}")
                 val sourceName = FileResolver.getDisplayName(this, uri)
                 val sourceExt = sourceName.substringAfterLast('.', "mp4").lowercase().ifBlank { "mp4" }
-                val outputFileName = FileResolver.outputFileNameFromSource(sourceName)
-                val outputTarget = if (!outputFolderUri.isNullOrBlank()) {
+                val plan = run {
+                    // Need to inspect first to know if we're re-encoding (affects output extension)
+                    progress("Inspecting video…")
+                    val info = FFProbeInspector.inspect(inputFile)
+                        ?: error("ffprobe could not read the video file — unsupported format?")
+                    DiagLog.append("FFProbe", "isTsEncapsulated=${info.isTsEncapsulated} codec=${info.videoCodec} audio=${info.audioCodec} summary=${info.summaryLine}")
+                    TranscodePolicy.plan(info, frameAccurate).also { p ->
+                        DiagLog.append("Plan", "canCopyVideo=${p.canCopyVideo} canCopyAudio=${p.canCopyAudio} useSlowSeek=${p.useSlowSeek} rationale=${p.rationale}")
+                        progress("Plan: ${p.rationale}")
+                    } to info
+                }
+                val (processingPlan, videoInfo) = plan
+
+                // If re-encoding, output must be mp4 (H264/AAC incompatible with webm/mkv)
+                val outputExt = if (processingPlan.canCopyVideo && processingPlan.canCopyAudio) sourceExt else "mp4"
+                val baseSourceName = if (outputExt != sourceExt)
+                    sourceName.substringBeforeLast('.') + ".$outputExt"
+                else sourceName
+                val outputFileName = FileResolver.outputFileNameFromSource(baseSourceName)
+                outputTarget = if (!outputFolderUri.isNullOrBlank()) {
                     FileResolver.createOutputTargetInTree(this, Uri.parse(outputFolderUri), outputFileName)
                 } else {
                     FileResolver.createOutputTarget(this, uri, outputFileName, inputFile)
                 }
-
-                tempOutput = File(cacheDir, "processed_${System.currentTimeMillis()}.$sourceExt")
-
-                progress("Inspecting video…")
-                val videoInfo = FFProbeInspector.inspect(inputFile)
-                    ?: error("ffprobe could not read the video file")
-                Log.i(tag, "VideoInfo full: isTsEncapsulated=${videoInfo.isTsEncapsulated} codec=${videoInfo.videoCodec} $videoInfo")
-                DiagLog.append("FFProbe", "isTsEncapsulated=${videoInfo.isTsEncapsulated} codec=${videoInfo.videoCodec} audio=${videoInfo.audioCodec} summary=${videoInfo.summaryLine}")
-
-                val plan = TranscodePolicy.plan(videoInfo, frameAccurate)
-                Log.i(tag, "Plan full: canCopyVideo=${plan.canCopyVideo} canCopyAudio=${plan.canCopyAudio} useSlowSeek=${plan.useSlowSeek} rationale=${plan.rationale}")
-                DiagLog.append("Plan", "canCopyVideo=${plan.canCopyVideo} canCopyAudio=${plan.canCopyAudio} useSlowSeek=${plan.useSlowSeek} rationale=${plan.rationale}")
-                progress("Plan: ${plan.rationale}")
+                tempOutput = File(cacheDir, "processed_${System.currentTimeMillis()}.$outputExt")
 
                 progress("Fetching SponsorBlock segments…")
                 val segments = SponsorBlockClient().fetchRich(videoId)
@@ -127,13 +134,13 @@ class ProcessingService : Service() {
 
                 val sortedSegs = segments.sortedBy { it.start }
                 val totalCut = sortedSegs.sumOf { it.end - it.start }
-                progress("Removing ${segments.size} sponsor segment(s) (~%.1fs) [${plan.rationale}]".format(totalCut))
+                progress("Removing ${segments.size} sponsor segment(s) (~%.1fs) [${processingPlan.rationale}]".format(totalCut))
 
                 FfmpegEngine.process(
                     inputFile, tempOutput,
                     sortedSegs.map { it.start to it.end },
                     cacheDir,
-                    plan = plan,
+                    plan = processingPlan,
                     fileDurationSec = videoInfo.durationSec,
                     onProgress = { step -> progress(step) },
                     onProgressNumeric = { current, total ->
@@ -158,7 +165,7 @@ class ProcessingService : Service() {
                 val expectedRatio = if (totalSec > 0) keptSec / totalSec else 1.0
                 val expectedMb = "%.2f".format(inputFile.length() * expectedRatio / 1_000_000.0)
 
-                val sizeNote = if (plan.canCopyVideo && plan.canCopyAudio)
+                val sizeNote = if (processingPlan.canCopyVideo && processingPlan.canCopyAudio)
                     "expected ~${expectedMb}MB"
                 else
                     "re-encoded; stream copy would be ~${expectedMb}MB"
@@ -167,7 +174,7 @@ class ProcessingService : Service() {
                     "Removed ${segments.size} segment(s) (~%.1fs):\n".format(totalCut) +
                     "$segSummary\n\n" +
                     "Media: ${videoInfo.summaryLine}\n" +
-                    "Mode: ${plan.rationale}\n\n" +
+                    "Mode: ${processingPlan.rationale}\n\n" +
                     "Size: ${inputSizeMb}MB → ${outputSizeMb}MB ($sizeNote)\n\n" +
                     "Saved to:\n${outputTarget.label}"
 
@@ -176,6 +183,8 @@ class ProcessingService : Service() {
 
             } catch (e: Exception) {
                 Log.e(tag, "Processing failed", e)
+                // Clean up the placeholder output file so no empty/partial file is left behind
+                outputTarget?.let { FileResolver.deleteOutputTarget(this, it) }
                 if (e.message == "CANCELLED") {
                     DiagLog.append("Service", "Job cancelled by user")
                     broadcast(text = "Job cancelled.", cancelled = true)

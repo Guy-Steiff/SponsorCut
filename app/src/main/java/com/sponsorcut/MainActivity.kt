@@ -43,6 +43,16 @@ class MainActivity : Activity() {
     private lateinit var radioGroup: RadioGroup
     private lateinit var logButton: Button
     private lateinit var logView: TextView
+    private lateinit var modeHintView: TextView
+    private lateinit var idCardView: LinearLayout
+    private lateinit var idCardIcon: TextView
+    private lateinit var fileCardView: LinearLayout
+    private lateinit var fileCardIcon: TextView
+    private lateinit var fileCardLabel: TextView
+
+    private enum class CardState { PENDING, CHECKING, OK, ERROR }
+    private var idCardState = CardState.PENDING
+    private var fileCardState = CardState.PENDING
     private val dotHandler = Handler(Looper.getMainLooper())
     private var dotRunnable: Runnable? = null
     private val dotPhases = arrayOf(".", "..", "...")
@@ -163,6 +173,11 @@ class MainActivity : Activity() {
                 )
             } catch (_: Exception) {}
             pendingUri = fileUri
+            fileCardState = CardState.OK
+            val fileName = FileResolver.getDisplayName(this, fileUri).ifBlank { fileUri.lastPathSegment ?: "file" }
+            fileCardLabel.text = "📄 $fileName"
+            browseFileButton.text = "📁 Change file…"
+            updateCards()
 
             // Priority 1: whatever is already typed/shown in idInput (covers the URL-share→browse flow)
             val currentInput = idInput.text?.toString().orEmpty()
@@ -182,9 +197,10 @@ class MainActivity : Activity() {
             if (videoId.isBlank())
                 setStatus("File selected ✓\nNo YouTube ID — paste URL or 11-char ID below, then tap Process.")
             else {
-                setStatus("File selected ✓\nID: $videoId\nVerify then tap Process.")
-                fetchSegmentsForId(videoId)
+                setStatus("File selected ✓\nID: $videoId\nFetching title and segments…")
+                fetchSegmentsForId(videoId, force = true)
             }
+            applyModeRecommendation()
         }
     }
 
@@ -200,7 +216,6 @@ class MainActivity : Activity() {
 
         idInput = EditText(this).apply {
             hint = "Paste YouTube URL or 11-char video ID"
-            visibility = View.GONE
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -208,14 +223,17 @@ class MainActivity : Activity() {
                     val raw = s?.toString().orEmpty()
                     val id = if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' })
                         raw else extractId(raw)
-                    if (id.isNotBlank()) fetchSegmentsForId(id)
+                    if (id.isNotBlank()) fetchSegmentsForId(id, force = true)
                 }
             })
         }
 
         retryButton = Button(this).apply {
             text = "Process with this ID"
-            visibility = View.GONE
+            isEnabled = false
+            alpha = 0.5f
+            setBackgroundColor(0xFF2E7D32.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
             setOnClickListener {
                 val uri = pendingUri
                 if (uri == null) { setStatus("No shared video is pending."); return@setOnClickListener }
@@ -264,7 +282,6 @@ class MainActivity : Activity() {
 
         browseFileButton = Button(this).apply {
             text = "📁 Browse for video file…"
-            visibility = View.GONE
             setOnClickListener {
                 val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
@@ -280,7 +297,6 @@ class MainActivity : Activity() {
         // rather than showing the URL to copy.
         openPlayerButton = Button(this).apply {
             text = "💡 How to get the YouTube ID"
-            visibility = View.GONE
             setOnClickListener {
                 toast("In PipePipe/NewPipe: long-press the video → Share → copy the YouTube URL. Then paste it in the field above.")
             }
@@ -292,9 +308,54 @@ class MainActivity : Activity() {
             addView(statusView, lp)
             addView(progressBar, lp)
             addView(cancelButton, lp)
-            addView(browseFileButton, lp)
-            addView(openPlayerButton, lp)
-            addView(idInput, lp)
+
+            // ── Card 1: YouTube ID ────────────────────────────────────────────
+            idCardView = makeCard(p, cardColor(CardState.PENDING)).also { card ->
+                idCardIcon = TextView(context).apply {
+                    text = "⏳"
+                    textSize = 20f
+                    setPadding(0, 0, p / 2, 0)
+                }
+                val col = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(idCardIcon, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(idInput, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(openPlayerButton, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                }
+                card.addView(col, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+            addView(idCardView, lp)
+
+            // ── Card 2: Video file ────────────────────────────────────────────
+            fileCardView = makeCard(p, cardColor(CardState.PENDING)).also { card ->
+                fileCardIcon = TextView(context).apply {
+                    text = "⏳"
+                    textSize = 20f
+                    setPadding(0, 0, p / 2, 0)
+                }
+                fileCardLabel = TextView(context).apply {
+                    text = "No file selected"
+                    textSize = 14f
+                }
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    addView(fileCardIcon, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(fileCardLabel, LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                }
+                card.addView(row, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                card.addView(browseFileButton, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+            addView(fileCardView, lp)
+
             addView(retryButton, lp)
             addView(pickFolderButton, lp)
 
@@ -330,6 +391,13 @@ class MainActivity : Activity() {
                     .apply()
             }
             addView(radioGroup, lp)
+
+            modeHintView = TextView(context).apply {
+                visibility = View.GONE
+                textSize = 13f
+                setPadding(p, p / 2, p, p / 2)
+            }
+            addView(modeHintView, lp)
 
             // Signature
             val sig = TextView(context).apply {
@@ -384,16 +452,12 @@ class MainActivity : Activity() {
                 val isRecent = System.currentTimeMillis() - savedTs <= recentIdMaxAgeMs
                 if (savedId.isNotBlank() && isRecent) {
                     idInput.setText(savedId)
-                    idInput.visibility = View.VISIBLE
-                    retryButton.visibility = View.VISIBLE
-                    browseFileButton.visibility = View.VISIBLE
-                    openPlayerButton.visibility = View.VISIBLE
-                    setStatus("Welcome back.\nLast video ID: $savedId\n\nShare or browse a video file to process it.")
+                    idCardState = CardState.CHECKING
+                    updateCards()
+                    setStatus("Welcome back — last ID: $savedId\n\nShare or browse a video file to process it.")
                     fetchSegmentsForId(savedId)
                 } else {
-                    browseFileButton.visibility = View.VISIBLE
-                    openPlayerButton.visibility = View.VISIBLE
-                    setStatus("Waiting for a shared video from PipePipe/NewPipe.\n\nOr browse for a video file below.\n\nTip: tap '💡' to learn how to get a YouTube ID.")
+                    setStatus("Paste a YouTube URL or ID above, then browse for your video file.")
                 }
             }
         }
@@ -410,18 +474,20 @@ class MainActivity : Activity() {
         }
         val uri = Uri.parse(uriString)
         pendingUri = uri
+        fileCardState = CardState.OK
+        runOnUiThread {
+            fileCardLabel.text = "📄 ${uri.lastPathSegment ?: uriString}"
+            browseFileButton.text = "📁 Change file…"
+        }
 
         if (videoId.length == 11) {
             idInput.setText(videoId)
-            idInput.visibility = View.VISIBLE
-            retryButton.visibility = View.VISIBLE
-            setStatus("PipePipe/NewPipe integration ✓\nFile: $uri\nID: $videoId\n\nVerify and tap process.")
+            idCardState = CardState.CHECKING
+            updateCards()
+            setStatus("PipePipe/NewPipe ✓\nFetching segments for ID: $videoId")
             fetchSegmentsForId(videoId)
         } else {
-            idInput.setText("")
-            idInput.visibility = View.VISIBLE
-            retryButton.visibility = View.VISIBLE
-            setStatus("PipePipe/NewPipe integration ✓\nFile: $uri\nNo video ID provided — paste it below.")
+            setStatus("PipePipe/NewPipe ✓\nNo video ID provided — paste it in the field above.")
         }
     }
 
@@ -436,12 +502,9 @@ class MainActivity : Activity() {
             val videoId = extractIdFromIntent(intent, Uri.EMPTY)
             if (videoId.isNotBlank()) {
                 saveId(videoId)  // save now so file-share later will find it
-                runOnUiThread {
-                    browseFileButton.visibility = View.VISIBLE
-                    openPlayerButton.visibility = View.GONE
-                    idInput.setText(videoId)
-                    idInput.visibility = View.VISIBLE
-                }
+                runOnUiThread { idInput.setText(videoId) }
+                idCardState = CardState.CHECKING
+                updateCards()
                 setStatus("✓ YouTube ID captured: $videoId\n\nNow browse to your downloaded video file.")
                 fetchSegmentsForId(videoId)
                 return
@@ -451,6 +514,12 @@ class MainActivity : Activity() {
         }
 
         pendingUri = uri
+        fileCardState = CardState.OK
+        val sharedFileName = FileResolver.getDisplayName(this, uri).ifBlank { uri.lastPathSegment ?: "file" }
+        runOnUiThread {
+            fileCardLabel.text = "📄 $sharedFileName"
+            browseFileButton.text = "📁 Change file…"
+        }
         var idSource = "intent"
         var videoId = extractIdFromIntent(intent, uri)
 
@@ -480,19 +549,15 @@ class MainActivity : Activity() {
         if (videoId.isNotBlank()) saveId(videoId)
 
         idInput.setText(videoId)
-        idInput.visibility = View.VISIBLE
-        retryButton.visibility = View.VISIBLE
-        browseFileButton.visibility = View.GONE
         if (videoId.isBlank()) {
-            openPlayerButton.visibility = View.VISIBLE
-            browseFileButton.visibility = View.VISIBLE
-            setStatus("URI: $uri\nNo YouTube ID detected.\nPaste a URL/ID below, or open your player to copy the URL.\nOr tap '📁 Browse…' to pick a different file.")
+            setStatus("No YouTube ID detected.\nPaste a URL/ID in the field above.")
         } else {
-            openPlayerButton.visibility = View.GONE
             val sourceLabel = if (idSource == "memory") "⚠️ from memory — verify!" else "source: $idSource"
-            setStatus("URI: $uri\nID: $videoId ($sourceLabel)\nVerify then tap process.\n\nTip: tap '📁 Browse…' below to swap file if needed.")
-            browseFileButton.visibility = View.VISIBLE
-            fetchSegmentsForId(videoId)
+            setStatus("ID: $videoId ($sourceLabel)\nFetching title and segments…")
+            idCardState = CardState.CHECKING
+            updateCards()
+            fetchSegmentsForId(videoId, force = true)
+            applyModeRecommendation()
         }
     }
 
@@ -548,10 +613,11 @@ class MainActivity : Activity() {
             progressBar.visibility = if (active) View.VISIBLE else View.GONE
             if (!active) {
                 progressBar.progress = 0
-                // Restore buttons that may have been hidden before processing started
-                browseFileButton.visibility = View.VISIBLE
-                retryButton.visibility = View.VISIBLE
-                idInput.visibility = View.VISIBLE
+                // Re-enable controls; retryButton state managed by updateCards()
+                val nonRetry = listOf(browseFileButton, openPlayerButton, pickFolderButton,
+                    idInput, radioFast, radioAccurate)
+                for (v in nonRetry) { v.isEnabled = true; v.alpha = 1f }
+                updateCards()
             }
         }
     }
@@ -607,13 +673,20 @@ class MainActivity : Activity() {
     }
 
     /** Fetch SponsorBlock segments for [videoId] in background; update UI when done. */
-    private fun fetchSegmentsForId(videoId: String) {
+    private fun fetchSegmentsForId(videoId: String, force: Boolean = false) {
         if (videoId.length != 11) return
-        if (videoId == lastFetchedId) return
+        if (!force && videoId == lastFetchedId) return
         lastFetchedId = videoId
         cachedSegments = null
         cachedTitle = null
         cachedAuthor = null
+        runOnUiThread {
+            modeHintView.visibility = View.GONE
+            highlightRadio(radioFast, false)
+            highlightRadio(radioAccurate, false)
+            idCardState = CardState.CHECKING
+            updateCards()
+        }
         runOnUiThread {
             retryButton.isEnabled = false
             retryButton.alpha = 0.5f
@@ -646,7 +719,16 @@ class MainActivity : Activity() {
             cachedSegments = segments
             cachedTitle = title
             cachedAuthor = author
-            runOnUiThread { applySegmentUiState(videoId, segments, title, author) }
+            runOnUiThread {
+                idCardState = when {
+                    segments == null -> CardState.OK   // network error — fail open
+                    segments.isEmpty() -> CardState.ERROR
+                    else -> CardState.OK
+                }
+                applySegmentUiState(videoId, segments, title, author)
+                updateCards()
+                applyModeRecommendation()
+            }
         }.start()
     }
 
@@ -680,7 +762,7 @@ class MainActivity : Activity() {
                     "  [${it.category}] ${"%.1f".format(it.start)}s – ${"%.1f".format(it.end)}s (~${"%.0f".format(it.end - it.start)}s)"
                 }
                 val totalCut = segments.sumOf { it.end - it.start }
-                val note = "✅ ${segments.size} segment(s) to cut (~${"%.1f".format(totalCut)}s):\n$summary"
+                val note = "🔍 ${segments.size} segment(s) to cut (~${"%.1f".format(totalCut)}s):\n$summary"
                 // Replace full status with: title + note (clean, no stacking)
                 val currentStatus = statusView.text?.toString().orEmpty()
                 val baseStatus = when {
@@ -697,6 +779,141 @@ class MainActivity : Activity() {
                     (if (baseStatus.isNotBlank() && !baseStatus.startsWith("\"")) baseStatus + "\n\n" else "") +
                     note
             }
+        }
+    }
+
+    private fun makeCard(p: Int, bgColor: Int): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(p, p * 3 / 4, p, p * 3 / 4)
+            val margin = (8 * resources.displayMetrics.density).toInt()
+            val shape = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 12f * resources.displayMetrics.density
+                setColor(bgColor)
+                setStroke((1.5f * resources.displayMetrics.density).toInt(), 0x44FFFFFF)
+            }
+            background = shape
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(margin, margin / 2, margin, margin / 2)
+            layoutParams = lp
+        }
+    }
+
+    private fun cardColor(state: CardState): Int = when (state) {
+        CardState.PENDING -> 0x44888888
+        CardState.CHECKING -> 0x44CCAA00
+        CardState.OK -> 0x4400AA44
+        CardState.ERROR -> 0x44CC3333
+    }
+
+    private fun cardBorder(state: CardState): Int = when (state) {
+        CardState.PENDING -> 0x88888888.toInt()
+        CardState.CHECKING -> 0xFFCCAA00.toInt()
+        CardState.OK -> 0xFF00CC44.toInt()
+        CardState.ERROR -> 0xFFCC3333.toInt()
+    }
+
+    private fun cardIcon(state: CardState): String = when (state) {
+        CardState.PENDING -> "⏳"
+        CardState.CHECKING -> "⏳"
+        CardState.OK -> "✅"
+        CardState.ERROR -> "❌"
+    }
+
+    private fun applyCardState(card: LinearLayout, icon: TextView, state: CardState) {
+        val shape = android.graphics.drawable.GradientDrawable().apply {
+            this.shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 12f * resources.displayMetrics.density
+            setColor(cardColor(state))
+            setStroke((1.5f * resources.displayMetrics.density).toInt(), cardBorder(state))
+        }
+        card.background = shape
+        icon.text = cardIcon(state)
+    }
+
+    /** Re-evaluate both card states and enable/disable the Process button accordingly. */
+    private fun updateCards() {
+        runOnUiThread {
+            applyCardState(idCardView, idCardIcon, idCardState)
+            applyCardState(fileCardView, fileCardIcon, fileCardState)
+            val bothOk = idCardState == CardState.OK && fileCardState == CardState.OK
+            retryButton.isEnabled = bothOk
+            retryButton.alpha = if (bothOk) 1f else 0.5f
+            retryButton.text = when {
+                idCardState == CardState.CHECKING -> "Checking SponsorBlock…"
+                idCardState == CardState.ERROR -> "No segments — cannot process"
+                !bothOk -> "Process with this ID"
+                else -> "▶ Process with this ID"
+            }
+        }
+    }
+
+    private fun applyModeRecommendation() {
+        val uri = pendingUri ?: return
+        Thread {
+            // Use MediaMetadataRetriever for fast duration + mime check — no ffprobe needed
+            var durationMs: Long? = null
+            var isAudio = false
+            try {
+                val mmr = android.media.MediaMetadataRetriever()
+                mmr.setDataSource(this, uri)
+                durationMs = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                val mime = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
+                isAudio = mime.startsWith("audio/") ||
+                    mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes"
+                mmr.release()
+            } catch (e: Exception) {
+                Log.w(tag, "MediaMetadataRetriever failed: ${e.message}")
+            }
+
+            val durationMin = if (durationMs != null) durationMs / 60000.0 else null
+
+            val (hint, recommendFast) = when {
+                isAudio ->
+                    "💡 Fast recommended — audio files gain nothing from frame-accurate mode.\n" +
+                    "Fast stream-copies with ~0.1s precision and results in a smaller file." to true
+                durationMin != null && durationMin > 30 ->
+                    "💡 Fast recommended — frame-accurate re-encodes the full video (1–3h on a phone).\n" +
+                    "Fast mode takes under a minute, cuts within ~2s, and results in a smaller file." to true
+                else -> "" to false
+            }
+
+            runOnUiThread {
+                if (hint.isBlank()) {
+                    modeHintView.visibility = View.GONE
+                    highlightRadio(radioFast, false)
+                    highlightRadio(radioAccurate, false)
+                } else {
+                    modeHintView.text = hint
+                    modeHintView.visibility = View.VISIBLE
+                    highlightRadio(radioFast, recommendFast)
+                    highlightRadio(radioAccurate, !recommendFast)
+                }
+            }
+        }.start()
+    }
+
+    private fun highlightRadio(button: RadioButton, recommended: Boolean) {
+        if (recommended) {
+            // Orange glow: rounded rectangle background
+            val shape = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 12f * resources.displayMetrics.density
+                setStroke((2 * resources.displayMetrics.density).toInt(), 0xFFFF8C00.toInt())
+                setColor(0x22FF8C00.toInt())
+            }
+            button.background = shape
+            button.setTextColor(0xFFFF8C00.toInt())
+        } else {
+            button.background = null
+            button.setTextColor(android.graphics.Color.WHITE.also {
+                // Use default text color from theme
+                val ta = obtainStyledAttributes(intArrayOf(android.R.attr.textColorPrimary))
+                button.setTextColor(ta.getColor(0, android.graphics.Color.WHITE))
+                ta.recycle()
+            })
         }
     }
 
@@ -735,46 +952,5 @@ class MainActivity : Activity() {
         runOnUiThread { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
