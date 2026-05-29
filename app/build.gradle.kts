@@ -1,4 +1,5 @@
 import java.net.URI
+import java.security.MessageDigest
 
 plugins {
     id("com.android.application")
@@ -24,6 +25,7 @@ val largeFiles = listOf(
 val downloadLargeFiles by tasks.registering {
     group = "setup"
     description = "Downloads large binary files (AAR, etc.) if they are not present in libs/."
+    notCompatibleWithConfigurationCache("Downloads files at execution time")
 
     doLast {
         val libsDir = file("libs")
@@ -45,12 +47,12 @@ val downloadLargeFiles by tasks.registering {
 
             // Optional SHA-256 verification
             if (lf.sha256 != null) {
-                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                val digest = MessageDigest.getInstance("SHA-256")
                 val hash = dest.inputStream().use { stream ->
                     val buffer = ByteArray(8192)
-                    var read: Int
-                    while (stream.read(buffer).also { read = it } != -1) digest.update(buffer, 0, read)
-                    digest.digest().joinToString("") { "%02x".format(it) }
+                    var bytesRead: Int
+                    while (stream.read(buffer).also { bytesRead = it } != -1) digest.update(buffer, 0, bytesRead)
+                    digest.digest().joinToString("") { b -> "%02x".format(b) }
                 }
                 check(hash == lf.sha256) {
                     dest.delete()
