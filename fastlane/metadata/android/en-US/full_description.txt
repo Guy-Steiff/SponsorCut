@@ -1,0 +1,21 @@
+SponsorCut removes sponsor segments, intros, outros, and other skippable sections from locally downloaded YouTube videos using SponsorBlock crowd-sourced data.
+
+How it works:
+1. Download a YouTube video using PipePipe, NewPipe, or any other tool.
+2. Share the video file to SponsorCut, or browse to it using the in-app file picker.
+3. Paste the YouTube URL or video ID so SponsorCut can look up SponsorBlock segments.
+4. Tap Process — the app cuts the segments and saves a clean file.
+
+Features:
+• Fast mode (stream copy) — no re-encode, cuts in seconds
+• Frame-accurate mode — re-encodes for exact frame-level cuts
+• Automatically recommends Fast mode for long videos and audio files
+• Progress bar with time remaining estimate (linear regression model)
+• Remembers last video ID and file across sessions
+• Works fully offline after segment data is fetched
+• No ads, no tracking, no account required
+
+Optional: after a successful job, a donation prompt is shown with a Buy Me a Coffee link and a Bitcoin address. This is entirely voluntary and can be ignored.
+
+Source: https://github.com/Guy-Steiff/SponsorCut
+
