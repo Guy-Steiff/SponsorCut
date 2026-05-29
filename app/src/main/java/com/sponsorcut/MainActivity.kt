@@ -68,6 +68,8 @@ class MainActivity : Activity() {
     private val keyLastVideoIdTs = "last_video_id_ts"
     private val keyOutputFolderUri = "output_folder_uri"
     private val keyFrameAccurate = "frame_accurate"
+    private val keyLastFileUri = "last_file_uri"
+    private val keyLastFileName = "last_file_name"
     private val recentIdMaxAgeMs = 7 * 24 * 60 * 60 * 1000L  // 7 days
     private val tag = "SponsorCut"
     private val pickFolderRequestCode = 42
@@ -177,6 +179,7 @@ class MainActivity : Activity() {
             val fileName = FileResolver.getDisplayName(this, fileUri).ifBlank { fileUri.lastPathSegment ?: "file" }
             fileCardLabel.text = "📄 $fileName"
             browseFileButton.text = "📁 Change file…"
+            saveFileUri(fileUri, fileName)
             updateCards()
 
             // Priority 1: whatever is already typed/shown in idInput (covers the URL-share→browse flow)
@@ -454,9 +457,11 @@ class MainActivity : Activity() {
                     idInput.setText(savedId)
                     idCardState = CardState.CHECKING
                     updateCards()
+                    restoreLastFileUri()
                     setStatus("Welcome back — last ID: $savedId\n\nShare or browse a video file to process it.")
                     fetchSegmentsForId(savedId)
                 } else {
+                    restoreLastFileUri()
                     setStatus("Paste a YouTube URL or ID above, then browse for your video file.")
                 }
             }
@@ -495,8 +500,11 @@ class MainActivity : Activity() {
         Log.d(tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
             "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
             "EXTRA_STREAM=${intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)}")
-        val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+        val rawUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
             ?: intent.clipData?.getItemAt(0)?.uri
+
+        // Discard share-sheet image previews (e.g. android_share_sheet_image_preview.jpg)
+        val uri = if (rawUri != null && isImageUri(rawUri)) null else rawUri
 
         if (uri == null) {
             val videoId = extractIdFromIntent(intent, Uri.EMPTY)
@@ -505,6 +513,8 @@ class MainActivity : Activity() {
                 runOnUiThread { idInput.setText(videoId) }
                 idCardState = CardState.CHECKING
                 updateCards()
+                // Restore last known file if we have one
+                restoreLastFileUri()
                 setStatus("✓ YouTube ID captured: $videoId\n\nNow browse to your downloaded video file.")
                 fetchSegmentsForId(videoId)
                 return
@@ -520,6 +530,7 @@ class MainActivity : Activity() {
             fileCardLabel.text = "📄 $sharedFileName"
             browseFileButton.text = "📁 Change file…"
         }
+        saveFileUri(uri, sharedFileName)
         var idSource = "intent"
         var videoId = extractIdFromIntent(intent, uri)
 
@@ -627,6 +638,35 @@ class MainActivity : Activity() {
             .putString(keyLastVideoId, videoId)
             .putLong(keyLastVideoIdTs, System.currentTimeMillis())
             .apply()
+    }
+
+    private fun saveFileUri(uri: Uri, displayName: String) {
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .putString(keyLastFileUri, uri.toString())
+            .putString(keyLastFileName, displayName)
+            .apply()
+    }
+
+    /** Restores last known file URI from prefs if pendingUri is still null. Shows it with a note. */
+    private fun restoreLastFileUri() {
+        if (pendingUri != null) return  // already have a file, don't overwrite
+        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+        val uriString = prefs.getString(keyLastFileUri, null) ?: return
+        val fileName = prefs.getString(keyLastFileName, null) ?: "previous file"
+        val uri = Uri.parse(uriString)
+        pendingUri = uri
+        fileCardState = CardState.OK
+        runOnUiThread {
+            fileCardLabel.text = "📄 $fileName"
+            browseFileButton.text = "📁 Change file…"
+            updateCards()
+        }
+    }
+
+    /** Returns true if the URI is an image (e.g. share-sheet preview JPG) — should be ignored as a file input. */
+    private fun isImageUri(uri: Uri): Boolean {
+        val mimeType = contentResolver.getType(uri) ?: return false
+        return mimeType.startsWith("image/")
     }
 
     private fun extractIdFromIntent(intent: Intent, uri: Uri): String {
