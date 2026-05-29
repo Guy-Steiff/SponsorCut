@@ -45,11 +45,16 @@ object FfmpegEngine {
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
 
-        // Linear regression state: fit processing_time_s = a * segment_duration_s (through origin).
-        // Least-squares estimate: a = Σ(xᵢ·yᵢ) / Σ(xᵢ²)
-        // After each completed segment we add the point (duration_s, actual_processing_s).
-        var sumXY = 0.0   // Σ(duration * processingTime)
-        var sumX2 = 0.0   // Σ(duration²)
+        // Linear regression state: fit processing_time_s = a * segment_duration_s + b
+        // With 1 point: forced through origin (b=0), a = y1/x1
+        // With 2+ points: full least-squares, both a and b free.
+        //   a = (n·ΣXY - ΣX·ΣY) / (n·ΣX² - (ΣX)²)
+        //   b = (ΣY - a·ΣX) / n
+        var regN  = 0
+        var regSX = 0.0   // Σx
+        var regSY = 0.0   // Σy
+        var regSXY= 0.0   // Σ(x·y)
+        var regSX2= 0.0   // Σ(x²)
 
         // Preserve source container for stream-copy; use mp4 for re-encode
         // (WebM/MKV don't support H264/AAC so re-encode must target mp4)
@@ -86,10 +91,23 @@ object FfmpegEngine {
 
                 val elapsed = System.currentTimeMillis() - jobStartMs
 
-                // ETA: use fitted a if we have at least one data point, else no estimate.
-                // Predict remaining time = a * Σ(remaining segment durations)
-                val a = if (sumX2 > 0.0) sumXY / sumX2 else null
-                val etaMs: Long? = if (a != null && duration != null) {
+                // ETA: derive (a, b) from accumulated points, predict remaining time.
+                // 1 point  → origin model: a = y/x, b = 0
+                // 2+ points → full least-squares: a and b both free
+                val (regA, regB) = when {
+                    regN == 0 -> null to null
+                    regN == 1 -> (regSY / regSX) to 0.0
+                    else -> {
+                        val denom = regN * regSX2 - regSX * regSX
+                        if (denom == 0.0) null to null
+                        else {
+                            val a = (regN * regSXY - regSX * regSY) / denom
+                            val b = (regSY - a * regSX) / regN
+                            a to b
+                        }
+                    }
+                }
+                val etaMs: Long? = if (regA != null && regB != null) {
                     val remainingDuration = keepRanges
                         .drop(idx)  // current + future segments
                         .mapNotNull { (s, e) ->
@@ -100,7 +118,10 @@ object FfmpegEngine {
                             }
                         }
                         .sum()
-                    (a * remainingDuration * 1000).toLong().coerceAtLeast(0L)
+                    val remainingSegments = keepRanges.drop(idx).size
+                    // Sum of per-segment predictions: each gets a*duration + b
+                    val predictedSec = regA * remainingDuration + regB * remainingSegments
+                    (predictedSec * 1000).toLong().coerceAtLeast(0L)
                 } else null
 
                 val stats = if (completedCount > 0) buildString {
@@ -140,10 +161,21 @@ object FfmpegEngine {
                     // Update regression: add point (segment_duration_s, actual_processing_s)
                     if (duration != null && duration > 0.01) {
                         val processingTimeSec = (System.currentTimeMillis() - segStartMs) / 1000.0
-                        sumXY += duration * processingTimeSec
-                        sumX2 += duration * duration
-                        val aUpdated = sumXY / sumX2
-                        DiagLog.append("Engine", "Regression update: duration=%.2fs proc=%.2fs a=%.4f".format(duration, processingTimeSec, aUpdated))
+                        regN++
+                        regSX  += duration
+                        regSY  += processingTimeSec
+                        regSXY += duration * processingTimeSec
+                        regSX2 += duration * duration
+                        // Log current model
+                        val logMsg = if (regN == 1) {
+                            "a=%.4f b=0 (1-point, origin)".format(regSY / regSX)
+                        } else {
+                            val denom = regN * regSX2 - regSX * regSX
+                            val a = if (denom != 0.0) (regN * regSXY - regSX * regSY) / denom else 0.0
+                            val b = (regSY - a * regSX) / regN
+                            "a=%.4f b=%.4f (n=$regN)".format(a, b)
+                        }
+                        DiagLog.append("Engine", "Regression: duration=%.2fs proc=%.2fs $logMsg".format(duration, processingTimeSec))
                     }
 
                     onProgressNumeric?.invoke(idx + 1, total)
