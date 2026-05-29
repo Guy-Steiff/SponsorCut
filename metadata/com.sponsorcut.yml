@@ -22,7 +22,7 @@ Repo: https://github.com/Guy-Steiff/SponsorCut
 Builds:
   - versionName: '1.0'
     versionCode: 1
-    commit: v1.0.0
+    commit: 06f6a5d6426e798b89bafa4f4825e9678f81616e
     subdir: app
     gradle:
       - yes
