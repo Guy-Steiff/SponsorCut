@@ -40,9 +40,9 @@ class MainActivity : Activity() {
     private lateinit var browseFileButton: Button
     private lateinit var openPlayerButton: Button
     private lateinit var cancelButton: Button
-    private lateinit var radioGroup: RadioGroup
     private lateinit var logButton: Button
     private lateinit var logView: TextView
+    private lateinit var donationView: LinearLayout
     private lateinit var modeHintView: TextView
     private lateinit var idCardView: LinearLayout
     private lateinit var idCardIcon: TextView
@@ -68,6 +68,8 @@ class MainActivity : Activity() {
     private val keyLastVideoIdTs = "last_video_id_ts"
     private val keyOutputFolderUri = "output_folder_uri"
     private val keyFrameAccurate = "frame_accurate"
+    private val keyLastFileUri = "last_file_uri"
+    private val keyLastFileName = "last_file_name"
     private val recentIdMaxAgeMs = 7 * 24 * 60 * 60 * 1000L  // 7 days
     private val tag = "SponsorCut"
     private val pickFolderRequestCode = 42
@@ -94,6 +96,9 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     setProcessingUi(active = false)
                     logButton.visibility = View.VISIBLE
+                    if (done && !error && !cancelled) {
+                        donationView.visibility = View.VISIBLE
+                    }
                 }
             } else {
                 runOnUiThread { startDotAnim(text) }
@@ -177,6 +182,7 @@ class MainActivity : Activity() {
             val fileName = FileResolver.getDisplayName(this, fileUri).ifBlank { fileUri.lastPathSegment ?: "file" }
             fileCardLabel.text = "📄 $fileName"
             browseFileButton.text = "📁 Change file…"
+            saveFileUri(fileUri, fileName)
             updateCards()
 
             // Priority 1: whatever is already typed/shown in idInput (covers the URL-share→browse flow)
@@ -193,7 +199,7 @@ class MainActivity : Activity() {
             idInput.setText(videoId)
             idInput.visibility = View.VISIBLE
             retryButton.visibility = View.VISIBLE
-            browseFileButton.visibility = View.GONE
+            browseFileButton.visibility = View.VISIBLE
             if (videoId.isBlank())
                 setStatus("File selected ✓\nNo YouTube ID — paste URL or 11-char ID below, then tap Process.")
             else {
@@ -298,7 +304,7 @@ class MainActivity : Activity() {
         openPlayerButton = Button(this).apply {
             text = "💡 How to get the YouTube ID"
             setOnClickListener {
-                toast("In PipePipe/NewPipe: long-press the video → Share → copy the YouTube URL. Then paste it in the field above.")
+                toast("In PipePipe/NewPipe/YouTube website: long-press the video → Share → copy the YouTube URL. Then paste it in the field above.")
             }
         }
 
@@ -366,7 +372,7 @@ class MainActivity : Activity() {
             }
             addView(modeLabel, lp)
 
-            radioGroup = RadioGroup(context).apply {
+            val radioGroup = RadioGroup(context).apply {
                 orientation = RadioGroup.VERTICAL
                 setPadding(p, 0, p, 0)
             }
@@ -431,6 +437,67 @@ class MainActivity : Activity() {
                 setTextColor(0xFFCCCCCC.toInt())
             }
             addView(logView, lp)
+
+            // ── Donation footer — hidden until a successful job completes ──────
+            donationView = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = View.GONE
+                setPadding(p, p, p, p)
+                setBackgroundColor(0xFF1A1A2E.toInt())
+
+                val title = TextView(context).apply {
+                    text = "☕ SponsorCut is free & open-source"
+                    textSize = 14f
+                    setTextColor(0xFFFFFFFF.toInt())
+                    setPadding(0, 0, 0, p / 2)
+                }
+                addView(title, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                val subtitle = TextView(context).apply {
+                    text = "If it saved you time, consider supporting development:"
+                    textSize = 12f
+                    setTextColor(0xFFCCCCCC.toInt())
+                    setPadding(0, 0, 0, p)
+                }
+                addView(subtitle, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                val coffeeBtn = Button(context).apply {
+                    text = "☕ Buy Me a Coffee"
+                    setOnClickListener {
+                        val i = android.content.Intent(android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://buymeacoffee.com/steiff"))
+                        startActivity(i)
+                    }
+                }
+                addView(coffeeBtn, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                val btcAddress = "bc1qqz6dxwc38lrhmp6u9880alkvretwv2d6ds5had"
+                val btcLabel = TextView(context).apply {
+                    text = "₿ Bitcoin: $btcAddress"
+                    textSize = 11f
+                    setTextColor(0xFFAAAAAA.toInt())
+                    setTextIsSelectable(true)
+                    setPadding(0, p, 0, p / 4)
+                    typeface = android.graphics.Typeface.MONOSPACE
+                }
+                addView(btcLabel, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                val btcCopyBtn = Button(context).apply {
+                    text = "📋 Copy Bitcoin address"
+                    setOnClickListener {
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("Bitcoin address", btcAddress))
+                        android.widget.Toast.makeText(context, "Bitcoin address copied ✓", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+                addView(btcCopyBtn, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+            addView(donationView, lp)
         }
 
         val scroll = ScrollView(this).apply {
@@ -454,9 +521,11 @@ class MainActivity : Activity() {
                     idInput.setText(savedId)
                     idCardState = CardState.CHECKING
                     updateCards()
+                    restoreLastFileUri()
                     setStatus("Welcome back — last ID: $savedId\n\nShare or browse a video file to process it.")
                     fetchSegmentsForId(savedId)
                 } else {
+                    restoreLastFileUri()
                     setStatus("Paste a YouTube URL or ID above, then browse for your video file.")
                 }
             }
@@ -495,8 +564,11 @@ class MainActivity : Activity() {
         Log.d(tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
             "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
             "EXTRA_STREAM=${intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)}")
-        val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+        val rawUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
             ?: intent.clipData?.getItemAt(0)?.uri
+
+        // Discard share-sheet image previews (e.g. android_share_sheet_image_preview.jpg)
+        val uri = if (rawUri != null && isImageUri(rawUri)) null else rawUri
 
         if (uri == null) {
             val videoId = extractIdFromIntent(intent, Uri.EMPTY)
@@ -505,6 +577,8 @@ class MainActivity : Activity() {
                 runOnUiThread { idInput.setText(videoId) }
                 idCardState = CardState.CHECKING
                 updateCards()
+                // Restore last known file if we have one
+                restoreLastFileUri()
                 setStatus("✓ YouTube ID captured: $videoId\n\nNow browse to your downloaded video file.")
                 fetchSegmentsForId(videoId)
                 return
@@ -520,6 +594,7 @@ class MainActivity : Activity() {
             fileCardLabel.text = "📄 $sharedFileName"
             browseFileButton.text = "📁 Change file…"
         }
+        saveFileUri(uri, sharedFileName)
         var idSource = "intent"
         var videoId = extractIdFromIntent(intent, uri)
 
@@ -627,6 +702,35 @@ class MainActivity : Activity() {
             .putString(keyLastVideoId, videoId)
             .putLong(keyLastVideoIdTs, System.currentTimeMillis())
             .apply()
+    }
+
+    private fun saveFileUri(uri: Uri, displayName: String) {
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .putString(keyLastFileUri, uri.toString())
+            .putString(keyLastFileName, displayName)
+            .apply()
+    }
+
+    /** Restores last known file URI from prefs if pendingUri is still null. Shows it with a note. */
+    private fun restoreLastFileUri() {
+        if (pendingUri != null) return  // already have a file, don't overwrite
+        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+        val uriString = prefs.getString(keyLastFileUri, null) ?: return
+        val fileName = prefs.getString(keyLastFileName, null) ?: "previous file"
+        val uri = Uri.parse(uriString)
+        pendingUri = uri
+        fileCardState = CardState.OK
+        runOnUiThread {
+            fileCardLabel.text = "📄 $fileName"
+            browseFileButton.text = "📁 Change file…"
+            updateCards()
+        }
+    }
+
+    /** Returns true if the URI is an image (e.g. share-sheet preview JPG) — should be ignored as a file input. */
+    private fun isImageUri(uri: Uri): Boolean {
+        val mimeType = contentResolver.getType(uri) ?: return false
+        return mimeType.startsWith("image/")
     }
 
     private fun extractIdFromIntent(intent: Intent, uri: Uri): String {

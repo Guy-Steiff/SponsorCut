@@ -45,6 +45,17 @@ object FfmpegEngine {
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
 
+        // Linear regression state: fit processing_time_s = a * segment_duration_s + b
+        // With 1 point: forced through origin (b=0), a = y1/x1
+        // With 2+ points: full least-squares, both a and b free.
+        //   a = (n·ΣXY - ΣX·ΣY) / (n·ΣX² - (ΣX)²)
+        //   b = (ΣY - a·ΣX) / n
+        var regN  = 0
+        var regSX = 0.0   // Σx
+        var regSY = 0.0   // Σy
+        var regSXY= 0.0   // Σ(x·y)
+        var regSX2= 0.0   // Σ(x²)
+
         // Preserve source container for stream-copy; use mp4 for re-encode
         // (WebM/MKV don't support H264/AAC so re-encode must target mp4)
         val isCopyAll = plan.canCopyVideo && plan.canCopyAudio
@@ -52,7 +63,11 @@ object FfmpegEngine {
 
         fun formatDuration(ms: Long): String {
             val s = ms / 1000
-            return if (s < 60) "${s}s" else "%dm%02ds".format(s / 60, s % 60)
+            return when {
+                s < 60   -> "${s}s"
+                s < 3600 -> "%dm%02ds".format(s / 60, s % 60)
+                else     -> "%dh%02dm".format(s / 3600, (s % 3600) / 60)
+            }
         }
 
         try {
@@ -75,8 +90,40 @@ object FfmpegEngine {
                 val partFile = File(cacheDir, "part_${idx}_${System.currentTimeMillis()}.$ext")
 
                 val elapsed = System.currentTimeMillis() - jobStartMs
-                val rate = if (elapsed > 0 && completedCount > 0) completedCount / (elapsed / 1000.0) else 0.0
-                val etaMs = if (rate > 0) (((total - completedCount) / rate) * 1000).toLong() else null
+
+                // ETA: derive (a, b) from accumulated points, predict remaining time.
+                // 1 point  → origin model: a = y/x, b = 0
+                // 2+ points → full least-squares: a and b both free
+                val (regA, regB) = when {
+                    regN == 0 -> null to null
+                    regN == 1 -> (regSY / regSX) to 0.0
+                    else -> {
+                        val denom = regN * regSX2 - regSX * regSX
+                        if (denom == 0.0) null to null
+                        else {
+                            val a = (regN * regSXY - regSX * regSY) / denom
+                            val b = (regSY - a * regSX) / regN
+                            a to b
+                        }
+                    }
+                }
+                val etaMs: Long? = if (regA != null && regB != null) {
+                    val remainingDuration = keepRanges
+                        .drop(idx)  // current + future segments
+                        .mapNotNull { (s, e) ->
+                            when {
+                                e != Double.MAX_VALUE -> e - s
+                                fileDurationSec != null -> (fileDurationSec - s).coerceAtLeast(0.1)
+                                else -> null
+                            }
+                        }
+                        .sum()
+                    val remainingSegments = keepRanges.drop(idx).size
+                    // Sum of per-segment predictions: each gets a*duration + b
+                    val predictedSec = regA * remainingDuration + regB * remainingSegments
+                    (predictedSec * 1000).toLong().coerceAtLeast(0L)
+                } else null
+
                 val stats = if (completedCount > 0) buildString {
                     append("${completedCount}/$total done [${formatDuration(elapsed)} elapsed")
                     if (etaMs != null) append(", ~${formatDuration(etaMs)} left")
@@ -88,6 +135,8 @@ object FfmpegEngine {
                 )
                 onProgressNumeric?.invoke(idx, total)
                 onProgress?.invoke(label)
+
+                val segStartMs = System.currentTimeMillis()
 
                 var rc = executeSegment(input, partFile, keepStart, duration, plan, slowSeek = false)
 
@@ -108,6 +157,27 @@ object FfmpegEngine {
                 if (partFile.exists() && partFile.length() > 0) {
                     parts += partFile
                     completedCount++
+
+                    // Update regression: add point (segment_duration_s, actual_processing_s)
+                    if (duration != null && duration > 0.01) {
+                        val processingTimeSec = (System.currentTimeMillis() - segStartMs) / 1000.0
+                        regN++
+                        regSX  += duration
+                        regSY  += processingTimeSec
+                        regSXY += duration * processingTimeSec
+                        regSX2 += duration * duration
+                        // Log current model
+                        val logMsg = if (regN == 1) {
+                            "a=%.4f b=0 (1-point, origin)".format(regSY / regSX)
+                        } else {
+                            val denom = regN * regSX2 - regSX * regSX
+                            val a = if (denom != 0.0) (regN * regSXY - regSX * regSY) / denom else 0.0
+                            val b = (regSY - a * regSX) / regN
+                            "a=%.4f b=%.4f (n=$regN)".format(a, b)
+                        }
+                        DiagLog.append("Engine", "Regression: duration=%.2fs proc=%.2fs $logMsg".format(duration, processingTimeSec))
+                    }
+
                     onProgressNumeric?.invoke(idx + 1, total)
                     onProgress?.invoke("Part ${idx + 1}/$total done ✓")
                 } else {

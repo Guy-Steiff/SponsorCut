@@ -1,0 +1,34 @@
+Categories:
+  - Multimedia
+
+License: GPL-3.0-only
+
+# Voluntary post-job donation prompt (Buy Me a Coffee + Bitcoin address).
+# No ads, no tracking, no required payment. Shown only after a successful job.
+AntiFeatures:
+  Ads:
+    en-US: Optional donation prompt shown after a successful processing job. No ads, no tracking, no payment required.
+
+AuthorName: Guy Steiff
+SourceCode: https://github.com/Guy-Steiff/SponsorCut
+IssueTracker: https://github.com/Guy-Steiff/SponsorCut/issues
+
+Name: SponsorCut
+AutoName: SponsorCut
+
+RepoType: git
+Repo: https://github.com/Guy-Steiff/SponsorCut
+
+Builds:
+  - versionName: '1.0'
+    versionCode: 1
+    commit: v1.0.0
+    subdir: app
+    gradle:
+      - yes
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: '1.0'
+CurrentVersionCode: 1
+
