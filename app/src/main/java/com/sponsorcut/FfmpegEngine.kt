@@ -45,6 +45,12 @@ object FfmpegEngine {
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
 
+        // Linear regression state: fit processing_time_s = a * segment_duration_s (through origin).
+        // Least-squares estimate: a = Σ(xᵢ·yᵢ) / Σ(xᵢ²)
+        // After each completed segment we add the point (duration_s, actual_processing_s).
+        var sumXY = 0.0   // Σ(duration * processingTime)
+        var sumX2 = 0.0   // Σ(duration²)
+
         // Preserve source container for stream-copy; use mp4 for re-encode
         // (WebM/MKV don't support H264/AAC so re-encode must target mp4)
         val isCopyAll = plan.canCopyVideo && plan.canCopyAudio
@@ -52,7 +58,11 @@ object FfmpegEngine {
 
         fun formatDuration(ms: Long): String {
             val s = ms / 1000
-            return if (s < 60) "${s}s" else "%dm%02ds".format(s / 60, s % 60)
+            return when {
+                s < 60   -> "${s}s"
+                s < 3600 -> "%dm%02ds".format(s / 60, s % 60)
+                else     -> "%dh%02dm".format(s / 3600, (s % 3600) / 60)
+            }
         }
 
         try {
@@ -75,8 +85,24 @@ object FfmpegEngine {
                 val partFile = File(cacheDir, "part_${idx}_${System.currentTimeMillis()}.$ext")
 
                 val elapsed = System.currentTimeMillis() - jobStartMs
-                val rate = if (elapsed > 0 && completedCount > 0) completedCount / (elapsed / 1000.0) else 0.0
-                val etaMs = if (rate > 0) (((total - completedCount) / rate) * 1000).toLong() else null
+
+                // ETA: use fitted a if we have at least one data point, else no estimate.
+                // Predict remaining time = a * Σ(remaining segment durations)
+                val a = if (sumX2 > 0.0) sumXY / sumX2 else null
+                val etaMs: Long? = if (a != null && duration != null) {
+                    val remainingDuration = keepRanges
+                        .drop(idx)  // current + future segments
+                        .mapNotNull { (s, e) ->
+                            when {
+                                e != Double.MAX_VALUE -> e - s
+                                fileDurationSec != null -> (fileDurationSec - s).coerceAtLeast(0.1)
+                                else -> null
+                            }
+                        }
+                        .sum()
+                    (a * remainingDuration * 1000).toLong().coerceAtLeast(0L)
+                } else null
+
                 val stats = if (completedCount > 0) buildString {
                     append("${completedCount}/$total done [${formatDuration(elapsed)} elapsed")
                     if (etaMs != null) append(", ~${formatDuration(etaMs)} left")
@@ -88,6 +114,8 @@ object FfmpegEngine {
                 )
                 onProgressNumeric?.invoke(idx, total)
                 onProgress?.invoke(label)
+
+                val segStartMs = System.currentTimeMillis()
 
                 var rc = executeSegment(input, partFile, keepStart, duration, plan, slowSeek = false)
 
@@ -108,6 +136,16 @@ object FfmpegEngine {
                 if (partFile.exists() && partFile.length() > 0) {
                     parts += partFile
                     completedCount++
+
+                    // Update regression: add point (segment_duration_s, actual_processing_s)
+                    if (duration != null && duration > 0.01) {
+                        val processingTimeSec = (System.currentTimeMillis() - segStartMs) / 1000.0
+                        sumXY += duration * processingTimeSec
+                        sumX2 += duration * duration
+                        val aUpdated = sumXY / sumX2
+                        DiagLog.append("Engine", "Regression update: duration=%.2fs proc=%.2fs a=%.4f".format(duration, processingTimeSec, aUpdated))
+                    }
+
                     onProgressNumeric?.invoke(idx + 1, total)
                     onProgress?.invoke("Part ${idx + 1}/$total done ✓")
                 } else {
