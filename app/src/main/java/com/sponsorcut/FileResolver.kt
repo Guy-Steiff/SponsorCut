@@ -55,6 +55,7 @@ object FileResolver {
 
     private fun mimeTypeFor(fileName: String): String = when {
         fileName.endsWith(".mkv", ignoreCase = true) -> "video/x-matroska"
+        fileName.endsWith(".webm", ignoreCase = true) -> "video/webm"
         fileName.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
         fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
         fileName.endsWith(".aac", ignoreCase = true) -> "audio/aac"
@@ -143,6 +144,17 @@ object FileResolver {
             val out = File(dir, fileName)
             Log.i(TAG, "Output target (fallback file): ${out.absolutePath}")
             return OutputTarget.FileTarget(out)
+        }
+    }
+
+    fun deleteOutputTarget(context: Context, target: OutputTarget) {
+        try {
+            when (target) {
+                is OutputTarget.FileTarget -> target.file.delete()
+                is OutputTarget.UriTarget -> context.contentResolver.delete(target.uri, null, null)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to delete output target: ${e.message}")
         }
     }
 

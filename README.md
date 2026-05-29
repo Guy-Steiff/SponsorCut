@@ -85,8 +85,11 @@ native caption API (`timedtext`).
 ### Prerequisites
 
 - JDK 17+ and Android SDK (compileSdk 34, minSdk 26)
-- `mobile-ffmpeg-full-gpl-4.4.LTS.aar` placed at `app/libs/`
-  ([download from mobile-ffmpeg releases](https://github.com/tanersener/mobile-ffmpeg/releases/tag/v4.4.LTS))
+
+> **No manual download needed.** The first time you build, Gradle will automatically download
+> `mobile-ffmpeg-full-gpl-4.4.LTS.aar` (~60 MB) from the official
+> [mobile-ffmpeg GitHub release](https://github.com/tanersener/mobile-ffmpeg/releases/tag/v4.4.LTS)
+> and save it to `app/libs/`. Subsequent builds skip the download.
 
 ```bash
 ./gradlew assembleDebug

@@ -45,8 +45,10 @@ object FfmpegEngine {
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
 
-        // Preserve source container extension for temp parts and concat output
-        val ext = input.extension.ifBlank { "mp4" }
+        // Preserve source container for stream-copy; use mp4 for re-encode
+        // (WebM/MKV don't support H264/AAC so re-encode must target mp4)
+        val isCopyAll = plan.canCopyVideo && plan.canCopyAudio
+        val ext = if (isCopyAll) input.extension.ifBlank { "mp4" } else "mp4"
 
         fun formatDuration(ms: Long): String {
             val s = ms / 1000
