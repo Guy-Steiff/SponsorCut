@@ -193,7 +193,7 @@ class MainActivity : Activity() {
             idInput.setText(videoId)
             idInput.visibility = View.VISIBLE
             retryButton.visibility = View.VISIBLE
-            browseFileButton.visibility = View.GONE
+            browseFileButton.visibility = View.VISIBLE
             if (videoId.isBlank())
                 setStatus("File selected ✓\nNo YouTube ID — paste URL or 11-char ID below, then tap Process.")
             else {
@@ -298,7 +298,7 @@ class MainActivity : Activity() {
         openPlayerButton = Button(this).apply {
             text = "💡 How to get the YouTube ID"
             setOnClickListener {
-                toast("In PipePipe/NewPipe: long-press the video → Share → copy the YouTube URL. Then paste it in the field above.")
+                toast("In PipePipe/NewPipe/YouTube website: long-press the video → Share → copy the YouTube URL. Then paste it in the field above.")
             }
         }
 
