@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
     }
 
     compileOptions {
@@ -57,3 +57,4 @@ dependencies {
     // ffmpeg-kit replaces mobile-ffmpeg; AAR included in libs/ for reproducible builds.
     implementation(files("libs/mobile-ffmpeg-full-gpl-4.4.LTS.aar"))
 }
+
