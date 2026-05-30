@@ -5,25 +5,23 @@ How it works:
 Enter a YouTube or Rumble video ID, or share a file directly from your file manager or browser. SponsorCut fetches the SponsorBlock segment list for the ID, shows you what will be cut and how much time you'll save, then processes the file entirely on-device. The result is saved to your Downloads or Music folder.
 
 Usage methods:
-• Share a video or audio file from any file manager — SponsorCut opens automatically
-• Share a URL from YouTube or Rumble — SponsorCut extracts the ID and pre-fetches segments
-• Enter a YouTube video ID manually and browse to the local file
-• Open a file directly via a compatible player or browser
+- Share a video or audio file from any file manager
+- Share a URL from YouTube or Rumble — SponsorCut extracts the ID and pre-fetches segments
+- Enter a YouTube video ID manually and browse to the local file
+- Open a file directly via a compatible player or browser
 
 Features:
-• Supports MP4, MKV, WebM, TS, M4A, MP3, AAC, and Opus files
-• Audio-only files are saved to Music/SponsorCut with correct MIME type
-• Cancel button stops processing at any time
-• Wake lock keeps CPU active when the screen turns off during long jobs
-• Diagnostic log shows detailed FFmpeg output after each run
-• Status text is selectable for easy copying
-• Remembers the last used video ID and file across sessions
+- Supports MP4, MKV, WebM, TS, M4A, MP3, AAC, and Opus files
+- Audio-only files are saved to Music/SponsorCut with correct MIME type
+- Cancel button stops processing at any time
+- Wake lock keeps CPU active when the screen turns off during long jobs
+- Diagnostic log shows detailed FFmpeg output after each run
+- Status text is selectable for easy copying
+- Remembers the last used video ID and file across sessions
 
 All processing is local. No data is sent to any server except the SponsorBlock API query (video ID only) and an optional YouTube oEmbed title lookup. No analytics, no tracking, no accounts.
 
 Requires Android 8.0 (Oreo) or later.
-
----
 
 SponsorCut is free, open-source, and built in spare time. If it saves you time every day, consider buying the developer a coffee:
 

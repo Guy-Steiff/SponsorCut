@@ -15,7 +15,7 @@ Features:
 • Works fully offline after segment data is fetched
 • No ads, no tracking, no account required
 
-Optional: after a successful job, a donation prompt is shown with a Buy Me a Coffee link and a Bitcoin address. This is entirely voluntary and can be ignored.
+Optional: after a successful job, a non-intrusive donation prompt is shown with a Buy Me a Coffee link and a Bitcoin address. This is entirely voluntary and can be ignored.
 
 Source: https://github.com/Guy-Steiff/SponsorCut
 
