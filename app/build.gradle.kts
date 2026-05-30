@@ -54,7 +54,8 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // ffmpeg-kit replaces mobile-ffmpeg; AAR included in libs/ for reproducible builds.
-    implementation(files("libs/mobile-ffmpeg-full-gpl-4.4.LTS.aar"))
+    // ffmpeg-kit AAR — built from source by F-Droid via InfinityLoop1308/ffmpeg-kit srclib,
+    // or placed manually in app/libs/ for local development.
+    implementation(files("libs/ffmpeg-kit.aar"))
 }
 

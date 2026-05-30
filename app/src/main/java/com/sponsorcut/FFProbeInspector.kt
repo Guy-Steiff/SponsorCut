@@ -1,16 +1,16 @@
 package com.sponsorcut
 
 import android.util.Log
-import com.arthenica.mobileffmpeg.Config
-import com.arthenica.mobileffmpeg.FFprobe
+import com.arthenica.ffmpegkit.FFprobeKit
+import com.arthenica.ffmpegkit.FFmpegKitConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
  * Single source of truth for media file characteristics.
- * Primary method: runs `ffprobe -of json` via FFprobe.execute() and parses raw JSON.
- * Fallback: uses FFprobe.getMediaInformation() Java API if execute() fails.
+ * Primary method: runs `ffprobe -of json` via FFprobeKit.execute() and parses raw JSON.
+ * Fallback: uses FFprobeKit.getMediaInformation() Java API if execute() fails.
  * Nothing else in the app calls FFprobe directly.
  */
 object FFProbeInspector {
@@ -32,15 +32,13 @@ object FFProbeInspector {
         val audioIndex: Int?,
         val durationSec: Double?,
         val containerBitrate: Long?,
-        /** True when H.264 is in MPEG-TS Annex B format (is_avc=false), e.g. Rumble downloads.
-         *  These files need slow seeking and explicit stream mapping to avoid concat drift. */
         val isTsEncapsulated: Boolean = false
     ) {
         val pixels: Int? get() = if (width != null && height != null) width * height else null
 
         val summaryLine: String get() = buildString {
             append(videoCodec.uppercase())
-            if (width != null && height != null) append(" ${width}×${height}")
+            if (width != null && height != null) append(" ${width}${height}")
             if (fps != null) append(" @${"%.2f".format(fps)}fps")
             val vbr = videoBitrate ?: containerBitrate
             if (vbr != null) append(" ${"%.0f".format(vbr / 1000.0)}kbps")
@@ -53,14 +51,12 @@ object FFProbeInspector {
     }
 
     fun inspect(file: File): VideoInfo? {
-        // Primary: invoke ffprobe binary directly with JSON output
         val fromJson = inspectViaJson(file)
         if (fromJson != null && fromJson.videoCodec != "unknown") {
             Log.i(TAG, "Inspected via JSON: $fromJson")
             return fromJson
         }
 
-        // Fallback: Java API
         Log.w(TAG, "JSON inspection returned unknown codec, trying Java API fallback")
         val fromApi = inspectViaApi(file)
         if (fromApi != null) {
@@ -68,14 +64,11 @@ object FFProbeInspector {
             return fromApi
         }
 
-        // Return whatever the JSON gave us even if codec is unknown
         if (fromJson != null) {
             Log.w(TAG, "Both methods uncertain, returning JSON result: $fromJson")
             return fromJson
         }
 
-        // Last resort: return a minimal VideoInfo so processing can still proceed.
-        // Unknown codec defaults to stream-copy in TranscodePolicy (fail-open).
         Log.w(TAG, "All inspection methods failed for ${file.name} — returning minimal VideoInfo")
         return VideoInfo(
             videoCodec = "unknown",
@@ -87,35 +80,27 @@ object FFProbeInspector {
         )
     }
 
-    // ── Primary: ffprobe -of json ────────────────────────────────────────────
-
     private fun inspectViaJson(file: File): VideoInfo? {
         return try {
-            // Capture ffprobe output via Config log callback
             val outputLines = StringBuilder()
-            val prevLevel = Config.getLogLevel()
-            Config.enableLogCallback { message ->
-                outputLines.append(message.text)
+            FFmpegKitConfig.enableLogCallback { message ->
+                outputLines.append(message.message)
             }
 
-            val rc = FFprobe.execute(arrayOf(
-                "-v", "quiet", "-of", "json",
-                "-show_streams", "-show_format",
-                file.absolutePath
-            ))
+            val session = FFprobeKit.execute(
+                "-v quiet -of json -show_streams -show_format ${file.absolutePath}"
+            )
 
-            Config.enableLogCallback(null)
-            Config.setLogLevel(prevLevel)
+            FFmpegKitConfig.enableLogCallback(null)
 
-            if (rc != 0) {
-                Log.w(TAG, "ffprobe execute rc=$rc")
+            if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
+                Log.w(TAG, "ffprobe execute rc=${session.returnCode}")
                 return null
             }
 
             val raw = outputLines.toString().trim()
             Log.d(TAG, "ffprobe raw output length=${raw.length}")
 
-            // Find JSON boundaries robustly
             val jsonStart = raw.indexOf('{')
             val jsonEnd = raw.lastIndexOf('}')
             if (jsonStart < 0 || jsonEnd < 0) {
@@ -161,7 +146,6 @@ object FFProbeInspector {
                     pixFmt = s.optString("pix_fmt").ifBlank { null }
                     videoBitrate = s.optString("bit_rate").toLongOrNull()
                     videoIndex = s.optInt("index")
-                    // Detect MPEG-TS H.264 (Annex B, not AVCC): is_avc == "false"
                     isTsEncapsulated = s.optString("is_avc") == "false"
                 }
                 "audio" -> if (audioIndex == null) {
@@ -177,8 +161,6 @@ object FFProbeInspector {
         val fmt = root.optJSONObject("format")
         val durationSec = fmt?.optString("duration")?.toDoubleOrNull()
         val containerBitrate = fmt?.optString("bit_rate")?.toLongOrNull()
-
-        // Also try container bitrate for video if stream didn't have it
         if (videoBitrate == null) videoBitrate = containerBitrate
 
         return VideoInfo(
@@ -188,11 +170,10 @@ object FFProbeInspector {
         )
     }
 
-    // ── Fallback: Java API ───────────────────────────────────────────────────
-
     private fun inspectViaApi(file: File): VideoInfo? {
         return try {
-            val info = FFprobe.getMediaInformation(file.absolutePath) ?: return null
+            val info = FFprobeKit.getMediaInformation(file.absolutePath)
+                ?.mediaInformation ?: return null
 
             var videoCodec = "unknown"
             var width: Int? = null; var height: Int? = null; var fps: Float? = null
@@ -231,8 +212,6 @@ object FFProbeInspector {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
     private fun parseFraction(raw: String?): Float? {
         if (raw.isNullOrBlank() || raw == "0/0") return null
         return try {
@@ -244,4 +223,3 @@ object FFProbeInspector {
         } catch (e: Exception) { null }
     }
 }
-

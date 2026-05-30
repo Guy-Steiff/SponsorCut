@@ -57,7 +57,7 @@ class ProcessingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             Log.i(tag, "Cancel requested")
-            com.arthenica.mobileffmpeg.FFmpeg.cancel()
+            com.arthenica.ffmpegkit.FFmpegKit.cancel()
             return START_NOT_STICKY
         }
         if (intent?.action != ACTION_PROCESS) {
