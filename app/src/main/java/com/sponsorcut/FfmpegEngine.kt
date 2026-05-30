@@ -239,17 +239,13 @@ object FfmpegEngine {
                 args += listOf("-c", "copy", "-avoid_negative_ts", "make_zero")
             }
         } else {
-            if (plan.canCopyVideo) {
-                args += listOf("-c:v", "copy")
-            } else {
-                val preset = when {
-                    plan.useSlowSeek -> "ultrafast"
-                    plan.complexity == TranscodePolicy.ComplexityTier.HIGH -> "faster"
-                    else -> "veryfast"
+                if (plan.canCopyVideo) {
+                    args += listOf("-c:v", "copy")
+                } else {
+                    // h264_mediacodec uses -b:v (bitrate), not -preset/-crf (x264-specific)
+                    args += listOf("-c:v", plan.videoEncoder, "-b:v", "${plan.videoBitrateKbps}k")
+                    if (plan.pixFmt != null) args += listOf("-pix_fmt", plan.pixFmt)
                 }
-                args += listOf("-c:v", plan.videoEncoder, "-preset", preset, "-crf", "23")
-                if (plan.pixFmt != null) args += listOf("-pix_fmt", plan.pixFmt)
-            }
             if (plan.canCopyAudio) {
                 args += listOf("-c:a", "copy")
             } else {

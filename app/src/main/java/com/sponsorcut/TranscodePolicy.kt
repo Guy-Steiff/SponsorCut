@@ -21,7 +21,7 @@ object TranscodePolicy {
     enum class ComplexityTier { LOW, MEDIUM, HIGH }
 
     data class ProcessingPlan(
-        /** Use stream copy (-c copy) for video if true; else re-encode with libx264 */
+        /** Use stream copy (-c copy) for video if true; else re-encode with h264_mediacodec */
         val canCopyVideo: Boolean,
         /** Use stream copy for audio if true; else re-encode with aac */
         val canCopyAudio: Boolean,
@@ -31,6 +31,8 @@ object TranscodePolicy {
         val audioEncoder: String,
         /** Pixel format to force on re-encode (null = let ffmpeg decide) */
         val pixFmt: String?,
+        /** Target video bitrate in kbps for re-encode (used by MediaCodec encoder) */
+        val videoBitrateKbps: Int,
         /** Estimated processing complexity for UI feedback */
         val complexity: ComplexityTier,
         /** Human-readable rationale (for logging/debug) */
@@ -74,21 +76,35 @@ object TranscodePolicy {
         if (audioCodecKnownBad) reasons += "audio codec '${info.audioCodec}' requires transcode"
 
         // --- Encoder choices (only relevant when re-encoding) ---
-        val videoEncoder = "libx264"   // universally available in mobile-ffmpeg-full-gpl
+        // h264_mediacodec = Android hardware H264 encoder (always available, LGPL-safe, fast)
+        val videoEncoder = "h264_mediacodec"
         val audioEncoder = "aac"
 
+        // --- Target video bitrate for h264_mediacodec (which uses -b:v, not -crf) ---
+        // Prefer source bitrate; fall back to resolution-based heuristic.
+        val sourceBitrateKbps = (info.videoBitrate ?: info.containerBitrate)?.div(1000)?.toInt()
+        val pixels = info.pixels ?: 0
+        val fallbackKbps = when {
+            pixels >= 1920 * 1080 -> 4000
+            pixels >= 1280 * 720  -> 2000
+            pixels >= 854 * 480   -> 1000
+            pixels > 0            -> 600
+            else                  -> 1500
+        }
+        val videoBitrateKbps = sourceBitrateKbps?.coerceAtLeast(300) ?: fallbackKbps
+
         // --- Pixel format ---
-        // Force yuv420p when re-encoding for maximum compatibility.
-        // On copy, preserve original (null = don't touch).
-        val pixFmt = if (!canCopyVideo) "yuv420p" else null
+        // h264_mediacodec handles yuv420p natively; force it only when re-encoding to
+        // ensure compatibility with all players.
+        val pixFmt = if (!canCopyVideo && !isAudioOnly) "yuv420p" else null
 
         // --- Complexity tier ---
-        val pixels = info.pixels ?: 0
+        val pixels2 = info.pixels ?: 0
         val fps = info.fps ?: 30f
         val complexity = when {
             isAudioOnly -> ComplexityTier.LOW
-            frameAccurate && pixels >= 1920 * 1080 && fps >= 50f -> ComplexityTier.HIGH
-            frameAccurate || pixels >= 1920 * 1080 -> ComplexityTier.MEDIUM
+            frameAccurate && pixels2 >= 1920 * 1080 && fps >= 50f -> ComplexityTier.HIGH
+            frameAccurate || pixels2 >= 1920 * 1080 -> ComplexityTier.MEDIUM
             else -> ComplexityTier.LOW
         }
 
@@ -100,7 +116,7 @@ object TranscodePolicy {
 
         val rationale = if (reasons.isEmpty()) "stream copy (fast)" else reasons.joinToString("; ")
         Log.i(TAG, "Plan: canCopyVideo=$canCopyVideo canCopyAudio=$canCopyAudio " +
-                "useSlowSeek=$useSlowSeek complexity=$complexity rationale=$rationale")
+                "useSlowSeek=$useSlowSeek complexity=$complexity videoBitrateKbps=$videoBitrateKbps rationale=$rationale")
 
         return ProcessingPlan(
             canCopyVideo = canCopyVideo,
@@ -108,6 +124,7 @@ object TranscodePolicy {
             videoEncoder = videoEncoder,
             audioEncoder = audioEncoder,
             pixFmt = pixFmt,
+            videoBitrateKbps = videoBitrateKbps,
             complexity = complexity,
             rationale = rationale,
             useSlowSeek = useSlowSeek

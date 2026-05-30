@@ -34,6 +34,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -57,5 +61,7 @@ dependencies {
     // ffmpeg-kit AAR — built from source by F-Droid via InfinityLoop1308/ffmpeg-kit srclib,
     // or placed manually in app/libs/ for local development.
     implementation(files("libs/ffmpeg-kit.aar"))
+    // Required transitive dependency of ffmpeg-kit (NativeLoader references it at runtime)
+    implementation("com.arthenica:smart-exception-java:0.2.1")
 }
 

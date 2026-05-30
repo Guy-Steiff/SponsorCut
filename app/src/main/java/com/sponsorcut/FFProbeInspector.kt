@@ -2,15 +2,15 @@ package com.sponsorcut
 
 import android.util.Log
 import com.arthenica.ffmpegkit.FFprobeKit
-import com.arthenica.ffmpegkit.FFmpegKitConfig
+import com.arthenica.ffmpegkit.ReturnCode
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
  * Single source of truth for media file characteristics.
- * Primary method: runs `ffprobe -of json` via FFprobeKit.execute() and parses raw JSON.
- * Fallback: uses FFprobeKit.getMediaInformation() Java API if execute() fails.
+ * Primary: FFprobeKit.getMediaInformation() structured Java API.
+ * Fallback: raw ffprobe -of json execution + JSON parse.
  * Nothing else in the app calls FFprobe directly.
  */
 object FFProbeInspector {
@@ -38,7 +38,7 @@ object FFProbeInspector {
 
         val summaryLine: String get() = buildString {
             append(videoCodec.uppercase())
-            if (width != null && height != null) append(" ${width}${height}")
+            if (width != null && height != null) append(" ${width}x${height}")
             if (fps != null) append(" @${"%.2f".format(fps)}fps")
             val vbr = videoBitrate ?: containerBitrate
             if (vbr != null) append(" ${"%.0f".format(vbr / 1000.0)}kbps")
@@ -51,25 +51,32 @@ object FFProbeInspector {
     }
 
     fun inspect(file: File): VideoInfo? {
-        val fromJson = inspectViaJson(file)
-        if (fromJson != null && fromJson.videoCodec != "unknown") {
-            Log.i(TAG, "Inspected via JSON: $fromJson")
-            return fromJson
-        }
-
-        Log.w(TAG, "JSON inspection returned unknown codec, trying Java API fallback")
+        // Primary: structured API — parses ffprobe JSON internally
         val fromApi = inspectViaApi(file)
-        if (fromApi != null) {
-            Log.i(TAG, "Inspected via API fallback: $fromApi")
+        if (fromApi != null && fromApi.videoCodec != "unknown") {
+            Log.i(TAG, "Inspected via API: ${fromApi.summaryLine}")
+            DiagLog.append("FFProbe", "API ok: ${fromApi.summaryLine}")
             return fromApi
         }
 
-        if (fromJson != null) {
-            Log.w(TAG, "Both methods uncertain, returning JSON result: $fromJson")
+        // Fallback: raw ffprobe -of json execution
+        Log.w(TAG, "API inspection uncertain (${fromApi?.videoCodec}), trying JSON fallback")
+        val fromJson = inspectViaJson(file)
+        if (fromJson != null && fromJson.videoCodec != "unknown") {
+            Log.i(TAG, "Inspected via JSON: ${fromJson.summaryLine}")
+            DiagLog.append("FFProbe", "JSON ok: ${fromJson.summaryLine}")
             return fromJson
         }
 
-        Log.w(TAG, "All inspection methods failed for ${file.name} — returning minimal VideoInfo")
+        val best = fromJson ?: fromApi
+        if (best != null) {
+            Log.w(TAG, "Both methods uncertain, returning best result: ${best.summaryLine}")
+            DiagLog.append("FFProbe", "uncertain result: ${best.summaryLine}")
+            return best
+        }
+
+        Log.w(TAG, "All inspection methods failed — returning minimal VideoInfo")
+        DiagLog.append("FFProbe", "FAILED — returning minimal stub")
         return VideoInfo(
             videoCodec = "unknown",
             width = null, height = null, fps = null, pixFmt = null,
@@ -80,37 +87,84 @@ object FFProbeInspector {
         )
     }
 
-    private fun inspectViaJson(file: File): VideoInfo? {
+    private fun inspectViaApi(file: File): VideoInfo? {
         return try {
-            val outputLines = StringBuilder()
-            FFmpegKitConfig.enableLogCallback { message ->
-                outputLines.append(message.message)
-            }
-
-            val session = FFprobeKit.execute(
-                "-v quiet -of json -show_streams -show_format ${file.absolutePath}"
-            )
-
-            FFmpegKitConfig.enableLogCallback(null)
-
-            if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
-                Log.w(TAG, "ffprobe execute rc=${session.returnCode}")
+            val session = FFprobeKit.getMediaInformation(file.absolutePath)
+            val info = session?.mediaInformation ?: run {
+                Log.w(TAG, "inspectViaApi: null mediaInformation, rc=${session?.returnCode}")
+                DiagLog.append("FFProbe", "API mediaInformation null rc=${session?.returnCode}")
                 return null
             }
 
-            val raw = outputLines.toString().trim()
-            Log.d(TAG, "ffprobe raw output length=${raw.length}")
+            var videoCodec = "unknown"
+            var width: Int? = null; var height: Int? = null; var fps: Float? = null
+            var pixFmt: String? = null; var videoBitrate: Long? = null; var videoIndex: Int? = null
+            var audioCodec: String? = null; var sampleRate: Int? = null
+            var audioBitrate: Long? = null; var audioChannels: Int? = null; var audioIndex: Int? = null
+
+            info.streams?.forEach { stream ->
+                when (stream.type?.lowercase()) {
+                    "video" -> if (videoIndex == null) {
+                        videoCodec = stream.codec?.lowercase() ?: "unknown"
+                        width = stream.width?.toInt()
+                        height = stream.height?.toInt()
+                        fps = parseFraction(stream.averageFrameRate)
+                        videoBitrate = stream.bitrate?.toLongOrNull()
+                        videoIndex = 0
+                        // isTsEncapsulated not available via this API; defaults false
+                    }
+                    "audio" -> if (audioIndex == null) {
+                        audioCodec = stream.codec?.lowercase()
+                        sampleRate = stream.sampleRate?.toIntOrNull()
+                        audioBitrate = stream.bitrate?.toLongOrNull()
+                        audioIndex = 0
+                    }
+                }
+            }
+
+            val durationSec = info.duration?.toDoubleOrNull()
+            val containerBitrate = info.bitrate?.toLongOrNull()
+            VideoInfo(
+                videoCodec, width, height, fps, pixFmt,
+                videoBitrate ?: containerBitrate, videoIndex,
+                audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
+                durationSec, containerBitrate
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "inspectViaApi failed: ${e.message}")
+            DiagLog.append("FFProbe", "inspectViaApi exception: ${e.message}")
+            null
+        }
+    }
+
+    private fun inspectViaJson(file: File): VideoInfo? {
+        return try {
+            val session = FFprobeKit.execute(
+                "-v quiet -print_format json -show_streams -show_format ${file.absolutePath}"
+            )
+
+            if (!ReturnCode.isSuccess(session.returnCode)) {
+                Log.w(TAG, "ffprobe JSON execute rc=${session.returnCode}")
+                DiagLog.append("FFProbe", "JSON execute failed rc=${session.returnCode}")
+                return null
+            }
+
+            val raw = session.output?.trim() ?: ""
+            Log.d(TAG, "ffprobe JSON output length=${raw.length}")
+            DiagLog.append("FFProbe", "JSON output length=${raw.length}")
 
             val jsonStart = raw.indexOf('{')
             val jsonEnd = raw.lastIndexOf('}')
             if (jsonStart < 0 || jsonEnd < 0) {
-                Log.w(TAG, "No JSON found in ffprobe output")
+                Log.w(TAG, "No JSON in ffprobe output: ${raw.take(300)}")
+                DiagLog.append("FFProbe", "No JSON found, raw=${raw.take(200)}")
                 return null
             }
 
             parseJson(raw.substring(jsonStart, jsonEnd + 1))
         } catch (e: Exception) {
             Log.e(TAG, "inspectViaJson failed: ${e.message}")
+            DiagLog.append("FFProbe", "inspectViaJson exception: ${e.message}")
             null
         }
     }
@@ -125,7 +179,6 @@ object FFProbeInspector {
         var pixFmt: String? = null
         var videoBitrate: Long? = null
         var videoIndex: Int? = null
-
         var audioCodec: String? = null
         var sampleRate: Int? = null
         var audioBitrate: Long? = null
@@ -168,48 +221,6 @@ object FFProbeInspector {
             audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
             durationSec, containerBitrate, isTsEncapsulated
         )
-    }
-
-    private fun inspectViaApi(file: File): VideoInfo? {
-        return try {
-            val info = FFprobeKit.getMediaInformation(file.absolutePath)
-                ?.mediaInformation ?: return null
-
-            var videoCodec = "unknown"
-            var width: Int? = null; var height: Int? = null; var fps: Float? = null
-            var pixFmt: String? = null; var videoBitrate: Long? = null; var videoIndex: Int? = null
-            var audioCodec: String? = null; var sampleRate: Int? = null
-            var audioBitrate: Long? = null; var audioChannels: Int? = null; var audioIndex: Int? = null
-
-            info.streams?.forEach { stream ->
-                when (stream.type?.lowercase()) {
-                    "video" -> if (videoIndex == null) {
-                        videoCodec = stream.codec?.lowercase() ?: "unknown"
-                        width = stream.width?.toInt()
-                        height = stream.height?.toInt()
-                        fps = parseFraction(stream.averageFrameRate)
-                        videoBitrate = stream.bitrate?.toLongOrNull()
-                        videoIndex = 0
-                    }
-                    "audio" -> if (audioIndex == null) {
-                        audioCodec = stream.codec?.lowercase()
-                        sampleRate = stream.sampleRate?.toIntOrNull()
-                        audioBitrate = stream.bitrate?.toLongOrNull()
-                        audioIndex = 0
-                    }
-                }
-            }
-
-            val durationSec = info.duration?.toDoubleOrNull()
-            VideoInfo(
-                videoCodec, width, height, fps, pixFmt, videoBitrate, videoIndex,
-                audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
-                durationSec, null
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "inspectViaApi failed: ${e.message}")
-            null
-        }
     }
 
     private fun parseFraction(raw: String?): Float? {
