@@ -51,8 +51,16 @@ object FfmpegEngine {
         var regSXY= 0.0
         var regSX2= 0.0
 
+        // Preserve source container for stream-copy; use mp4 for re-encode.
+        // Exception: audio-only files (m4a, mp3, etc.) keep their original extension
+        // even on re-encode, since they don't need a video container.
         val isCopyAll = plan.canCopyVideo && plan.canCopyAudio
-        val ext = if (isCopyAll) input.extension.ifBlank { "mp4" } else "mp4"
+        val audioOnly = plan.rationale.contains("audio-only")
+        val ext = when {
+            isCopyAll -> input.extension.ifBlank { "mp4" }
+            audioOnly -> input.extension.ifBlank { "m4a" }
+            else -> "mp4"
+        }
 
         fun formatDuration(ms: Long): String {
             val s = ms / 1000
