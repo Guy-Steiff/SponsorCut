@@ -16,8 +16,21 @@ Repo: https://github.com/Guy-Steiff/SponsorCut
 Builds:
   - versionName: '1.0'
     versionCode: 1
-    commit: 06f6a5d6426e798b89bafa4f4825e9678f81616e
+    commit: v1.0
     subdir: app
+    sudo:
+      - apt-get update
+      - apt-get install -y autoconf automake libtool pkg-config nasm cmake
+        gcc gperf texinfo yasm bison autogen wget autopoint meson ninja-build
+        ragel groff libtasn1-6-dev libtasn1-bin libgnutls28-dev libunistring-dev
+    srclibs:
+      - ffmpeg-kit@efd648489598efdc65e2e2f06ae69e065e257077
+    prebuild:
+      - export ANDROID_NDK_ROOT=$$NDK$$
+      - cd $$ffmpeg-kit$$ && ./android.sh --lts --enable-gmp --enable-openssl
+        --enable-android-media-codec --enable-android-zlib
+        --disable-x86 --disable-arm-v7a --disable-arm-v7a-neon
+      - cp $$ffmpeg-kit$$/bundle-android-aar-lts/ffmpeg-kit-lts.aar libs/ffmpeg-kit.aar
     gradle:
       - yes
 

@@ -80,16 +80,28 @@ native caption API (`timedtext`).
 
 ---
 
+## FFmpeg Backend
+
+SponsorCut uses **mobile-ffmpeg** (`com.arthenica.mobileffmpeg`) as its FFmpeg backend — specifically the
+`mobile-ffmpeg-full-gpl` build packaged as a local AAR (`app/libs/ffmpeg-kit.aar`).
+
+This is the library used by PipePipe/NewPipe and built by F-Droid via the
+[InfinityLoop1308/ffmpeg-kit](https://github.com/InfinityLoop1308/ffmpeg-kit) srclib, ensuring full
+F-Droid reproducible-build compliance with no proprietary binaries.
+
+The AAR must be present in `app/libs/ffmpeg-kit.aar` before building. For local development, obtain it from:
+- A PipePipe/NewPipe build environment
+- The F-Droid build outputs for those apps
+- Building [InfinityLoop1308/ffmpeg-kit](https://github.com/InfinityLoop1308/ffmpeg-kit) directly
+
+---
+
 ## Building from Source
 
 ### Prerequisites
 
 - JDK 17+ and Android SDK (compileSdk 34, minSdk 26)
-
-> **No manual download needed.** The first time you build, Gradle will automatically download
-> `mobile-ffmpeg-full-gpl-4.4.LTS.aar` (~60 MB) from the official
-> [mobile-ffmpeg GitHub release](https://github.com/tanersener/mobile-ffmpeg/releases/tag/v4.4.LTS)
-> and save it to `app/libs/`. Subsequent builds skip the download.
+- `app/libs/ffmpeg-kit.aar` present (see **FFmpeg Backend** above)
 
 ```bash
 ./gradlew assembleDebug

@@ -6,8 +6,10 @@ app/build/
 *.apk
 *.aab
 
-# Large binary libs — committed to repo for reproducible F-Droid builds
-# app/libs/*.aar
+# FFmpeg-Kit native AAR — binary, not committed.
+# For local development: run ./scripts/fetch-ffmpeg-kit.sh
+# For F-Droid: built from source via srclibs (see metadata/com.sponsorcut.yml)
+app/libs/ffmpeg-kit.aar
 
 # Local config
 local.properties
@@ -22,9 +24,7 @@ gradle/wrapper/gradle-wrapper.jar
 
 # Build reports
 build/reports/
-build/
 
 # OS
 .DS_Store
 Thumbs.db
-

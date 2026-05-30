@@ -1,7 +1,7 @@
 package com.sponsorcut
 
-import com.arthenica.mobileffmpeg.FFmpeg
-import com.arthenica.mobileffmpeg.Config
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.ReturnCode
 import android.util.Log
 import java.io.File
 
@@ -45,21 +45,19 @@ object FfmpegEngine {
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
 
-        // Linear regression state: fit processing_time_s = a * segment_duration_s + b
-        // With 1 point: forced through origin (b=0), a = y1/x1
-        // With 2+ points: full least-squares, both a and b free.
-        //   a = (n·ΣXY - ΣX·ΣY) / (n·ΣX² - (ΣX)²)
-        //   b = (ΣY - a·ΣX) / n
         var regN  = 0
-        var regSX = 0.0   // Σx
-        var regSY = 0.0   // Σy
-        var regSXY= 0.0   // Σ(x·y)
-        var regSX2= 0.0   // Σ(x²)
+        var regSX = 0.0
+        var regSY = 0.0
+        var regSXY= 0.0
+        var regSX2= 0.0
 
-        // Preserve source container for stream-copy; use mp4 for re-encode
-        // (WebM/MKV don't support H264/AAC so re-encode must target mp4)
+        // Preserve source container for stream-copy; use mp4 for re-encode.
+        // Exception: audio-only files (m4a, mp3, etc.) keep their original extension
+        // even on re-encode, since they don't need a video container.
         val isCopyAll = plan.canCopyVideo && plan.canCopyAudio
-        val ext = if (isCopyAll) input.extension.ifBlank { "mp4" } else "mp4"
+        val audioOnly = plan.rationale.contains("audio-only")
+        // Always preserve the source extension — ffmpeg handles any codec in any container.
+        val ext = input.extension.ifBlank { "mp4" }
 
         fun formatDuration(ms: Long): String {
             val s = ms / 1000
@@ -73,13 +71,10 @@ object FfmpegEngine {
         try {
             for ((idx, range) in keepRanges.withIndex()) {
                 val (keepStart, keepEnd) = range
-                // For the last segment (keepEnd=MAX_VALUE), compute explicit duration from
-                // known file duration so mobile-ffmpeg doesn't have to seek to EOF to find it.
-                // This fixes rc=1 on TS-wrapped files where duration isn't in the container index.
                 val duration: Double? = when {
                     keepEnd != Double.MAX_VALUE -> keepEnd - keepStart
                     fileDurationSec != null -> (fileDurationSec - keepStart).coerceAtLeast(0.1)
-                    else -> null  // no duration known — let ffmpeg run to EOF
+                    else -> null
                 }
 
                 if (duration != null && duration <= 0.01) {
@@ -91,9 +86,6 @@ object FfmpegEngine {
 
                 val elapsed = System.currentTimeMillis() - jobStartMs
 
-                // ETA: derive (a, b) from accumulated points, predict remaining time.
-                // 1 point  → origin model: a = y/x, b = 0
-                // 2+ points → full least-squares: a and b both free
                 val (regA, regB) = when {
                     regN == 0 -> null to null
                     regN == 1 -> (regSY / regSX) to 0.0
@@ -109,7 +101,7 @@ object FfmpegEngine {
                 }
                 val etaMs: Long? = if (regA != null && regB != null) {
                     val remainingDuration = keepRanges
-                        .drop(idx)  // current + future segments
+                        .drop(idx)
                         .mapNotNull { (s, e) ->
                             when {
                                 e != Double.MAX_VALUE -> e - s
@@ -119,7 +111,6 @@ object FfmpegEngine {
                         }
                         .sum()
                     val remainingSegments = keepRanges.drop(idx).size
-                    // Sum of per-segment predictions: each gets a*duration + b
                     val predictedSec = regA * remainingDuration + regB * remainingSegments
                     (predictedSec * 1000).toLong().coerceAtLeast(0L)
                 } else null
@@ -140,25 +131,22 @@ object FfmpegEngine {
 
                 var rc = executeSegment(input, partFile, keepStart, duration, plan, slowSeek = false)
 
-                if (rc == Config.RETURN_CODE_CANCEL) error("CANCELLED")
+                if (rc == RETURN_CANCEL) error("CANCELLED")
 
-                if (rc != Config.RETURN_CODE_SUCCESS && !plan.canCopyVideo) {
-                    // Fast seek failed for re-encode (common with TS-wrapped files where seek
-                    // index is missing/corrupt). Retry with slow seek (decode from start).
+                if (rc != RETURN_SUCCESS && !plan.canCopyVideo) {
                     DiagLog.append("Engine", "Part $idx fast-seek rc=1, retrying with slow seek")
                     onProgress?.invoke("Part ${idx + 1}/$total: retrying with slow seek…")
                     partFile.delete()
                     rc = executeSegment(input, partFile, keepStart, duration, plan, slowSeek = true)
-                    if (rc == Config.RETURN_CODE_CANCEL) error("CANCELLED")
+                    if (rc == RETURN_CANCEL) error("CANCELLED")
                 }
 
-                if (rc != Config.RETURN_CODE_SUCCESS) error("FFmpeg trim part $idx failed (rc=$rc)")
+                if (rc != RETURN_SUCCESS) error("FFmpeg trim part $idx failed (rc=$rc)")
 
                 if (partFile.exists() && partFile.length() > 0) {
                     parts += partFile
                     completedCount++
 
-                    // Update regression: add point (segment_duration_s, actual_processing_s)
                     if (duration != null && duration > 0.01) {
                         val processingTimeSec = (System.currentTimeMillis() - segStartMs) / 1000.0
                         regN++
@@ -166,7 +154,6 @@ object FfmpegEngine {
                         regSY  += processingTimeSec
                         regSXY += duration * processingTimeSec
                         regSX2 += duration * duration
-                        // Log current model
                         val logMsg = if (regN == 1) {
                             "a=%.4f b=0 (1-point, origin)".format(regSY / regSX)
                         } else {
@@ -198,13 +185,12 @@ object FfmpegEngine {
             val concatFile = File(cacheDir, "concat_${System.currentTimeMillis()}.txt")
             concatFile.writeText(parts.joinToString("\n") { "file '${it.absolutePath}'" })
             val concatOut = File(cacheDir, "concat_out_${System.currentTimeMillis()}.$ext")
-            val concatArgs = arrayOf("-y", "-f", "concat", "-safe", "0",
-                "-i", concatFile.absolutePath, "-c", "copy", concatOut.absolutePath)
-            Log.d(TAG, "Concat args: ${concatArgs.joinToString(" ")}")
-            val rc = FFmpeg.execute(concatArgs)
+            val concatArgs = "-y -f concat -safe 0 -i ${concatFile.absolutePath} -c copy ${concatOut.absolutePath}"
+            Log.d(TAG, "Concat args: $concatArgs")
+            val session = FFmpegKit.execute(concatArgs)
             concatFile.delete()
-            if (rc == Config.RETURN_CODE_CANCEL) error("CANCELLED")
-            if (rc != Config.RETURN_CODE_SUCCESS) error("FFmpeg concat failed (rc=$rc)")
+            if (ReturnCode.isCancel(session.returnCode)) error("CANCELLED")
+            if (!ReturnCode.isSuccess(session.returnCode)) error("FFmpeg concat failed (rc=${session.returnCode})")
             concatOut.copyTo(output, overwrite = true)
             concatOut.delete()
             onProgressNumeric?.invoke(total, total)
@@ -213,6 +199,9 @@ object FfmpegEngine {
             parts.forEach { it.delete() }
         }
     }
+
+    private const val RETURN_SUCCESS = 0
+    private const val RETURN_CANCEL = 255
 
     private fun executeSegment(
         input: File,
@@ -228,20 +217,16 @@ object FfmpegEngine {
         val args = mutableListOf("-y")
 
         if (slowSeek && !isCopy) {
-            // Slow (accurate) seek: -ss after -i, decodes from start to exact frame.
-            // Used for TS-wrapped files and as fallback when fast seek fails.
             args += listOf("-i", input.absolutePath)
             args += listOf("-ss", startSec.toString())
             if (durationSec != null) args += listOf("-t", durationSec.toString())
             args += listOf("-map", "0")
         } else if (slowSeek) {
-            // TS stream-copy with fast seek + -map 0 for stream selection.
             args += listOf("-ss", startSec.toString())
             if (durationSec != null) args += listOf("-t", durationSec.toString())
             args += listOf("-i", input.absolutePath)
             args += listOf("-map", "0")
         } else {
-            // Normal fast seek
             args += listOf("-ss", startSec.toString())
             if (durationSec != null) args += listOf("-t", durationSec.toString())
             args += listOf("-i", input.absolutePath)
@@ -249,43 +234,42 @@ object FfmpegEngine {
 
         if (isCopy) {
             if (audioOnly) {
-                // Audio-only: explicitly exclude video, map only audio stream
                 args += listOf("-vn", "-c:a", "copy", "-avoid_negative_ts", "make_zero")
             } else {
                 args += listOf("-c", "copy", "-avoid_negative_ts", "make_zero")
             }
         } else {
-            if (plan.canCopyVideo) {
-                args += listOf("-c:v", "copy")
-            } else {
-                val preset = when {
-                    plan.useSlowSeek -> "ultrafast"
-                    plan.complexity == TranscodePolicy.ComplexityTier.HIGH -> "faster"
-                    else -> "veryfast"
+                if (plan.canCopyVideo) {
+                    args += listOf("-c:v", "copy")
+                } else {
+                    // h264_mediacodec uses -b:v (bitrate), not -preset/-crf (x264-specific)
+                    args += listOf("-c:v", plan.videoEncoder, "-b:v", "${plan.videoBitrateKbps}k")
+                    if (plan.pixFmt != null) args += listOf("-pix_fmt", plan.pixFmt)
                 }
-                args += listOf("-c:v", plan.videoEncoder, "-preset", preset, "-crf", "23")
-                if (plan.pixFmt != null) args += listOf("-pix_fmt", plan.pixFmt)
-            }
             if (plan.canCopyAudio) {
                 args += listOf("-c:a", "copy")
             } else {
                 args += listOf("-c:a", plan.audioEncoder, "-b:a", "128k")
             }
-            if (audioOnly) args += listOf("-vn")  // suppress any spurious video track
+            if (audioOnly) args += listOf("-vn")
             args += listOf("-avoid_negative_ts", "make_zero")
         }
 
         args += output.absolutePath
 
-        Log.d(TAG, "FFmpeg args: ${args.joinToString(" ")}")
-        DiagLog.append("FFmpeg", "args: ${args.joinToString(" ")}")
-        val rc = FFmpeg.execute(args.toTypedArray())
-        Log.d(TAG, "FFmpeg rc=$rc exists=${output.exists()} size=${output.length()}")
-        DiagLog.append("FFmpeg", "rc=$rc exists=${output.exists()} size=${output.length()}")
-        if (rc != Config.RETURN_CODE_SUCCESS && rc != Config.RETURN_CODE_CANCEL) {
-            Log.e(TAG, "FFmpeg FAILED rc=$rc — args were: ${args.joinToString(" ")}")
-            DiagLog.append("FFmpeg", "FAILED rc=$rc")
+        val cmdString = args.joinToString(" ")
+        Log.d(TAG, "FFmpeg args: $cmdString")
+        DiagLog.append("FFmpeg", "args: $cmdString")
+        val session = FFmpegKit.execute(cmdString)
+        val rcInt = session.returnCode?.value ?: -1
+        Log.d(TAG, "FFmpeg rc=$rcInt exists=${output.exists()} size=${output.length()}")
+        DiagLog.append("FFmpeg", "rc=$rcInt exists=${output.exists()} size=${output.length()}")
+        if (!ReturnCode.isSuccess(session.returnCode) && !ReturnCode.isCancel(session.returnCode)) {
+            Log.e(TAG, "FFmpeg FAILED rc=$rcInt — args were: $cmdString")
+            DiagLog.append("FFmpeg", "FAILED rc=$rcInt")
         }
-        return rc
+        return if (ReturnCode.isCancel(session.returnCode)) RETURN_CANCEL
+               else if (ReturnCode.isSuccess(session.returnCode)) RETURN_SUCCESS
+               else rcInt
     }
 }

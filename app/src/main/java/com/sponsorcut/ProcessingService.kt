@@ -57,7 +57,7 @@ class ProcessingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             Log.i(tag, "Cancel requested")
-            com.arthenica.mobileffmpeg.FFmpeg.cancel()
+            com.arthenica.ffmpegkit.FFmpegKit.cancel()
             return START_NOT_STICKY
         }
         if (intent?.action != ACTION_PROCESS) {
@@ -106,8 +106,8 @@ class ProcessingService : Service() {
                 }
                 val (processingPlan, videoInfo) = plan
 
-                // If re-encoding, output must be mp4 (H264/AAC incompatible with webm/mkv)
-                val outputExt = if (processingPlan.canCopyVideo && processingPlan.canCopyAudio) sourceExt else "mp4"
+                // Always preserve the source extension — ffmpeg handles any codec in any container.
+                val outputExt = sourceExt
                 val baseSourceName = if (outputExt != sourceExt)
                     sourceName.substringBeforeLast('.') + ".$outputExt"
                 else sourceName
