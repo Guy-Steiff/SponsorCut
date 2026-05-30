@@ -106,8 +106,14 @@ class ProcessingService : Service() {
                 }
                 val (processingPlan, videoInfo) = plan
 
-                // If re-encoding, output must be mp4 (H264/AAC incompatible with webm/mkv)
-                val outputExt = if (processingPlan.canCopyVideo && processingPlan.canCopyAudio) sourceExt else "mp4"
+                // If re-encoding, output must be mp4 (H264/AAC incompatible with webm/mkv).
+                // Exception: audio-only files keep their source extension (m4a stays m4a, etc.)
+                val isAudioOnly = processingPlan.rationale.contains("audio-only")
+                val outputExt = when {
+                    processingPlan.canCopyVideo && processingPlan.canCopyAudio -> sourceExt
+                    isAudioOnly -> sourceExt
+                    else -> "mp4"
+                }
                 val baseSourceName = if (outputExt != sourceExt)
                     sourceName.substringBeforeLast('.') + ".$outputExt"
                 else sourceName
