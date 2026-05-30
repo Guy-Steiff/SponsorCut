@@ -56,11 +56,8 @@ object FfmpegEngine {
         // even on re-encode, since they don't need a video container.
         val isCopyAll = plan.canCopyVideo && plan.canCopyAudio
         val audioOnly = plan.rationale.contains("audio-only")
-        val ext = when {
-            isCopyAll -> input.extension.ifBlank { "mp4" }
-            audioOnly -> input.extension.ifBlank { "m4a" }
-            else -> "mp4"
-        }
+        // Always preserve the source extension — ffmpeg handles any codec in any container.
+        val ext = input.extension.ifBlank { "mp4" }
 
         fun formatDuration(ms: Long): String {
             val s = ms / 1000
