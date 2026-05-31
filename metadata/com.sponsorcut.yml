@@ -22,19 +22,24 @@ Builds:
       - apt-get update
       - apt-get install -y autoconf automake libtool pkg-config nasm cmake
         gcc gperf texinfo yasm bison autogen wget autopoint meson ninja-build
-        ragel groff libtasn1-6-dev libtasn1-bin libgnutls28-dev libunistring-dev
+        ragel groff make
     srclibs:
       - ffmpeg-kit@efd648489598efdc65e2e2f06ae69e065e257077
     prebuild:
       - export ANDROID_NDK_ROOT=$$NDK$$
-      - cd $$ffmpeg-kit$$ && ./android.sh --lts --enable-gmp --enable-openssl
-        --enable-android-media-codec --enable-android-zlib
-        --disable-x86 --disable-arm-v7a --disable-arm-v7a-neon
-      - cp $$ffmpeg-kit$$/bundle-android-aar-lts/ffmpeg-kit-lts.aar libs/ffmpeg-kit.aar
+      - cd $$ffmpeg-kit$$ && ./android.sh --lts --enable-android-media-codec
+        --enable-android-zlib --disable-x86 --disable-arm-v7a --disable-arm-v7a-neon
+      - mkdir -p libs
+      - cp $$ffmpeg-kit$$/prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar
+        libs/ffmpeg-kit.aar
     gradle:
       - yes
+    scanignore:
+      - app/libs
+    ndk: 25.2.9519653
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
 CurrentVersion: '1.0'
 CurrentVersionCode: 1
+
