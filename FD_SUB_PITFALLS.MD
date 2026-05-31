@@ -182,9 +182,26 @@ suppress the binary-in-source warning.
 
 ---
 
+## 12. Use the full commit hash in `commit:`, never a tag name
+
+F-Droid policy requires the `commit:` field to contain the full 40-character SHA,
+not a tag name. Tags are mutable and can be moved; a hash is immutable.
+
+```yaml
+# WRONG
+commit: v1.0
+
+# RIGHT
+commit: da0f569417427e789a7e3f6b8285b22e8c12e8a5
+```
+
+Resolve the hash with: `git rev-list -n 1 <tag>`
+
+---
+
 ## Quick pre-submission checklist
 
-- [ ] Run `fdroid rewritemeta metadata/com.package.yml` and commit the output.
+- [ ] `commit:` uses the full 40-char SHA, not a tag name (`git rev-list -n 1 <tag>`).
 - [ ] Confirm all `srclibs` commit hashes exist in the referenced fork.
 - [ ] `scanignore` entries are inside the `Builds` block, relative to `subdir`.
 - [ ] No `openjdk-*` in `sudo` — rely on the server JDK.
