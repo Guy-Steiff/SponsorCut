@@ -27,8 +27,9 @@ Builds:
       - ffmpeg-kit@efd648489598efdc65e2e2f06ae69e065e257077
     prebuild:
       - export ANDROID_NDK_ROOT=$$NDK$$
-      - cd $$ffmpeg-kit$$ && ./android.sh --lts --enable-android-media-codec
+      - pushd $$ffmpeg-kit$$ && ./android.sh --lts --enable-android-media-codec
         --enable-android-zlib --disable-x86 --disable-arm-v7a --disable-arm-v7a-neon
+        && popd
       - mkdir -p libs
       - cp $$ffmpeg-kit$$/prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar
         libs/ffmpeg-kit.aar
