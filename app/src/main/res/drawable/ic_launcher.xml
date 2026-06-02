@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- Blue rectangle background -->
+    <path
+        android:fillColor="#2196F3"
+        android:pathData="M4,14 h40 v20 a2,2 0 0 1 -2,2 h-36 a2,2 0 0 1 -2,-2 z"/>
+
+    <!-- White X for cut -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M12,18 L36,30 M36,18 L12,30"/>
+
+    <!-- Yellow circle highlight -->
+    <path
+        android:fillColor="#FFEB3B"
+        android:pathData="M24,24 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0"/>
+</vector>
