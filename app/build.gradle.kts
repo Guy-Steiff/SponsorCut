@@ -26,10 +26,10 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "/Users/gsm/sponsorcut-release.jks")
-            storePassword = System.getenv("KEYSTORE_PASS") ?: "sponsorcut123"
-            keyAlias = System.getenv("KEY_ALIAS") ?: "sponsorcut"
-            keyPassword = System.getenv("KEY_PASS") ?: "sponsorcut123"
+            storeFile = System.getenv("KEYSTORE_PATH")?.let { file(it) }
+            storePassword = System.getenv("KEYSTORE_PASS")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASS")
         }
     }
 
