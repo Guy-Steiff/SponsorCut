@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout source
@@ -19,11 +19,10 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install NDK 25.2.9519653
-        run: echo "y" | sdkmanager "ndk;25.2.9519653"
+        run: |
+          echo "y" | sdkmanager "ndk;25.2.9519653"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - name: Install ffmpeg-kit build dependencies
         run: |
@@ -41,7 +40,6 @@ jobs:
       - name: Build ffmpeg-kit for Android
         run: |
           cd ffmpeg-kit-src
-          export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
           ./android.sh --lts \
             --enable-android-media-codec \
             --enable-android-zlib \
@@ -75,4 +73,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: SponsorCut-*.apk
-
