@@ -42,6 +42,7 @@ jobs:
       - name: Build ffmpeg-kit for Android
         run: |
           cd ffmpeg-kit-src
+          export LDFLAGS="-Wl,--build-id=none"
           ./android.sh --lts \
             --enable-android-media-codec \
             --enable-android-zlib \
