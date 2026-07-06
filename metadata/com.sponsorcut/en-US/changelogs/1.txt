@@ -1,0 +1,9 @@
+Initial release.
+
+- Remove SponsorBlock segments from local video and audio files
+- Supports MP4, MKV, WebM, TS, M4A, MP3, AAC, Opus
+- URL and file share intent support for YouTube and Rumble
+- Cancel button and wake lock for long jobs
+- Diagnostic log for troubleshooting
+- Audio files saved to Music/SponsorCut with correct MIME type
+

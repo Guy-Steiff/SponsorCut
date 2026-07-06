@@ -1,0 +1,2 @@
+Fix versionCode/versionName in build.gradle.kts and add fastlane metadata (icon, changelogs) for F-Droid submission.
+
