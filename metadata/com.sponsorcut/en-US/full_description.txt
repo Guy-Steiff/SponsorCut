@@ -2,11 +2,11 @@ SponsorCut removes sponsor segments, intros, outros, and other non-content secti
 
 How it works:
 
-Enter a YouTube or Rumble video ID, or share a file directly from your file manager or browser. SponsorCut fetches the SponsorBlock segment list for the ID, shows you what will be cut and how much time you'll save, then processes the file entirely on-device. The result is saved to your Downloads or Music folder.
+Enter a YouTube or video ID, or share a file directly from your file manager or browser. SponsorCut fetches the SponsorBlock segment list for the ID, shows you what will be cut and how much time you'll save, then processes the file entirely on-device. The result is saved to your Downloads or Music folder.
 
 Usage methods:
 - Share a video or audio file from any file manager
-- Share a URL from YouTube or Rumble — SponsorCut extracts the ID and pre-fetches segments
+- Share a URL from YouTube — SponsorCut extracts the ID and pre-fetches segments
 - Enter a YouTube video ID manually and browse to the local file
 - Open a file directly via a compatible player or browser
 

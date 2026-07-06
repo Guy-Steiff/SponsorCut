@@ -18,7 +18,7 @@ class SponsorBlockClient {
     private val client = OkHttpClient()
     private val tag = "SponsorBlockClient"
 
-    fun fetchRich(videoId: String): List<SponsorSegmentInfo> {
+    fun fetchRich(videoId: String, categories: List<String> = listOf("sponsor")): List<SponsorSegmentInfo> {
 
         if (videoId.length != 11) {
             Log.w(tag, "Skipping SponsorBlock fetch: invalid videoId='$videoId'")
@@ -26,16 +26,17 @@ class SponsorBlockClient {
         }
 
         val hashPrefix = sha256Hex(videoId).take(4)
-        val categories = "[\"sponsor\"]"
+        val effectiveCategories = categories.ifEmpty { listOf("sponsor") }
+        val categoriesJson = effectiveCategories.joinToString(",", "[", "]") { "\"$it\"" }
 
         val url = "https://sponsor.ajay.app/api/skipSegments/$hashPrefix"
             .toHttpUrlOrNull()
             ?.newBuilder()
-            ?.addQueryParameter("categories", categories)
+            ?.addQueryParameter("categories", categoriesJson)
             ?.build()
             ?: return emptyList()
 
-        Log.i(tag, "Fetching segments for videoId=$videoId hashPrefix=$hashPrefix")
+        Log.i(tag, "Fetching segments for videoId=$videoId hashPrefix=$hashPrefix categories=$effectiveCategories")
 
         val req = Request.Builder().url(url).build()
 
@@ -57,7 +58,6 @@ class SponsorBlockClient {
                 val segments = obj.optJSONArray("segments") ?: continue
                 for (j in 0 until segments.length()) {
                     val segObj = segments.optJSONObject(j) ?: continue
-                    if (segObj.optString("actionType", "skip") != "skip") continue
                     val seg = segObj.optJSONArray("segment") ?: continue
                     if (seg.length() < 2) continue
                     val start = seg.optDouble(0, Double.NaN)

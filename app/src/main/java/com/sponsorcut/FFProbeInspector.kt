@@ -32,6 +32,7 @@ object FFProbeInspector {
         val audioIndex: Int?,
         val durationSec: Double?,
         val containerBitrate: Long?,
+        val containerFormat: String?,
         val isTsEncapsulated: Boolean = false
     ) {
         val pixels: Int? get() = if (width != null && height != null) width * height else null
@@ -47,28 +48,32 @@ object FFProbeInspector {
                 if (sampleRate != null) append(" ${sampleRate}Hz")
                 if (audioBitrate != null) append(" ${"%.0f".format(audioBitrate / 1000.0)}kbps")
             }
+            if (!containerFormat.isNullOrBlank()) append(" | ${containerFormat.uppercase()}")
         }
     }
 
     fun inspect(file: File): VideoInfo? {
         // Primary: structured API — parses ffprobe JSON internally
         val fromApi = inspectViaApi(file)
-        if (fromApi != null && fromApi.videoCodec != "unknown") {
-            Log.i(TAG, "Inspected via API: ${fromApi.summaryLine}")
-            DiagLog.append("FFProbe", "API ok: ${fromApi.summaryLine}")
-            return fromApi
+        // JSON path provides additional fields (container format, TS hint). Merge both.
+        if (fromApi == null || fromApi.videoCodec == "unknown") {
+            Log.w(TAG, "API inspection uncertain (${fromApi?.videoCodec}), trying JSON fallback")
         }
-
-        // Fallback: raw ffprobe -of json execution
-        Log.w(TAG, "API inspection uncertain (${fromApi?.videoCodec}), trying JSON fallback")
         val fromJson = inspectViaJson(file)
-        if (fromJson != null && fromJson.videoCodec != "unknown") {
-            Log.i(TAG, "Inspected via JSON: ${fromJson.summaryLine}")
-            DiagLog.append("FFProbe", "JSON ok: ${fromJson.summaryLine}")
-            return fromJson
+
+        val merged = merge(fromApi, fromJson)
+        if (merged != null && merged.videoCodec != "unknown") {
+            val source = when {
+                fromApi != null && fromJson != null -> "API+JSON"
+                fromApi != null -> "API"
+                else -> "JSON"
+            }
+            Log.i(TAG, "Inspected via $source: ${merged.summaryLine}")
+            DiagLog.append("FFProbe", "$source ok: ${merged.summaryLine}")
+            return merged
         }
 
-        val best = fromJson ?: fromApi
+        val best = merged
         if (best != null) {
             Log.w(TAG, "Both methods uncertain, returning best result: ${best.summaryLine}")
             DiagLog.append("FFProbe", "uncertain result: ${best.summaryLine}")
@@ -83,7 +88,30 @@ object FFProbeInspector {
             videoBitrate = null, videoIndex = null,
             audioCodec = "unknown",
             sampleRate = null, audioBitrate = null, audioChannels = null, audioIndex = null,
-            durationSec = null, containerBitrate = null
+            durationSec = null, containerBitrate = null, containerFormat = null
+        )
+    }
+
+    private fun merge(primary: VideoInfo?, secondary: VideoInfo?): VideoInfo? {
+        if (primary == null) return secondary
+        if (secondary == null) return primary
+        return VideoInfo(
+            videoCodec = if (primary.videoCodec != "unknown") primary.videoCodec else secondary.videoCodec,
+            width = primary.width ?: secondary.width,
+            height = primary.height ?: secondary.height,
+            fps = primary.fps ?: secondary.fps,
+            pixFmt = primary.pixFmt ?: secondary.pixFmt,
+            videoBitrate = primary.videoBitrate ?: secondary.videoBitrate,
+            videoIndex = primary.videoIndex ?: secondary.videoIndex,
+            audioCodec = primary.audioCodec ?: secondary.audioCodec,
+            sampleRate = primary.sampleRate ?: secondary.sampleRate,
+            audioBitrate = primary.audioBitrate ?: secondary.audioBitrate,
+            audioChannels = primary.audioChannels ?: secondary.audioChannels,
+            audioIndex = primary.audioIndex ?: secondary.audioIndex,
+            durationSec = primary.durationSec ?: secondary.durationSec,
+            containerBitrate = primary.containerBitrate ?: secondary.containerBitrate,
+            containerFormat = primary.containerFormat ?: secondary.containerFormat,
+            isTsEncapsulated = primary.isTsEncapsulated || secondary.isTsEncapsulated
         )
     }
 
@@ -126,9 +154,9 @@ object FFProbeInspector {
             val containerBitrate = info.bitrate?.toLongOrNull()
             VideoInfo(
                 videoCodec, width, height, fps, pixFmt,
-                videoBitrate ?: containerBitrate, videoIndex,
+                videoBitrate, videoIndex,
                 audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
-                durationSec, containerBitrate
+                durationSec, containerBitrate, null
             )
         } catch (e: Exception) {
             Log.e(TAG, "inspectViaApi failed: ${e.message}")
@@ -214,12 +242,12 @@ object FFProbeInspector {
         val fmt = root.optJSONObject("format")
         val durationSec = fmt?.optString("duration")?.toDoubleOrNull()
         val containerBitrate = fmt?.optString("bit_rate")?.toLongOrNull()
-        if (videoBitrate == null) videoBitrate = containerBitrate
+        val containerFormat = fmt?.optString("format_name")?.lowercase()?.ifBlank { null }
 
         return VideoInfo(
             videoCodec, width, height, fps, pixFmt, videoBitrate, videoIndex,
             audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
-            durationSec, containerBitrate, isTsEncapsulated
+            durationSec, containerBitrate, containerFormat, isTsEncapsulated
         )
     }
 

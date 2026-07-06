@@ -19,6 +19,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.CheckBox
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
@@ -27,6 +28,10 @@ import android.widget.Toast
 import java.io.File
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.method.LinkMovementMethod
+import android.text.style.URLSpan
 
 class MainActivity : Activity() {
 
@@ -35,7 +40,8 @@ class MainActivity : Activity() {
     private lateinit var retryButton: Button
     private lateinit var pickFolderButton: Button
     private lateinit var radioFast: RadioButton
-    private lateinit var radioAccurate: RadioButton
+    private lateinit var radioSwAccurate: RadioButton
+    private lateinit var radioHwAccurate: RadioButton
     private lateinit var progressBar: ProgressBar
     private lateinit var browseFileButton: Button
     private lateinit var openPlayerButton: Button
@@ -68,12 +74,34 @@ class MainActivity : Activity() {
     private val keyLastVideoIdTs = "last_video_id_ts"
     private val keyOutputFolderUri = "output_folder_uri"
     private val keyFrameAccurate = "frame_accurate"
+    private val keyHwAccurate = "hw_accurate"
     private val keyLastFileUri = "last_file_uri"
     private val keyLastFileName = "last_file_name"
+    private val keyActiveProcessingId = "active_processing_id"
+    private val keyActiveProcessingUri = "active_processing_uri"
+    private val keyActiveProcessingFileName = "active_processing_file_name"
+    private val keyActiveProcessingTitle = "active_processing_title"
+    private val keyActiveProcessingAuthor = "active_processing_author"
     private val recentIdMaxAgeMs = 7 * 24 * 60 * 60 * 1000L  // 7 days
     private val tag = "SponsorCut"
     private val pickFolderRequestCode = 42
     private val browseFileRequestCode = 43
+
+    // All SponsorBlock categories; only "sponsor" is checked by default
+    private val allCategories = listOf(
+        "sponsor"          to "Sponsor segments",
+        "selfpromo"        to "Self-promotion (unpaid)",
+        "interaction"      to "Interaction reminder (subscribe, etc.)",
+        "intro"            to "Intro / intermission",
+        "outro"            to "Outro / end cards",
+        "preview"          to "Preview / recap",
+        "filler"           to "Filler / tangent / joke",
+        "music_offtopic"   to "Non-music section (music videos)",
+        "poi_highlight"    to "Highlight / point of interest",
+        "exclusive_access" to "Exclusive access (members-only content)",
+        "chapter"          to "Chapter markers"
+    )
+    private val categoryCheckboxes = mutableMapOf<String, CheckBox>()
 
     private val progressReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -92,6 +120,15 @@ class MainActivity : Activity() {
             val error = intent.getBooleanExtra(ProcessingService.EXTRA_ERROR, false)
             val cancelled = intent.getBooleanExtra(ProcessingService.EXTRA_CANCELLED, false)
             if (done || error || cancelled) {
+                clearActiveProcessingSnapshot()
+                if (error && isUriAccessError(text)) {
+                    pendingUri = null
+                    fileCardState = CardState.PENDING
+                    runOnUiThread {
+                        fileCardLabel.text = "No file selected"
+                        browseFileButton.text = "📁 Browse for video file…"
+                    }
+                }
                 setStatus(if (cancelled) "⏹ Cancelled." else text)
                 runOnUiThread {
                     setProcessingUi(active = false)
@@ -122,6 +159,7 @@ class MainActivity : Activity() {
         }
 
         setupUi()
+        restoreActiveProcessingSnapshotIfNeeded()
 
         // Request notification permission on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -141,6 +179,10 @@ class MainActivity : Activity() {
             registerReceiver(progressReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(progressReceiver, filter)
+        }
+        if (ProcessingService.isProcessingActive) {
+            restoreActiveProcessingSnapshotIfNeeded()
+            setProcessingUi(active = true)
         }
     }
 
@@ -376,24 +418,38 @@ class MainActivity : Activity() {
                 orientation = RadioGroup.VERTICAL
                 setPadding(p, 0, p, 0)
             }
-            val savedFrameAccurate = getSharedPreferences(prefsName, MODE_PRIVATE)
-                .getBoolean(keyFrameAccurate, false)  // default: Fast
+            val modePrefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+            val savedFrameAccurate = modePrefs.getBoolean(keyFrameAccurate, false)
+            val savedHwAccurate    = modePrefs.getBoolean(keyHwAccurate, false)
             radioFast = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Fast (stream copy — default, no re-encode)"
-                isChecked = !savedFrameAccurate
+                text = "Fast (stream copy — best tradeoff, accurate for audio-only - done in seconds)"
+                isChecked = !savedFrameAccurate && !savedHwAccurate
             }
-            radioAccurate = RadioButton(context).apply {
+            radioHwAccurate = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Frame-accurate (re-encode, slower, exact cuts)"
+                text = "HW-Accurate (h264 single-pass, one-shot GPU init — lengthy)"
+                isChecked = savedHwAccurate
+            }
+            radioSwAccurate = RadioButton(context).apply {
+                id = View.generateViewId()
+                text = "SW-Accurate (mpeg4 CPU encode, single-pass, one-shot - lengthy - heat producing)"
                 isChecked = savedFrameAccurate
             }
             radioGroup.addView(radioFast)
-            radioGroup.addView(radioAccurate)
-            radioGroup.check(if (savedFrameAccurate) radioAccurate.id else radioFast.id)
+            radioGroup.addView(radioHwAccurate)
+            radioGroup.addView(radioSwAccurate)
+
+            val initialId = when {
+                savedHwAccurate    -> radioHwAccurate.id
+                savedFrameAccurate -> radioSwAccurate.id
+                else               -> radioFast.id
+            }
+            radioGroup.check(initialId)
             radioGroup.setOnCheckedChangeListener { _, _ ->
                 getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                    .putBoolean(keyFrameAccurate, radioAccurate.isChecked)
+                    .putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
+                    .putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
                     .apply()
             }
             addView(radioGroup, lp)
@@ -405,14 +461,79 @@ class MainActivity : Activity() {
             }
             addView(modeHintView, lp)
 
+            // ── SponsorBlock category selector ─────────────────────────────
+            val catLabel = TextView(context).apply {
+                text = "Cut these SponsorBlock categories:"
+                setPadding(p, p, p, 0)
+                textSize = 14f
+            }
+            addView(catLabel, lp)
+
+            val catContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(p * 2, p / 4, p, p / 4)
+            }
+            val catPrefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+            for ((catKey, catName) in allCategories) {
+                val defaultChecked = catKey == "sponsor"
+                val cb = CheckBox(context).apply {
+                    text = catName
+                    isChecked = catPrefs.getBoolean("cat_$catKey", defaultChecked)
+                    setOnCheckedChangeListener { _, checked ->
+                        catPrefs.edit().putBoolean("cat_$catKey", checked).apply()
+                        // Re-filter from cache — no network re-fetch needed
+                        val segs = cachedSegments
+                        if (segs != null && lastFetchedId.isNotBlank()) {
+                            val visible = segs.filter { it.category in selectedCategories() }
+                            idCardState = if (visible.isEmpty()) CardState.ERROR else CardState.OK
+                            runOnUiThread {
+                                applySegmentUiState(lastFetchedId, visible, cachedTitle, cachedAuthor)
+                                updateCards()
+                            }
+                        }
+                    }
+                }
+                categoryCheckboxes[catKey] = cb
+                catContainer.addView(cb, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+            addView(catContainer, lp)
+
+            // Signature
+            // val sig = TextView(context).apply {
+            //     text = "By: Guy Steiff\nAbout: https://guysteiff.vercel.app/"
+            //     textSize = 12f
+            //     setPadding(p, p * 2, p, p)
+            //     alpha = 0.5f
+            // }
+            // addView(sig, lp)
+
             // Signature
             val sig = TextView(context).apply {
-                text = "By: Guy Steiff\nAbout: https://guysteiff.vercel.app/"
+                val url = "https://guysteiff.vercel.app/"
+                val textContent = "By: Guy Steiff\nAbout: $url"
+
+                val spannable = SpannableString(textContent)
+
+                val start = textContent.indexOf(url)
+                val end = start + url.length
+
+                spannable.setSpan(
+                    URLSpan(url),
+                    start,
+                    end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+
+                text = spannable
+                movementMethod = LinkMovementMethod.getInstance()
+
                 textSize = 12f
                 setPadding(p, p * 2, p, p)
                 alpha = 0.5f
             }
             addView(sig, lp)
+
 
             // Diagnostic log — hidden until a run completes
             logButton = Button(context).apply {
@@ -512,6 +633,14 @@ class MainActivity : Activity() {
             "com.sponsorcut.PROCESS_FILE" -> handleDirectIntent(intent)
             Intent.ACTION_SEND -> handleShareIntent(intent)
             else -> {
+                // While a job is active, never run cold-open restore/fetch logic.
+                // This avoids re-fetching segments when returning from background.
+                if (ProcessingService.isProcessingActive) {
+                    restoreActiveProcessingSnapshotIfNeeded()
+                    setProcessingUi(active = true)
+                    return
+                }
+
                 // Cold open — restore last remembered ID into the input field if recent enough
                 val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
                 val savedId = prefs.getString(keyLastVideoId, "").orEmpty()
@@ -534,6 +663,7 @@ class MainActivity : Activity() {
 
     // Called by PipePipe/NewPipe fork with both URI and video ID pre-populated
     private fun handleDirectIntent(intent: Intent) {
+        if (rejectIfBusy()) return
         val uriString = intent.getStringExtra("uri")
         val videoId = intent.getStringExtra("video_id").orEmpty()
 
@@ -561,6 +691,7 @@ class MainActivity : Activity() {
     }
 
     private fun handleShareIntent(intent: Intent) {
+        if (rejectIfBusy()) return
         Log.d(tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
             "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
             "EXTRA_STREAM=${intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)}")
@@ -637,21 +768,46 @@ class MainActivity : Activity() {
     }
 
     private fun startProcessing(uri: Uri, videoId: String, idSource: String) {
+        if (!canReadUri(uri)) {
+            pendingUri = null
+            fileCardState = CardState.PENDING
+            runOnUiThread {
+                fileCardLabel.text = "No file selected"
+                browseFileButton.text = "📁 Browse for video file…"
+                setStatus("File access expired or unavailable. Please re-share or browse the file again.")
+                updateCards()
+            }
+            return
+        }
+
         val outputFolderUri = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(keyOutputFolderUri, null)
-        val frameAccurate = radioAccurate.isChecked
+        val frameAccurate = radioSwAccurate.isChecked
+        val activeFileName = runCatching { FileResolver.getDisplayName(this, uri) }
+            .getOrElse { uri.lastPathSegment ?: "file" }
+        saveActiveProcessingSnapshot(
+            videoId = videoId,
+            uri = uri,
+            fileName = activeFileName,
+            title = cachedTitle,
+            author = cachedAuthor
+        )
 
         setProcessingUi(active = true)
         logButton.visibility = View.GONE
         logView.visibility = View.GONE
         val videoHeader = buildString {
             if (cachedTitle != null) {
-                append("\"${cachedTitle}\"")
+                append("${cachedTitle}")
                 if (cachedAuthor != null) append("\nby ${cachedAuthor}")
                 append("\n\n")
             }
         }
-        setStatus("${videoHeader}Starting processing… [${if (frameAccurate) "frame-accurate" else "fast"}]")
+        setStatus("${videoHeader}Starting processing… [${when {
+            radioHwAccurate.isChecked -> "HW-accurate"
+            radioSwAccurate.isChecked   -> "SW-accurate"
+            else                      -> "fast"
+        }}]")
 
         val serviceIntent = Intent(this, ProcessingService::class.java).apply {
             action = ProcessingService.ACTION_PROCESS
@@ -659,6 +815,8 @@ class MainActivity : Activity() {
             putExtra(ProcessingService.EXTRA_VIDEO_ID, videoId)
             putExtra(ProcessingService.EXTRA_ID_SOURCE, idSource)
             putExtra(ProcessingService.EXTRA_FRAME_ACCURATE, frameAccurate)
+            putStringArrayListExtra(ProcessingService.EXTRA_CATEGORIES, ArrayList(selectedCategories()))
+            putExtra(ProcessingService.EXTRA_HW_ACCURATE, radioHwAccurate.isChecked)
             if (outputFolderUri != null) putExtra(ProcessingService.EXTRA_OUTPUT_FOLDER_URI, outputFolderUri)
         }
 
@@ -679,7 +837,8 @@ class MainActivity : Activity() {
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
             val controls = listOf(retryButton, browseFileButton, openPlayerButton,
-                pickFolderButton, idInput, radioFast, radioAccurate)
+                pickFolderButton, idInput, radioFast, radioSwAccurate, radioHwAccurate) +
+                categoryCheckboxes.values.toList()
             for (v in controls) {
                 v.isEnabled = !active
                 v.alpha = if (active) 0.35f else 1f
@@ -690,11 +849,48 @@ class MainActivity : Activity() {
                 progressBar.progress = 0
                 // Re-enable controls; retryButton state managed by updateCards()
                 val nonRetry = listOf(browseFileButton, openPlayerButton, pickFolderButton,
-                    idInput, radioFast, radioAccurate)
-                for (v in nonRetry) { v.isEnabled = true; v.alpha = 1f }
+                    idInput, radioFast, radioSwAccurate, radioHwAccurate) + categoryCheckboxes.values.toList()
                 updateCards()
             }
         }
+    }
+
+    /**
+     * After a SponsorBlock fetch, enable/disable checkboxes based on what actually
+     * exists for this video and show segment counts on each label.
+     */
+    private fun updateCategoryAvailability(segments: List<SponsorSegmentInfo>?) {
+        runOnUiThread {
+            val countByCategory = segments?.groupBy { it.category }?.mapValues { it.value.size }
+                ?: emptyMap()
+            for ((catKey, catName) in allCategories) {
+                val cb = categoryCheckboxes[catKey] ?: continue
+                val count = countByCategory[catKey] ?: 0
+                if (count > 0) {
+                    // Show with count label, ensure visible and enabled
+                    cb.text = "$catName ($count)"
+                    cb.isEnabled = true
+                    cb.alpha = 1f
+                    cb.visibility = android.view.View.VISIBLE
+                } else {
+                    // Hide completely — not in this video's SponsorBlock data
+                    cb.visibility = android.view.View.GONE
+                    if (cb.isChecked) {
+                        cb.isChecked = false
+                        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+                            .putBoolean("cat_$catKey", false).apply()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun selectedCategories(): List<String> {
+        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+        return allCategories
+            .filter { (key, _) -> prefs.getBoolean("cat_$key", key == "sponsor") }
+            .map { (key, _) -> key }
+            .ifEmpty { listOf("sponsor") }
     }
 
     private fun saveId(videoId: String) {
@@ -718,6 +914,10 @@ class MainActivity : Activity() {
         val uriString = prefs.getString(keyLastFileUri, null) ?: return
         val fileName = prefs.getString(keyLastFileName, null) ?: "previous file"
         val uri = Uri.parse(uriString)
+        if (!canReadUri(uri)) {
+            prefs.edit().remove(keyLastFileUri).remove(keyLastFileName).apply()
+            return
+        }
         pendingUri = uri
         fileCardState = CardState.OK
         runOnUiThread {
@@ -778,6 +978,7 @@ class MainActivity : Activity() {
 
     /** Fetch SponsorBlock segments for [videoId] in background; update UI when done. */
     private fun fetchSegmentsForId(videoId: String, force: Boolean = false) {
+        if (ProcessingService.isProcessingActive) return
         if (videoId.length != 11) return
         if (!force && videoId == lastFetchedId) return
         lastFetchedId = videoId
@@ -787,7 +988,7 @@ class MainActivity : Activity() {
         runOnUiThread {
             modeHintView.visibility = View.GONE
             highlightRadio(radioFast, false)
-            highlightRadio(radioAccurate, false)
+            highlightRadio(radioSwAccurate, false)
             idCardState = CardState.CHECKING
             updateCards()
         }
@@ -815,7 +1016,7 @@ class MainActivity : Activity() {
             }
 
             val segments = try {
-                SponsorBlockClient().fetchRich(videoId)
+                SponsorBlockClient().fetchRich(videoId, allCategories.map { it.first })
             } catch (e: Exception) {
                 Log.w(tag, "Segment pre-fetch failed: ${e.message}")
                 null
@@ -823,13 +1024,15 @@ class MainActivity : Activity() {
             cachedSegments = segments
             cachedTitle = title
             cachedAuthor = author
+            val visibleSegments = segments?.filter { it.category in selectedCategories() }
             runOnUiThread {
+                updateCategoryAvailability(segments)
                 idCardState = when {
-                    segments == null -> CardState.OK   // network error — fail open
-                    segments.isEmpty() -> CardState.ERROR
+                    segments == null  -> CardState.OK   // network error — fail open
+                    visibleSegments.isNullOrEmpty() -> CardState.ERROR
                     else -> CardState.OK
                 }
-                applySegmentUiState(videoId, segments, title, author)
+                applySegmentUiState(videoId, visibleSegments, title, author)
                 updateCards()
                 applyModeRecommendation()
             }
@@ -863,10 +1066,10 @@ class MainActivity : Activity() {
                 retryButton.alpha = 1f
                 retryButton.text = "Process with this ID"
                 val summary = segments.joinToString("\n") {
-                    "  [${it.category}] ${"%.1f".format(it.start)}s – ${"%.1f".format(it.end)}s (~${"%.0f".format(it.end - it.start)}s)"
+                    "  [${it.category}] ${formatSegmentTimestamp(it.start)} - ${formatSegmentTimestamp(it.end)} (~${"%.0f".format(it.end - it.start)}s)"
                 }
                 val totalCut = segments.sumOf { it.end - it.start }
-                val note = "🔍 ${segments.size} segment(s) to cut (~${"%.1f".format(totalCut)}s):\n$summary"
+                val note = "🔍 ${segments.size} segment(s) to cut (~${String.format("%.2f", totalCut)}):\n$summary"
                 // Replace full status with: title + note (clean, no stacking)
                 val currentStatus = statusView.text?.toString().orEmpty()
                 val baseStatus = when {
@@ -988,12 +1191,14 @@ class MainActivity : Activity() {
                 if (hint.isBlank()) {
                     modeHintView.visibility = View.GONE
                     highlightRadio(radioFast, false)
-                    highlightRadio(radioAccurate, false)
+                    highlightRadio(radioSwAccurate, false)
+                    highlightRadio(radioHwAccurate, false)
                 } else {
                     modeHintView.text = hint
                     modeHintView.visibility = View.VISIBLE
                     highlightRadio(radioFast, recommendFast)
-                    highlightRadio(radioAccurate, !recommendFast)
+                    highlightRadio(radioSwAccurate, !recommendFast)
+                    highlightRadio(radioHwAccurate, false)
                 }
             }
         }.start()
@@ -1026,7 +1231,7 @@ class MainActivity : Activity() {
         dotBaseText = baseText
         dotPhaseIdx = 0
         val header = if (cachedTitle != null) {
-            "\"${cachedTitle}\"" + (if (cachedAuthor != null) "\nby ${cachedAuthor}" else "") + "\n\n"
+            "${cachedTitle}" + (if (cachedAuthor != null) "\nby ${cachedAuthor}" else "") + "\n\n"
         } else ""
         val tick = object : Runnable {
             override fun run() {
@@ -1045,6 +1250,18 @@ class MainActivity : Activity() {
         dotRunnable = null
     }
 
+    // Similar time-format helper exists in FfmpegEngine (formatTimestamp), but this one is
+    // intentionally separate: segment preview in the selection UI needs h:mm:ss.ms precision,
+    // while engine progress favors coarser, fast-to-scan timestamps for runtime updates.
+    private fun formatSegmentTimestamp(seconds: Double): String {
+        val totalMs = (seconds * 1000.0).toLong().coerceAtLeast(0L)
+        val h = totalMs / 3_600_000
+        val m = (totalMs % 3_600_000) / 60_000
+        val s = (totalMs % 60_000) / 1_000
+        val ms = totalMs % 1_000
+        return "%d:%02d:%02d.%03d".format(h, m, s, ms)
+    }
+
     private fun setStatus(text: String) {
         runOnUiThread {
             stopDotAnim()
@@ -1054,6 +1271,102 @@ class MainActivity : Activity() {
 
     private fun toast(text: String) {
         runOnUiThread { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
+    }
+
+    private fun rejectIfBusy(): Boolean {
+        if (!ProcessingService.isProcessingActive) return false
+        // Keep existing job state untouched; reject new incoming share/direct intents.
+        val msg = "please wait for current job to conclude and try again..."
+        runOnUiThread {
+            toast(msg)
+            restoreActiveProcessingSnapshotIfNeeded()
+            setProcessingUi(active = true)
+        }
+        return true
+    }
+
+    private fun canReadUri(uri: Uri): Boolean {
+        return try {
+            contentResolver.openInputStream(uri)?.use { }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun isUriAccessError(text: String): Boolean {
+        val t = text.lowercase()
+        return t.contains("cannot open uri") ||
+            t.contains("bad uri") ||
+            t.contains("permission denied") ||
+            t.contains("no such file")
+    }
+
+    private fun saveActiveProcessingSnapshot(
+        videoId: String,
+        uri: Uri,
+        fileName: String,
+        title: String?,
+        author: String?
+    ) {
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .putString(keyActiveProcessingId, videoId)
+            .putString(keyActiveProcessingUri, uri.toString())
+            .putString(keyActiveProcessingFileName, fileName)
+            .putString(keyActiveProcessingTitle, title)
+            .putString(keyActiveProcessingAuthor, author)
+            .apply()
+    }
+
+    private fun clearActiveProcessingSnapshot() {
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .remove(keyActiveProcessingId)
+            .remove(keyActiveProcessingUri)
+            .remove(keyActiveProcessingFileName)
+            .remove(keyActiveProcessingTitle)
+            .remove(keyActiveProcessingAuthor)
+            .apply()
+    }
+
+    private fun restoreActiveProcessingSnapshotIfNeeded() {
+        if (!ProcessingService.isProcessingActive) return
+
+        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+        val activeId = prefs.getString(keyActiveProcessingId, "").orEmpty()
+        if (activeId.isBlank()) return
+
+        val activeUri = prefs.getString(keyActiveProcessingUri, null)?.let {
+            runCatching { Uri.parse(it) }.getOrNull()
+        }
+        val activeFileName = prefs.getString(keyActiveProcessingFileName, null)
+        val activeTitle = prefs.getString(keyActiveProcessingTitle, null)
+        val activeAuthor = prefs.getString(keyActiveProcessingAuthor, null)
+
+        pendingUri = activeUri
+        cachedTitle = activeTitle
+        cachedAuthor = activeAuthor
+
+        runOnUiThread {
+            idInput.setText(activeId)
+            idCardState = CardState.OK
+
+            if (!activeFileName.isNullOrBlank()) {
+                fileCardLabel.text = "📄 $activeFileName"
+                browseFileButton.text = "📁 Change file…"
+                fileCardState = CardState.OK
+            }
+
+            val header = buildString {
+                if (!activeTitle.isNullOrBlank()) {
+                    append("\"$activeTitle\"")
+                    if (!activeAuthor.isNullOrBlank()) append("\nby $activeAuthor")
+                    append("\n\n")
+                }
+                append("Processing in background…")
+            }
+            setStatus(header)
+            updateCards()
+        }
     }
 }
 

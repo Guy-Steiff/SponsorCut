@@ -1,0 +1,36 @@
+SponsorCut 1.0.3
+
+Changelog / Release notes:
+
+- Architecture hardening: TranscodePolicy refactor
+  - Implemented a single decision graph for copy/transcode decisions.
+  - Introduced `CoreDecisions` with FINAL canonical booleans `canCopyVideo` and `canCopyAudio` computed once by `deriveCoreDecisions()`.
+  - Removed duplicated decision derivations; SW and HW/FAST paths now consume the same precomputed decisions.
+  - Renamed `deriveCorDecisions` -> `deriveCoreDecisions` for clarity and maintainability.
+  - Added `TRANSCODEPOLICY_ARCHITECTURE.md` and `TRANSCODEPOLICY_V2_SUMMARY.md` documenting the hardening rules and enforcement.
+
+- SW/HW accuracy separation
+  - Separated the accuracy modes into distinct SW/HW Accurate paths while keeping policy parity.
+  - SW uses legacy bitrate ladder (`swLegacyBitrate()`); HW/FAST uses `computeTargetBitrate()`.
+
+- UX / behaviour changes
+  - App now behaves better when a job is already running: additional attempts to start a job are rejected while an existing job is active.
+
+- Metadata / presentation
+  - New app icon added.
+  - Moved Donate/Bitcoin information outside the description into the proper metadata fields.
+  - Added hyperlink to the author's website in the footer.
+  - Removed an incorrect claim about rumble.com support from the app description.
+
+- Misc improvements
+  - Improved logging: diagnostic logs only consume precomputed values (no policy logic in logging).
+  - Minor code cleanups and documentation updates across the repo.
+
+Notes:
+- This changelog content will be used as the git commit message for release branch commits.
+- The release pipeline must use ONLY the APK produced by the GitHub CI/release workflow. Do not upload or provide locally-built APKs to F-Droid.
+
+Acknowledgements:
+- See `TRANSCODEPOLICY_ARCHITECTURE.md` for a full list of architectural rules applied and enforcement guidance.
+
+

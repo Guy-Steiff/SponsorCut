@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -27,6 +28,8 @@ class ProcessingService : Service() {
         const val EXTRA_ID_SOURCE = "id_source"
         const val EXTRA_OUTPUT_FOLDER_URI = "output_folder_uri"
         const val EXTRA_FRAME_ACCURATE = "frame_accurate"
+        const val EXTRA_CATEGORIES = "categories"
+        const val EXTRA_HW_ACCURATE = "hw_accurate"
 
         const val BROADCAST_PROGRESS = "com.sponsorcut.PROGRESS"
         const val EXTRA_PROGRESS_TEXT = "progress_text"
@@ -35,6 +38,9 @@ class ProcessingService : Service() {
         const val EXTRA_DONE = "done"
         const val EXTRA_ERROR = "error"
         const val EXTRA_CANCELLED = "cancelled"
+
+        @Volatile
+        var isProcessingActive: Boolean = false
     }
 
     private val tag = "ProcessingService"
@@ -72,6 +78,8 @@ class ProcessingService : Service() {
         val idSource = intent.getStringExtra(EXTRA_ID_SOURCE) ?: "manual"
         val outputFolderUri = intent.getStringExtra(EXTRA_OUTPUT_FOLDER_URI)
         val frameAccurate = intent.getBooleanExtra(EXTRA_FRAME_ACCURATE, false)
+        val categories = intent.getStringArrayListExtra(EXTRA_CATEGORIES)?.toList() ?: listOf("sponsor")
+        val hwAccurate = intent.getBooleanExtra(EXTRA_HW_ACCURATE, false)
         val uri = try { Uri.parse(uriString) } catch (e: Exception) {
             broadcast(text = "Bad URI: $uriString\n${e.message}", error = true)
             finish(startId)
@@ -79,6 +87,7 @@ class ProcessingService : Service() {
         }
 
         Thread {
+            isProcessingActive = true
             var tempOutput: File? = null
             var outputTarget: OutputTarget? = null
             // Acquire CPU wake lock — keeps processing running when screen turns off
@@ -88,29 +97,33 @@ class ProcessingService : Service() {
             try {
                 DiagLog.clear()
                 DiagLog.append("Service", "Starting. frameAccurate=$frameAccurate uri=$uriString")
+                val power = collectPowerDiagnostics()
+                DiagLog.append(
+                    "Service",
+                    "Power state: ${power.chargingState}; temp_c=${power.batteryTempC?.let { "%.1f".format(it) } ?: "unknown"}; " +
+                        "power_save_mode=${power.powerSaveMode}; thermal_status=${power.thermalStatus}"
+                )
                 progress("Copying input video…")
                 val inputFile = FileResolver.uriToFile(this, uri)
                 DiagLog.append("Service", "Input cached: ${inputFile.absolutePath} size=${inputFile.length()}")
                 val sourceName = FileResolver.getDisplayName(this, uri)
-                val sourceExt = sourceName.substringAfterLast('.', "mp4").lowercase().ifBlank { "mp4" }
                 val plan = run {
                     // Need to inspect first to know if we're re-encoding (affects output extension)
                     progress("Inspecting video…")
                     val info = FFProbeInspector.inspect(inputFile)
                         ?: error("ffprobe could not read the video file — unsupported format?")
                     DiagLog.append("FFProbe", "isTsEncapsulated=${info.isTsEncapsulated} codec=${info.videoCodec} audio=${info.audioCodec} summary=${info.summaryLine}")
-                    TranscodePolicy.plan(info, frameAccurate).also { p ->
+                    TranscodePolicy.plan(info, frameAccurate, hwAccurate).also { p ->
                         DiagLog.append("Plan", "canCopyVideo=${p.canCopyVideo} canCopyAudio=${p.canCopyAudio} useSlowSeek=${p.useSlowSeek} rationale=${p.rationale}")
                         progress("Plan: ${p.rationale}")
                     } to info
                 }
                 val (processingPlan, videoInfo) = plan
 
-                // Always preserve the source extension — ffmpeg handles any codec in any container.
-                val outputExt = sourceExt
-                val baseSourceName = if (outputExt != sourceExt)
-                    sourceName.substringBeforeLast('.') + ".$outputExt"
-                else sourceName
+                // Force output container from FFprobe-driven policy, not input file naming.
+                val outputExt = processingPlan.outputExtension
+                val sourceBase = sourceName.substringBeforeLast('.', sourceName)
+                val baseSourceName = "$sourceBase.$outputExt"
                 val outputFileName = FileResolver.outputFileNameFromSource(baseSourceName)
                 outputTarget = if (!outputFolderUri.isNullOrBlank()) {
                     FileResolver.createOutputTargetInTree(this, Uri.parse(outputFolderUri), outputFileName)
@@ -118,9 +131,10 @@ class ProcessingService : Service() {
                     FileResolver.createOutputTarget(this, uri, outputFileName, inputFile)
                 }
                 tempOutput = File(cacheDir, "processed_${System.currentTimeMillis()}.$outputExt")
+                DiagLog.append("Service", "Output container: .$outputExt muxer=${processingPlan.outputMuxer ?: "auto"}")
 
                 progress("Fetching SponsorBlock segments…")
-                val segments = SponsorBlockClient().fetchRich(videoId)
+                val segments = SponsorBlockClient().fetchRich(videoId, categories)
                 Log.i(tag, "SponsorBlock result: $segments")
 
                 if (segments.isEmpty()) {
@@ -136,7 +150,8 @@ class ProcessingService : Service() {
                 val totalCut = sortedSegs.sumOf { it.end - it.start }
                 progress("Removing ${segments.size} sponsor segment(s) (~%.1fs) [${processingPlan.rationale}]".format(totalCut))
 
-                FfmpegEngine.process(
+                val encodeStartMs = System.currentTimeMillis()
+                val encodeStats = FfmpegEngine.process(
                     inputFile, tempOutput,
                     sortedSegs.map { it.start to it.end },
                     cacheDir,
@@ -149,6 +164,21 @@ class ProcessingService : Service() {
                         nm.notify(NOTIF_ID, notif)
                     }
                 )
+                val encodeElapsedSec = (System.currentTimeMillis() - encodeStartMs) / 1000.0
+
+                // Log a full regression equation for fast mode (if available).
+                if (!frameAccurate && !hwAccurate) {
+                    val a = encodeStats.regressionA
+                    val b = encodeStats.regressionB ?: 0.0
+                    if (a != null) {
+                        DiagLog.append(
+                            "Perf",
+                            "Fast mode regression: processing_time_s = ${"%.6f".format(a)} * (duration_time_s) + ${"%.6f".format(b)}"
+                        )
+                    } else {
+                        DiagLog.append("Perf", "Fast mode regression unavailable (insufficient data points)")
+                    }
+                }
 
                 val inputSizeMb = "%.2f".format(inputFile.length() / 1_000_000.0)
                 progress("Saving output…")
@@ -156,7 +186,12 @@ class ProcessingService : Service() {
                 val outputSizeMb = "%.2f".format(tempOutput.length() / 1_000_000.0)
 
                 val segSummary = sortedSegs.joinToString("\n") {
-                    "  [${it.category}] %.1fs → %.1fs (%.1fs removed)".format(it.start, it.end, it.end - it.start)
+                    "  [${it.category}] %s → %s (%.1fs rm)"
+                        .format(
+                            formatElapsedHms(it.start),
+                            formatElapsedHms(it.end),
+                            it.end - it.start
+                        )
                 }
 
                 // Duration-proportional expected size (rough sanity check)
@@ -165,16 +200,43 @@ class ProcessingService : Service() {
                 val expectedRatio = if (totalSec > 0) keptSec / totalSec else 1.0
                 val expectedMb = "%.2f".format(inputFile.length() * expectedRatio / 1_000_000.0)
 
+                val realtimeX = if (encodeElapsedSec > 0.0) keptSec / encodeElapsedSec else null
+                DiagLog.append(
+                    "Perf",
+                    if (realtimeX != null)
+                        "Throughput: x_realtime=${"%.3f".format(realtimeX)} (kept_duration_s=${"%.3f".format(keptSec)}, processing_time_s=${"%.3f".format(encodeElapsedSec)})"
+                    else
+                        "Throughput unavailable (processing_time_s=0)"
+                )
+
                 val sizeNote = if (processingPlan.canCopyVideo && processingPlan.canCopyAudio)
                     "expected ~${expectedMb}MB"
                 else
                     "re-encoded; stream copy would be ~${expectedMb}MB"
 
+                val equationLine = buildString {
+                    val a = encodeStats.regressionA
+                    val b = encodeStats.regressionB
+                    if (processingPlan.singlePassFilter) {
+                        // Single-pass: b not available; compute a = elapsed / kept_duration
+                        val derivedA = if (keptSec > 0) encodeElapsedSec / keptSec else null
+                        if (derivedA != null)
+                            append("Rate equation: processing_time_s = ${"%.3f".format(derivedA)} * (duration_time_s)")
+                    } else if (a != null) {
+                        // Per-segment regression
+                        val bVal = b ?: 0.0
+                        append("Rate equation: processing_time_s = ${"%.3f".format(a)} * (duration_time_s) + ${"%.3f".format(bVal)}")
+                    }
+                }
+                val timingLine = "Processing time: ${formatElapsedHms(encodeElapsedSec)}" +
+                    (if (equationLine.isNotBlank()) "\n$equationLine" else "")
+
                 val result = "✓ Done — ID: $videoId\n\n" +
                     "Removed ${segments.size} segment(s) (~%.1fs):\n".format(totalCut) +
                     "$segSummary\n\n" +
                     "Media: ${videoInfo.summaryLine}\n" +
-                    "Mode: ${processingPlan.rationale}\n\n" +
+                    "Mode: ${processingPlan.rationale}\n" +
+                    "$timingLine\n\n" +
                     "Size: ${inputSizeMb}MB → ${outputSizeMb}MB ($sizeNote)\n\n" +
                     "Saved to:\n${outputTarget.label}"
 
@@ -195,6 +257,7 @@ class ProcessingService : Service() {
                     showDoneNotification("SponsorCut failed", e.message ?: "unknown error")
                 }
             } finally {
+                isProcessingActive = false
                 wakeLock?.let { if (it.isHeld) it.release() }
                 wakeLock = null
                 tempOutput?.delete()
@@ -331,6 +394,77 @@ class ProcessingService : Service() {
                 .build()
         }
         nm.notify(NOTIF_DONE_ID, n)
+    }
+
+    private data class PowerDiagnostics(
+        val chargingState: String,
+        val batteryTempC: Double?,
+        val powerSaveMode: Boolean,
+        val thermalStatus: String
+    )
+
+    private fun collectPowerDiagnostics(): PowerDiagnostics {
+        var chargingState = "unknown"
+        var batteryTempC: Double? = null
+
+        try {
+            val batteryIntent = registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            if (batteryIntent != null) {
+                val status = batteryIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                val plugged = batteryIntent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                val tempTenths = batteryIntent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+                if (tempTenths != Int.MIN_VALUE) batteryTempC = tempTenths / 10.0
+
+                val source = when {
+                    plugged and BatteryManager.BATTERY_PLUGGED_AC != 0 -> "ac"
+                    plugged and BatteryManager.BATTERY_PLUGGED_USB != 0 -> "usb"
+                    plugged and BatteryManager.BATTERY_PLUGGED_WIRELESS != 0 -> "wireless"
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 &&
+                        plugged and BatteryManager.BATTERY_PLUGGED_DOCK != 0 -> "dock"
+                    else -> "unplugged"
+                }
+
+                val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL
+                chargingState = if (charging) "charging($source)" else "not_charging"
+            }
+        } catch (_: Exception) {
+            chargingState = "unknown"
+        }
+
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val powerSaveMode = runCatching { pm.isPowerSaveMode }.getOrDefault(false)
+        val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching { thermalStatusLabel(pm.currentThermalStatus) }.getOrElse { "unknown" }
+        } else {
+            "unsupported"
+        }
+
+        return PowerDiagnostics(
+            chargingState = chargingState,
+            batteryTempC = batteryTempC,
+            powerSaveMode = powerSaveMode,
+            thermalStatus = thermalStatus
+        )
+    }
+
+    private fun thermalStatusLabel(status: Int): String = when (status) {
+        PowerManager.THERMAL_STATUS_NONE -> "none"
+        PowerManager.THERMAL_STATUS_LIGHT -> "light"
+        PowerManager.THERMAL_STATUS_MODERATE -> "moderate"
+        PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+        PowerManager.THERMAL_STATUS_CRITICAL -> "critical"
+        PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
+        else -> "unknown($status)"
+    }
+
+    private fun formatElapsedHms(seconds: Double): String {
+        val total = seconds.toLong().coerceAtLeast(0L)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val s = total % 60
+        return "${h}h${m}m${s}s"
     }
 }
 
