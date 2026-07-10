@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     permissions:
       contents: write
 
@@ -21,28 +22,40 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Install NDK 25.2.9519653
+      - name: Install Android NDK 25.2.9519653
         run: |
-          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
-      - name: Install ffmpeg-kit build dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool pkg-config nasm cmake \
+          sudo apt-get install -y \
+            autoconf automake libtool pkg-config nasm cmake \
             gcc gperf texinfo yasm bison autogen wget autopoint meson \
             ninja-build ragel groff make
 
-      - name: Clone ffmpeg-kit srclib
+      - name: Validate tag matches versionName
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(grep 'versionName' app/build.gradle.kts | head -n1 | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "Tag: $TAG"
+          echo "versionName: $VERSION"
+
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "ERROR: Tag does not match versionName in Gradle"
+            exit 1
+          fi
+
+      - name: Build ffmpeg-kit
         run: |
           git clone https://github.com/InfinityLoop1308/ffmpeg-kit.git ffmpeg-kit-src
           cd ffmpeg-kit-src
           git checkout efd648489598efdc65e2e2f06ae69e065e257077
 
-      - name: Build ffmpeg-kit for Android
-        run: |
-          cd ffmpeg-kit-src
           export LDFLAGS="-Wl,--build-id=none"
+
           ./android.sh --lts \
             --enable-android-media-codec \
             --enable-android-zlib \
@@ -50,30 +63,41 @@ jobs:
             --disable-arm-v7a \
             --disable-arm-v7a-neon
 
-      - name: Copy ffmpeg-kit AAR into app/libs
+      - name: Copy ffmpeg-kit AAR
         run: |
           mkdir -p app/libs
           find ffmpeg-kit-src/prebuilt -name ffmpeg-kit.aar -exec cp {} app/libs/ffmpeg-kit.aar \;
+
+      - name: Clean project
+        run: ./gradlew clean
 
       - name: Decode keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
 
-      - name: Build signed release APK
+      - name: Build release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASS: ${{ secrets.KEY_PASS }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
         run: ./gradlew assembleRelease
+
+      - name: Find APK output
+        run: |
+          echo "Searching APK..."
+          find app/build/outputs/apk -name "*.apk"
 
       - name: Rename APK
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          cp app/build/outputs/apk/release/app-release.apk SponsorCut-${VERSION}.apk
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
 
-      - name: Upload APK to GitHub Release
+          echo "Using APK: $APK"
+          cp "$APK" "SponsorCut-${VERSION}.apk"
+
+      - name: Upload GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: SponsorCut-*.apk
-
