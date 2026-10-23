@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/DiagLog.kt
+
 package com.sponsorcut
 
 import android.util.Log
@@ -8,6 +10,9 @@ import android.util.Log
  * Cleared at the start of each new run.
  */
 object DiagLog {
+
+    @Volatile
+    var suppressGlobalLogs: Boolean = false
     private const val TAG = "DiagLog"
     private val buf = StringBuilder()
 

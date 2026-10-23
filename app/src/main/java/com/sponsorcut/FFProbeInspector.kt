@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/FFProbeInspector.kt
+
 package com.sponsorcut
 
 import android.util.Log
@@ -95,17 +97,49 @@ object FFProbeInspector {
     private fun merge(primary: VideoInfo?, secondary: VideoInfo?): VideoInfo? {
         if (primary == null) return secondary
         if (secondary == null) return primary
+
+        // The structured API can report embedded album art (mjpeg/png/etc.) as
+        // a video stream. The JSON path explicitly excludes attached pictures,
+        // so use it to reject cover art when it found no real video stream.
+        val imageLikeCodecs = setOf("mjpeg", "png", "bmp", "gif", "webp", "tiff")
+        val primaryVideoCodec =
+            if (
+                primary.videoCodec.lowercase() in imageLikeCodecs &&
+                secondary.videoCodec == "unknown"
+            ) {
+                "unknown"
+            } else {
+                primary.videoCodec
+            }
+
+        val videoBitrateSource =
+            if (secondary.videoBitrate != null) "JSON"
+            else if (primary.videoBitrate != null) "API"
+            else "none"
+
+        val audioBitrateSource =
+            if (secondary.audioBitrate != null) "JSON"
+            else if (primary.audioBitrate != null) "API"
+            else "none"
+
+        Log.i(
+            TAG,
+            "FFProbe bitrate inference: " +
+                "video=$videoBitrateSource(${secondary.videoBitrate ?: primary.videoBitrate ?: "null"}), " +
+                "audio=$audioBitrateSource(${secondary.audioBitrate ?: primary.audioBitrate ?: "null"})"
+        )
+
         return VideoInfo(
-            videoCodec = if (primary.videoCodec != "unknown") primary.videoCodec else secondary.videoCodec,
+            videoCodec = if (primaryVideoCodec != "unknown") primaryVideoCodec else secondary.videoCodec,
             width = primary.width ?: secondary.width,
             height = primary.height ?: secondary.height,
             fps = primary.fps ?: secondary.fps,
             pixFmt = primary.pixFmt ?: secondary.pixFmt,
-            videoBitrate = primary.videoBitrate ?: secondary.videoBitrate,
+            videoBitrate = secondary.videoBitrate ?: primary.videoBitrate,
             videoIndex = primary.videoIndex ?: secondary.videoIndex,
             audioCodec = primary.audioCodec ?: secondary.audioCodec,
             sampleRate = primary.sampleRate ?: secondary.sampleRate,
-            audioBitrate = primary.audioBitrate ?: secondary.audioBitrate,
+            audioBitrate = secondary.audioBitrate ?: primary.audioBitrate,
             audioChannels = primary.audioChannels ?: secondary.audioChannels,
             audioIndex = primary.audioIndex ?: secondary.audioIndex,
             durationSec = primary.durationSec ?: secondary.durationSec,
@@ -168,7 +202,7 @@ object FFProbeInspector {
     private fun inspectViaJson(file: File): VideoInfo? {
         return try {
             val session = FFprobeKit.execute(
-                "-v quiet -print_format json -show_streams -show_format ${file.absolutePath}"
+                "-v quiet -print_format json -show_streams -show_format -show_entries stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate,sample_rate,channels,channel_layout,duration:format=bit_rate,duration,format_name ${file.absolutePath}"
             )
 
             if (!ReturnCode.isSuccess(session.returnCode)) {
@@ -217,8 +251,15 @@ object FFProbeInspector {
         val streams = root.optJSONArray("streams") ?: JSONArray()
         for (i in 0 until streams.length()) {
             val s = streams.optJSONObject(i) ?: continue
+            val attachedPic = s.optJSONObject("disposition")
+                ?.optInt("attached_pic", 0) == 1
+
             when (s.optString("codec_type")) {
-                "video" -> if (videoIndex == null) {
+                "video" -> {
+                    if (attachedPic || videoIndex != null) {
+                        continue
+                    }
+
                     videoCodec = s.optString("codec_name", "unknown").lowercase()
                     width = s.optInt("width").takeIf { it > 0 }
                     height = s.optInt("height").takeIf { it > 0 }
@@ -227,9 +268,18 @@ object FFProbeInspector {
                     pixFmt = s.optString("pix_fmt").ifBlank { null }
                     videoBitrate = s.optString("bit_rate").toLongOrNull()
                     videoIndex = s.optInt("index")
+                    // H.264 Annex B detection. Annex B is common in MPEG-TS and
+                    // streamed inputs; it can require slower, more conservative
+                    // seeking. Future: add an equivalent HEVC Annex B detection
+                    // and handling path; do not treat this H.264-only field as
+                    // a generic TS/HEVC indicator.
                     isTsEncapsulated = s.optString("is_avc") == "false"
                 }
-                "audio" -> if (audioIndex == null) {
+                "audio" -> {
+                    if (audioIndex != null) {
+                        continue
+                    }
+
                     audioCodec = s.optString("codec_name").lowercase().ifBlank { null }
                     sampleRate = s.optString("sample_rate").toIntOrNull()
                     audioBitrate = s.optString("bit_rate").toLongOrNull()
@@ -239,10 +289,26 @@ object FFProbeInspector {
             }
         }
 
+        DiagLog.append(
+            "FFProbe",
+            "JSON selected video: index=$videoIndex codec=$videoCodec bitrate=$videoBitrate"
+        )
+        DiagLog.append(
+            "FFProbe",
+            "JSON selected audio: index=$audioIndex codec=$audioCodec bitrate=$audioBitrate " +
+                "sampleRate=$sampleRate channels=$audioChannels"
+        )
         val fmt = root.optJSONObject("format")
         val durationSec = fmt?.optString("duration")?.toDoubleOrNull()
         val containerBitrate = fmt?.optString("bit_rate")?.toLongOrNull()
         val containerFormat = fmt?.optString("format_name")?.lowercase()?.ifBlank { null }
+
+        // MPEG-TS is the authoritative signal for TS-style seeking. The older
+        // is_avc check alone missed real MPEG-TS inputs whose JSON did not
+        // expose that field as expected.
+        if (containerFormat?.contains("mpegts") == true) {
+            isTsEncapsulated = true
+        }
 
         return VideoInfo(
             videoCodec, width, height, fps, pixFmt, videoBitrate, videoIndex,

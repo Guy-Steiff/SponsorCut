@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/FileResolver.kt
+
 package com.sponsorcut
 
 import android.content.ContentValues
@@ -54,6 +56,9 @@ object FileResolver {
     }
 
     private fun mimeTypeFor(fileName: String): String = when {
+        fileName.endsWith(".ts", ignoreCase = true) -> "video/mp2t"
+        fileName.endsWith(".mts", ignoreCase = true) -> "video/mp2t"
+        fileName.endsWith(".m2ts", ignoreCase = true) -> "video/mp2t"
         fileName.endsWith(".mkv", ignoreCase = true) -> "video/x-matroska"
         fileName.endsWith(".webm", ignoreCase = true) -> "video/webm"
         fileName.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
@@ -167,5 +172,24 @@ object FileResolver {
                 } ?: error("Cannot open output URI for writing: ${target.uri}")
             }
         }
+    }
+
+    fun saveTextToOutputFolder(
+        context: Context,
+        treeUri: Uri,
+        fileName: String,
+        text: String
+    ) {
+        val tree = DocumentFile.fromTreeUri(context, treeUri)
+            ?: error("Cannot open output folder")
+
+        tree.findFile(fileName)?.delete()
+
+        val document = tree.createFile("text/plain", fileName)
+            ?: error("Cannot create diagnostic log file: $fileName")
+
+        context.contentResolver.openOutputStream(document.uri)?.use { output ->
+            output.write(text.toByteArray(Charsets.UTF_8))
+        } ?: error("Cannot open diagnostic log file for writing: $fileName")
     }
 }

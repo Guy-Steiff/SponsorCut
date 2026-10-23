@@ -1,62 +1,97 @@
-# SponsorCut
+# SponsorCut / MegaCut
 
-An Android app that permanently removes SponsorBlock-marked segments from locally
-downloaded YouTube videos using FFmpeg. Works on de-Googled phones with no Google Play Services.
+SponsorCut is an Android app that permanently removes SponsorBlock-marked segments from locally downloaded YouTube videos and audio using FFmpeg. It works on de-Googled phones with no Google Play Services.
 
----
+MegaCut is the post-rebrand, broader offline media-processing platform built on the same core. Its purpose is to provide reusable offline conversion infrastructure so Android projects can use local device resources and FFmpeg without depending on big-tech online conversion services.
+
+## Vision
+
+MegaCut Core exists to create infrastructure for offline conversion where large technology platforms impose their own online conversion schemes.
+
+It is meant to liberate many projects to use local device resources for easy mobile FFmpeg features that are otherwise difficult to implement without becoming a transcoding expert.
+
+SponsorCut is the first major application built on this foundation.
+
+Its first purpose is to cut out time-wasting segments for people who are fed up with ads and interruptions. It allows non-stop listening or viewing without breaking rhythm—for example at the gym, while commuting, studying, or doing chores.
+
+MegaCut expands this into a broader offline media toolkit capable of:
+
+- Extracting video.
+- Extracting audio.
+- Cutting media.
+- Merging media.
+- Applying filters to selected segments.
+- Transcoding media.
+- Using hardware acceleration where available.
+- Operating offline.
+- Avoiding Google Play Services and cloud conversion dependence.
+
+The goal is to empower users to use their device’s often-neglected capabilities: hardware encoders, decoders, filters, local storage, and FFmpeg.
+
+## Core principles
+
+- Offline first.
+- Local-first file handling.
+- Privacy-respecting.
+- De-Googled friendly.
+- Hardware-aware.
+- Transparent encoder selection and fallbacks.
+- No silent quality degradation.
+- Reusable infrastructure for other Android projects.
 
 ## Features
 
-- **Permanent cutting** — segments physically removed from the file, not just skipped
-- **SponsorBlock category selection** — choose which segment types to cut (Sponsor checked by default); all 11 categories supported, persisted between sessions
-- **SponsorBlock API** — segments pre-fetched automatically by video ID; Process button disabled if none found
-- **Readable segment preview** — fetched segments are shown as `h:mm:ss.ms` timestamps before processing
-- **Title + channel display** — fetched from YouTube oEmbed API, shown in UI and pinned during processing
-- **Three cut modes** — Fast (stream copy), HW-Accurate (device GPU via MediaCodec, single-pass), SW-Accurate (mpeg4 CPU, single-pass)
-- **Audio-only support** — works on `.m4a`, `.opus`, `.mp3` downloads; saved to Music/SponsorCut
-- **Background processing** — foreground service with notification, wake lock prevents CPU throttling
-- **Busy-state guard** — new share/direct intents are rejected while a job is running (`please wait for current job to conclude and try again...`)
-- **Cancel anytime** — ⏹ Cancel button stops the job mid-encode and restores the UI
-- **De-Googled friendly** — no Google Play Services, no Firebase, no tracking
-- **Smart ID memory** — captures YouTube ID from URL share, file share, clipboard; remembered 7 days
-- **File browser** — always available to pick or swap the video file
-- **All settings persisted** — cut mode, category selection, output folder saved between sessions
-- **Diagnostic log** — 📋 Show log button after each run for debugging
-- **Container inference** — output container is inferred from ffprobe metadata (not only filename extension)
-- **Performance diagnostics** — logs charging/power state and full processing equation (`processing_time_s = a * (duration_time_s) + b`) when available
+- Permanent cutting: segments are physically removed, not merely skipped.
+- SponsorBlock category selection: all 11 categories supported; Sponsor checked by default.
+- SponsorBlock API integration: segments pre-fetched by video ID.
+- Readable segment preview using `h:mm:ss.ms` timestamps.
+- Title and channel display via YouTube oEmbed.
+- Three cut modes: Fast, HW-Accurate, and SW-Accurate.
+- Audio-only support for `.m4a`, `.opus`, and `.mp3`.
+- Background processing with foreground service and wake lock.
+- Busy-state guard while a job is running.
+- Cancel button to stop an active encode.
+- De-Googled design: no Google Play Services, Firebase, or tracking.
+- Smart YouTube ID memory for seven days.
+- File browser for selecting or swapping media.
+- Persistent settings for cut mode, categories, and output folder.
+- Diagnostic log after each run.
+- Container inference from ffprobe metadata.
+- Performance diagnostics including charging/power state and processing-time equation.
+- FFprobe-informed bitrate policy for Fast and HW modes.
+- Conservative fallback profile if first accurate encode fails.
 
----
+## How to use
 
-## How to Use
+If a job is already running, new share or direct intents are rejected:
 
-> If a processing job is already running, new share/direct intents are ignored to protect the active job state.
-> The app shows: `please wait for current job to conclude and try again...`
+```text
+please wait for current job to conclude and try again...
+```
 
-### Method A — Share URL first, then browse to file (typical PipePipe/NewPipe flow)
+### Method A: Share URL first
 
-1. In PipePipe/NewPipe, **share the YouTube video URL** → choose SponsorCut
-   - SponsorCut captures the video ID, fetches the title and SponsorBlock segments
-2. Tap **📁 Browse for video file…** and navigate to your downloaded file
-3. Verify the auto-filled ID, tap **Process with this ID**
-4. Output saved as `originalname_clean_<timestamp>.ext`
+1. Share a YouTube URL from PipePipe or NewPipe to SponsorCut.
+2. SponsorCut captures the video ID and fetches title and SponsorBlock segments.
+3. Tap **Browse for video file** and select the downloaded file.
+4. Tap **Process with this ID**.
+5. Output is saved as `originalname_clean_<timestamp>.ext`.
 
-### Method B — Share the downloaded file directly
+### Method B: Share downloaded file
 
-1. Share the video/audio file from your file manager → choose SponsorCut
-2. SponsorCut tries to detect the YouTube ID from:
-   - Intent extras (if your player includes it)
-   - Clipboard (if you copied a YouTube URL recently)
-   - 7-day ID memory (pre-filled with **⚠️ from memory — verify!** label)
-3. If no ID is found, tap **💡 How to get the YouTube ID** for instructions
-4. Paste the URL or ID, tap **Process with this ID**
+1. Share a video or audio file from a file manager to SponsorCut.
+2. SponsorCut attempts to detect the YouTube ID from intent extras, clipboard, or seven-day memory.
+3. Paste a URL or ID if needed.
+4. Tap **Process with this ID**.
 
-### Method C — Cold open
+### Method C: Cold open
 
-1. Open SponsorCut directly
-2. If a recent ID is remembered, it's pre-filled with Browse and Process buttons ready
-3. Tap **📁 Browse for video file…** to select the file, then **Process with this ID**
+1. Open SponsorCut directly.
+2. If a recent ID is remembered, it is pre-filled.
+3. Browse for the media file.
+4. Tap **Process with this ID**.
 
-### Method D — Native integration intent (for forks)
+### Method D: Native intent for forks
 
 ```kotlin
 val intent = Intent("com.sponsorcut.PROCESS_FILE").apply {
@@ -67,135 +102,442 @@ val intent = Intent("com.sponsorcut.PROCESS_FILE").apply {
 startActivity(intent)
 ```
 
----
+## Cut modes
 
-## Cut Modes
+| Mode | Speed | Accuracy | Quality | Notes |
+|---|---|---|---|---|
+| Fast | Seconds | Nearest keyframe | Lossless | Best for most use cases |
+| HW-Accurate | Moderate | Exact frame boundary | Source-informed bitrate and safe pixel format | Uses MediaCodec hardware |
+| SW-Accurate | Moderate to slow | Exact frame boundary | Legacy resolution-based bitrate ladder | Uses CPU `mpeg4`; always available |
 
-| Mode               | Speed         | Accuracy                   | Quality                                                                      | Notes                                                                                   |
-|--------------------|---------------|----------------------------|------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
-| **Fast** (default) | Seconds       | Nearest keyframe (~0.5–2s) | Lossless                                                                     | Best for most use cases                                                                 |
-| **HW-Accurate**    | Moderate      | Exact frame boundary       | Source-informed bitrate + safe pix_fmt (fallback profile on failure)         | h264_mediacodec (Android GPU) — single-pass filter_complex, faster but device-dependent |
-| **SW-Accurate**    | Moderate–slow | Exact frame boundary       | Legacy resolution-based bitrate ladder (lower quality, higher CPU usage)       | mpeg4 CPU encoder — single-pass filter_complex, no GPU needed, always available         |
+Both accurate modes use a single-pass `filter_complex` approach:
 
-> **Architecture note:** Both accurate modes use the same single-pass `filter_complex` approach:
-> multiple seeked inputs (one per keep range) fed into `trim+setpts+concat` in a single FFmpeg command,
-> so the encoder is initialised exactly once. The only difference is the encoder: `mpeg4` (CPU) vs `h264_mediacodec` (GPU).
+- Multiple seeked inputs, one per keep range.
+- `trim`, `setpts`, and `concat` in one FFmpeg command.
+- Encoder initialized once.
+- Difference is encoder: `mpeg4` CPU versus MediaCodec hardware.
 
-> **Probe-driven note:** In accurate modes, audio/video settings attempt source-matched codec/bitrate/pixel-format choices first,
-> then retry once with a conservative fallback profile if the first encode fails.
+Fast and HW modes use ffprobe-informed, clamped bitrate policy.
 
-> **Bitrate policy note:** FAST and HW modes use an ffprobe-informed, clamped bitrate policy (prefer stream bitrate, then container bitrate, then conservative resolution fallback). SW mode uses a deterministic legacy resolution-based bitrate ladder and does NOT use ffprobe bitrate inference.
-> This prevents low-bitrate sources from inflating to much larger outputs while keeping SW as a compatibility path.
+SW mode uses a deterministic legacy resolution-based bitrate ladder and does not use ffprobe bitrate inference.
 
-> **Timestamp note:** The segment preview uses high-precision `h:mm:ss.ms`, while live processing progress uses
-> compact `m:ss` / `h:mm:ss` labels for readability during frequent updates.
+HW-Accurate performance varies by device and power state. Some devices run faster while charging due to governor or thermal behavior.
 
-> **LGPL note:** SW-Accurate uses `mpeg4` which is built into every FFmpeg binary with no external
-> library requirement — no libx264 (GPL) needed.
+The app recommends Fast mode for long videos over 30 minutes and audio-only files.
 
-**HW-Accurate** uses Android's MediaCodec hardware H.264 encoder. Speed and compatibility vary by device:
-- Qualcomm Snapdragon: generally excellent
-- MediaTek / Exynos: variable — some devices produce subtly broken output
-- Fallback: if HW-Accurate fails or is slow on your device, use SW-Accurate instead
+## SponsorBlock categories
 
-Observed in real use: HW-Accurate performance can vary significantly by power state (for example, the same job may run much faster while charging). This is expected on some Android devices due to governor/thermal behavior.
+All 11 SponsorBlock categories are available.
 
-The app automatically recommends Fast mode for long videos (>30 min) and audio-only files.
+Only Sponsor is checked by default.
 
----
+- Sponsor
+- Self-promotion
+- Interaction reminder
+- Intro / intermission
+- Outro / end cards
+- Preview / recap
+- Filler / tangent / joke
+- Non-music section
+- Highlight / POI
+- Exclusive access
+- Chapter markers
 
-Mode clarifications (user-facing)
+Selections persist in SharedPreferences.
 
-- FAST mode: optimized automatic processing that prefers stream/container copy where possible and falls back to conservative re-encode settings when needed.
-- HW mode: hardware-accelerated encoding (MediaCodec) for faster, lower-CPU runs. Note that hardware encoders enforce constraints and may clamp bitrate — they are not a quality optimizer.
-- SW mode: legacy CPU encoding using a deterministic resolution-based bitrate ladder. SW mode may produce lower visual quality and uses significantly more CPU; recommended only for compatibility or testing.
+## FFmpegKit backend
 
-Warning: SW mode may produce lower visual quality and higher CPU load. Prefer FAST or HW when possible.
+SponsorCut uses `ffmpeg-kit` packaged as a local Android Archive:
 
+```text
+app/libs/ffmpeg-kit.aar
+```
 
-## SponsorBlock Categories
+This AAR must be present before building.
 
-All 11 SponsorBlock categories are available in the UI. Only **Sponsor** is checked by default:
+It is built by F-Droid through the following source repository:
 
-| Category                | Description                               |
-|-------------------------|-------------------------------------------|
-| Sponsor                 | Paid promotion / sponsorship segment      |
-| Self-promotion          | Unpaid plug for the creator's own content |
-| Interaction reminder    | Subscribe / like / bell reminders         |
-| Intro / intermission    | Opening animation or scene transition     |
-| Outro / end cards       | End screen with subscribe buttons         |
-| Preview / recap         | Summary of previous content               |
-| Filler / tangent / joke | Off-topic content                         |
-| Non-music section       | Talking in an otherwise music video       |
-| Highlight / POI         | Point-of-interest marker                  |
-| Exclusive access        | Members-only / paywalled segment marker   |
-| Chapter markers         | Chapter boundary markers                  |
+```text
+InfinityLoop1308/ffmpeg-kit
+```
 
-Selections are persisted in SharedPreferences and the segment preview re-fetches automatically when you change a checkbox.
+For local development, obtain `ffmpeg-kit.aar` from one of these sources:
 
----
+- A PipePipe/NewPipe build environment.
+- F-Droid build outputs.
+- Building `InfinityLoop1308/ffmpeg-kit` directly.
 
-## FFmpeg Backend
+Place the binary here:
 
-SponsorCut uses **ffmpeg-kit** packaged as a local AAR (`app/libs/ffmpeg-kit.aar`), built by F-Droid via the
-[InfinityLoop1308/ffmpeg-kit](https://github.com/InfinityLoop1308/ffmpeg-kit) srclib.
+```text
+/Users/gsm/projects/sponsorcut/app/libs/ffmpeg-kit.aar
+```
 
-The AAR must be present in `app/libs/ffmpeg-kit.aar` before building. For local development, obtain it from:
-- A PipePipe/NewPipe build environment
-- The F-Droid build outputs for those apps
-- Building [InfinityLoop1308/ffmpeg-kit](https://github.com/InfinityLoop1308/ffmpeg-kit) directly
+The F-Droid build flow uses an LTS FFmpegKit build with Android MediaCodec, zlib, GMP, and OpenSSL enabled, then copies the produced AAR into `libs/ffmpeg-kit.aar`. [256][259]
 
----
+Typical build output location:
 
-## Building from Source
+```text
+ffmpeg-kit-src/prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar
+```
+
+Copy it into the app:
 
 ```bash
-# Debug build (signed with debug key)
-./gradlew assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
-
-# Release build (uses debug key locally; CI uses KEYSTORE_PATH env var)
-./gradlew assembleRelease
-# APK: app/build/outputs/apk/release/app-release.apk
+mkdir -p app/libs
+cp /path/to/ffmpeg-kit.aar app/libs/ffmpeg-kit.aar
 ```
 
-Release signing via environment variables (used by GitHub Actions):
+SW-Accurate uses `mpeg4`, which is built into FFmpeg and does not require `libx264`.
+
+HW-Accurate uses Android MediaCodec hardware encoders. Compatibility and quality vary by vendor and device.
+
+## Repository layout
+
+This is a partial known-source map.
+
+Generate the authoritative full tree with:
+
+```bash
+cd /Users/gsm/projects/sponsorcut
+find . \
+  -path '*/.git/*' -prune -o \
+  -path '*/.gradle/*' -prune -o \
+  -path '*/build/*' -prune -o \
+  -path '*/.idea/*' -prune -o \
+  -type f -print | sort
 ```
+
+Known structure:
+
+```text
+/Users/gsm/projects/sponsorcut/
+├── .github/
+│   └── workflows/
+│       └── release.yml
+├── .kotlin/
+│   └── sessions/
+├── app/
+│   ├── libs/
+│   │   └── ffmpeg-kit.aar
+│   └── src/
+│       └── main/
+│           ├── assets/
+│           │   └── ic_launcher.svg
+│           ├── java/
+│           │   └── com/
+│           │       └── sponsorcut/
+│           │           ├── core/
+│           │           │   └── model/
+│           │           │       └── JobModels.kt
+│           │           ├── model/
+│           │           │   └── SponsorSegment.kt
+│           │           ├── DiagLog.kt
+│           │           ├── DropdownTable.kt
+│           │           ├── EncoderCatalog.kt
+│           │           ├── FFProbeInspector.kt
+│           │           ├── FfmpegEngine.kt
+│           │           ├── FileResolver.kt
+│           │           ├── MainActivity.kt
+│           │           ├── PolicyModels.kt
+│           │           ├── ProcessingService.kt
+│           │           ├── SegmentParser.kt
+│           │           ├── SponsorBlockClient.kt
+│           │           ├── SponsorCutApp.kt
+│           │           └── TranscodePolicy.kt
+│           ├── res/
+│           │   └── drawable/
+│           │       └── ic_launcher.xml
+│           └── AndroidManifest.xml
+├── fastlane/
+│   └── metadata/
+│       └── android/
+│           └── en-US/
+│               ├── changelogs/
+│               ├── images/
+│               ├── full_description.txt
+│               ├── short_description.txt
+│               └── title.txt
+├── gradle/
+│   └── wrapper/
+├── metadata/
+│   └── com.sponsorcut/
+│       └── en-US/
+├── scripts/
+│   └── build-ffmpeg-kit.sh
+├── build.gradle.kts
+├── settings.gradle.kts
+├── gradle.properties
+├── gradlew
+├── gradlew.bat
+├── local.properties
+├── com.sponsorcut.yml
+├── sponsorcut-release.jks
+├── ARCHITECTURE.md
+├── ARCHITECTURAL_CHANGE.md
+├── TRANSCODEPOLICY_ARCHITECTURE.md
+├── TRANSCODEPOLICY_V2_SUMMARY.md
+├── VISION.md
+├── README.md
+```
+
+## Key source files
+
+### MainActivity.kt
+
+Primary UI and user-facing state.
+
+Important areas:
+
+- Quality dropdown.
+- CRF visibility.
+- CRF input.
+- Encoder selection.
+- Auto encoder resolution.
+- H.264 and HEVC CRF behavior.
+
+### TranscodePolicy.kt
+
+Decides how user choices become transcoding behavior.
+
+Important areas:
+
+- CRF support.
+- Bitrate fallback.
+- Encoder selection.
+- Audio policy.
+- Video policy.
+- FFmpeg argument construction.
+
+### EncoderCatalog.kt
+
+Defines encoder options.
+
+### FFProbeInspector.kt
+
+Inspects input media using FFprobe.
+
+Current ffprobe command after patch:
+
+```text
+-v quiet -print_format json -show_streams -show_format -show_entries stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate ${file.absolutePath}
+```
+
+### FfmpegEngine.kt
+
+Executes FFmpeg work.
+
+### ProcessingService.kt
+
+Runs background processing.
+
+## Current critical issues
+
+### Telegram JSON ffprobe
+
+Telegram audio issue is not yet solved.
+
+Reported output metadata:
+
+```text
+AAC 44100Hz 5kbps
+```
+
+Do not assume 44100 Hz or 5 kbps are reliable source facts.
+
+First determine why JSON ffprobe is not doing its job.
+
+Possible causes:
+
+- FFprobe not returning JSON.
+- App not capturing stdout.
+- App parsing JSON incorrectly.
+- App selecting wrong stream.
+- App failing to parse `bit_rate`.
+- App using legacy field or wrong JSON path.
+- App defaulting to 44100 Hz and 5 kbps on parse failure.
+- Telegram source audio genuinely low quality.
+- App copying or re-encoding audio using bad inherited bitrate.
+- App confusing `format.bit_rate` with audio stream `bit_rate`.
+- App assuming `streams[0]` is audio.
+
+Do not change audio sample rate or bitrate policy until raw JSON and parser behavior are understood.
+
+### H.264 CRF absence
+
+H.264 CRF does not appear in Quality dropdown when using H.264 hardware.
+
+Likely cause:
+
+`MainActivity` uses `selectedVideo?.name` to decide CRF support, while Auto mode resolves the actual encoder later as `h264_mediacodec`.
+
+Required fix:
+
+- Use resolved/effective encoder for CRF support.
+- If Auto resolves to `h264_mediacodec`, CRF must appear.
+- Inspect both `supportsCrf` blocks in `MainActivity`.
+- Inspect `supportsCrf` logic in `TranscodePolicy`.
+- Do not merely add `h264_mediacodec` to another set if lookup variable is wrong.
+
+### HEVC CRF failure
+
+HEVC CRF appears but is broken.
+
+FFmpeg log:
+
+```text
+[hevc_mediacodec] Use 1 as the default MediaFormat i-frame-interval, please set gop_size properly (>= fps)
+[amediacodec] java.lang.IllegalArgumentException
+[hevc_mediacodec] MediaCodec configure failed, Generic error in an external library
+Error initializing output stream: Error while opening encoder for output stream #0:0
+```
+
+Important:
+
+Do not remove HEVC CRF from the UI.
+
+Route HEVC CRF jobs to `libx265` if bundled.
+
+Keep `hevc_mediacodec` for Bitrate jobs.
+
+If `libx265` unavailable, show clear validation error and disable Start.
+
+Do not silently downgrade CRF to bitrate.
+
+### Telegram video bitrate
+
+Reported input video bitrate is 14 kbps.
+
+Requested 14 kbps target resulted in 1292 kbps output.
+
+This may be a separate bitrate-policy or encoder-floor issue.
+
+Investigate:
+
+- How app derives video target bitrate.
+- Whether it uses source bitrate as target.
+- Whether hardware encoder imposes minimum bitrate.
+- Whether app clamps or floors bitrate.
+- Whether app logs requested versus actual bitrate.
+
+## CRF policy
+
+CRF must be a multiple-choice dropdown.
+
+Use all integer CRF values 0 through 51 inclusive for x264/x265-style CRF.
+
+Do not use free text.
+
+Do not use curated subset unless user later explicitly requests.
+
+When CRF selected:
+
+- Show CRF value dropdown.
+- Hide bitrate input.
+- Route job to CRF-capable encoder.
+- Do not pass CRF to encoder that cannot support it.
+- Do not silently downgrade CRF to bitrate.
+
+When Bitrate selected:
+
+- Show bitrate input.
+- Hide CRF value dropdown.
+- Use existing bitrate path.
+
+## Encoder policy
+
+### H.264
+
+Preferred behavior:
+
+- If hardware H.264 supports true CQ/CRF, use it.
+- If not, route CRF jobs to `libx264` if bundled.
+- Clearly indicate software H.264 is used.
+- Keep `h264_mediacodec` for Bitrate jobs.
+- If `libx264` unavailable, disable Start with clear explanation.
+- Do not silently downgrade CRF to bitrate.
+
+### HEVC
+
+Preferred behavior:
+
+- Route CRF jobs to `libx265` if bundled.
+- Keep `hevc_mediacodec` for Bitrate jobs.
+- Clearly indicate software HEVC is used.
+- If `libx265` unavailable, disable Start with clear explanation.
+- Do not silently downgrade CRF to bitrate.
+- Do not remove HEVC CRF from UI.
+
+## Auto encoder resolution
+
+Determine whether Auto resolution is available before transcoding begins.
+
+If resolved encoder only computed inside `TranscodePolicy`, expose resolver so Quality dropdown updates immediately.
+
+CRF dropdown decision must use resolved encoder, not `selectedVideo?.name` alone.
+
+When CRF selected but resolved encoder cannot support it:
+
+- Automatically route to CRF-capable software encoder when available.
+- Clearly show actual encoder used.
+- If no CRF-capable encoder available, disable Start with explanation.
+- Never silently downgrade CRF to bitrate.
+
+## Diagnostic greps
+
+Run these before patching:
+
+```bash
+cd /Users/gsm/projects/sponsorcut
+grep -RIn "supportsCrf" app/src/main/java
+grep -RIn "crfInput" app/src/main/java
+grep -RIn "qualityOptions" app/src/main/java
+grep -RIn "bit_rate" app/src/main/java
+grep -RIn "sample_rate" app/src/main/java
+grep -RIn "audioBitrate" app/src/main/java
+grep -RIn "libx264\|libx265" app/src/main/java
+grep -RIn "h264_mediacodec\|hevc_mediacodec" app/src/main/java
+grep -RIn "print_format\|show_streams\|show_format" app/src/main/java
+```
+
+## Build
+
+Debug build:
+
+```bash
+cd /Users/gsm/projects/sponsorcut
+./gradlew :app:assembleDebug
+```
+
+Release build:
+
+```bash
+cd /Users/gsm/projects/sponsorcut
+./gradlew :app:assembleRelease
+```
+
+Release signing environment variables:
+
+```text
 KEYSTORE_PATH=/path/to/keystore.jks
 KEYSTORE_PASS=...
-
-# SponsorCut
-
-SponsorCut is an Android utility that permanently removes SponsorBlock-marked segments from locally downloaded YouTube video/audio files using FFmpeg (via ffmpeg-kit). It targets privacy-respecting environments (no Google Play Services) and is suitable for F‑Droid distribution.
-
-Prerequisites
-- JDK 11+ (use the bundled Gradle wrapper)
-- Android SDK and build tools matching the project's compileSdk
-- `app/libs/ffmpeg-kit.aar` must be present for local builds (see ARCHITECTURE.md / FFmpeg Backend)
-
-Quick start
-```bash
-# Build a debug APK
-./gradlew assembleDebug
-
-# Build a release APK
-./gradlew assembleRelease
 ```
 
-Repository layout (key items)
-- `app/` — Android application module
-- `app/libs/ffmpeg-kit.aar` — required local FFmpeg AAR
-- `metadata/com.sponsorcut/` — F-Droid metadata
-- `scripts/` — helper scripts (e.g. `build-ffmpeg-kit.sh`)
+## Non-negotiable rules
 
-How it works (short)
-- The app accepts shared URLs or files, pre-fetches SponsorBlock segments and video metadata, then starts a foreground `ProcessingService` which runs `ffprobe` and `ffmpeg` steps (via ffmpeg-kit) to cut segments and write a finalized file.
-- A `TranscodePolicy` decides whether to stream-copy or re-encode and picks safe encoder parameters using `ffprobe` data to avoid inflating file size.
+- Do not remove HEVC CRF from UI.
+- Do not silently downgrade CRF to bitrate.
+- Do not assume ffprobe command patch alone fixed Telegram issue.
+- Do not treat 44100 Hz or 5 kbps as confirmed source facts.
+- Do not confuse `format.bit_rate` with audio stream `bit_rate`.
+- Do not assume `streams[0]` is audio.
+- Do not silently use fallback values without logging reason.
+- Do not use `selectedVideo?.name` alone if Auto resolves different encoder.
+- Do not pass CRF to encoder that cannot support it.
+- Do not use free-text CRF field.
+- Always inspect actual Kotlin code before patching.
+- Prefer small exact copy-paste patches based on real file contents.
 
-See `ARCHITECTURE.md` for a detailed overview of components, the processing pipeline, and design rationale.
+## License
 
-License
-- MIT
-
-Author
-- Guy Steiff
+MIT.

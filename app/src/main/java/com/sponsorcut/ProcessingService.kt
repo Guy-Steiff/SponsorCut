@@ -1,4 +1,8 @@
+// app/src/main/java/com/sponsorcut/ProcessingService.kt
+
 package com.sponsorcut
+
+import com.sponsorcut.core.model.ExecutionMode
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,10 +13,14 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import com.sponsorcut.core.model.StreamSelection
 import java.io.File
 
 class ProcessingService : Service() {
@@ -30,6 +38,11 @@ class ProcessingService : Service() {
         const val EXTRA_FRAME_ACCURATE = "frame_accurate"
         const val EXTRA_CATEGORIES = "categories"
         const val EXTRA_HW_ACCURATE = "hw_accurate"
+        const val EXTRA_REMOVE_SEGMENTS = "remove_segments"
+        const val EXTRA_LOCAL_SEGMENTS_JSON = "local_segments_json"
+        const val EXTRA_SELECTED_SEGMENT_INDEXES = "selected_segment_indexes"
+        const val EXTRA_STREAM_SELECTION = "stream_selection"
+        const val EXTRA_OUTPUT_PREFERENCES_JSON = "output_preferences_json"
 
         const val BROADCAST_PROGRESS = "com.sponsorcut.PROGRESS"
         const val EXTRA_PROGRESS_TEXT = "progress_text"
@@ -39,13 +52,27 @@ class ProcessingService : Service() {
         const val EXTRA_ERROR = "error"
         const val EXTRA_CANCELLED = "cancelled"
 
+        const val PREFS_NAME = "sponsorcut_prefs"
+        const val KEY_LAST_OUTPUT_FILE_NAME = "last_output_file_name"
+
         @Volatile
         var isProcessingActive: Boolean = false
+
+        @Volatile
+        private var cancelRequested = false
     }
 
     private val tag = "ProcessingService"
     private lateinit var nm: NotificationManager
     private var wakeLock: PowerManager.WakeLock? = null
+
+    private val elapsedHandler = Handler(Looper.getMainLooper())
+    private var elapsedRunnable: Runnable? = null
+
+    @Volatile
+    private var lastProgressText = "Starting…"
+
+    private var jobStartElapsedRealtime = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -63,6 +90,7 @@ class ProcessingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             Log.i(tag, "Cancel requested")
+            cancelRequested = true
             com.arthenica.ffmpegkit.FFmpegKit.cancel()
             return START_NOT_STICKY
         }
@@ -80,6 +108,16 @@ class ProcessingService : Service() {
         val frameAccurate = intent.getBooleanExtra(EXTRA_FRAME_ACCURATE, false)
         val categories = intent.getStringArrayListExtra(EXTRA_CATEGORIES)?.toList() ?: listOf("sponsor")
         val hwAccurate = intent.getBooleanExtra(EXTRA_HW_ACCURATE, false)
+        val removeSegments = intent.getBooleanExtra(EXTRA_REMOVE_SEGMENTS, true)
+        val localSegmentsJson = intent.getStringExtra(EXTRA_LOCAL_SEGMENTS_JSON)
+        val selectedSegmentIndexes =
+            intent.getIntArrayExtra(EXTRA_SELECTED_SEGMENT_INDEXES)?.toSet()
+        val streamSelection = intent.getStringExtra(EXTRA_STREAM_SELECTION)
+            ?.let { runCatching { StreamSelection.valueOf(it) }.getOrNull() }
+            ?: StreamSelection.BOTH
+        val outputPreferences = OutputPreferences.fromJson(
+            intent.getStringExtra(EXTRA_OUTPUT_PREFERENCES_JSON)
+        )
         val uri = try { Uri.parse(uriString) } catch (e: Exception) {
             broadcast(text = "Bad URI: $uriString\n${e.message}", error = true)
             finish(startId)
@@ -88,7 +126,13 @@ class ProcessingService : Service() {
 
         Thread {
             isProcessingActive = true
+            cancelRequested = false
+            lastProgressText = "Starting…"
+            jobStartElapsedRealtime = SystemClock.elapsedRealtime()
+            startElapsedUpdates()
+            cleanupPreviousRunArtifacts()
             var tempOutput: File? = null
+            var cachedInput: File? = null
             var outputTarget: OutputTarget? = null
             // Acquire CPU wake lock — keeps processing running when screen turns off
             wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
@@ -105,7 +149,12 @@ class ProcessingService : Service() {
                 )
                 progress("Copying input video…")
                 val inputFile = FileResolver.uriToFile(this, uri)
+                cachedInput = inputFile
                 DiagLog.append("Service", "Input cached: ${inputFile.absolutePath} size=${inputFile.length()}")
+
+                if (cancelRequested) {
+                    error("CANCELLED")
+                }
                 val sourceName = FileResolver.getDisplayName(this, uri)
                 val plan = run {
                     // Need to inspect first to know if we're re-encoding (affects output extension)
@@ -113,7 +162,15 @@ class ProcessingService : Service() {
                     val info = FFProbeInspector.inspect(inputFile)
                         ?: error("ffprobe could not read the video file — unsupported format?")
                     DiagLog.append("FFProbe", "isTsEncapsulated=${info.isTsEncapsulated} codec=${info.videoCodec} audio=${info.audioCodec} summary=${info.summaryLine}")
-                    TranscodePolicy.plan(info, frameAccurate, hwAccurate).also { p ->
+                    TranscodePolicy.plan(
+                        info = info,
+                        frameAccurate = frameAccurate,
+                        hwAccurate = hwAccurate,
+                        removeSegments = removeSegments,
+                        streamSelection = streamSelection,
+                        preferences = outputPreferences,
+                        catalog = EncoderCatalog.discover()
+                    ).also { p ->
                         DiagLog.append("Plan", "canCopyVideo=${p.canCopyVideo} canCopyAudio=${p.canCopyAudio} useSlowSeek=${p.useSlowSeek} rationale=${p.rationale}")
                         progress("Plan: ${p.rationale}")
                     } to info
@@ -125,6 +182,9 @@ class ProcessingService : Service() {
                 val sourceBase = sourceName.substringBeforeLast('.', sourceName)
                 val baseSourceName = "$sourceBase.$outputExt"
                 val outputFileName = FileResolver.outputFileNameFromSource(baseSourceName)
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putString(KEY_LAST_OUTPUT_FILE_NAME, outputFileName)
+                    .apply()
                 outputTarget = if (!outputFolderUri.isNullOrBlank()) {
                     FileResolver.createOutputTargetInTree(this, Uri.parse(outputFolderUri), outputFileName)
                 } else {
@@ -133,20 +193,110 @@ class ProcessingService : Service() {
                 tempOutput = File(cacheDir, "processed_${System.currentTimeMillis()}.$outputExt")
                 DiagLog.append("Service", "Output container: .$outputExt muxer=${processingPlan.outputMuxer ?: "auto"}")
 
-                progress("Fetching SponsorBlock segments…")
-                val segments = SponsorBlockClient().fetchRich(videoId, categories)
-                Log.i(tag, "SponsorBlock result: $segments")
+                if (!removeSegments) {
+                    val label = when (streamSelection) {
+                        StreamSelection.AUDIO_ONLY -> "Extracting audio"
+                        StreamSelection.VIDEO_ONLY -> "Extracting video"
+                        StreamSelection.BOTH -> "Processing media"
+                    }
+                    progress(label)
 
-                if (segments.isEmpty()) {
-                    broadcast(
-                        text = "SponsorBlock had no segments for ID: $videoId\n\nCorrect the ID and try again.",
-                        done = false
+                    val encodeStartMs = System.currentTimeMillis()
+                    FfmpegEngine.process(
+                        input = inputFile,
+                        output = tempOutput,
+                        segments = emptyList(),
+                        cacheDir = cacheDir,
+                        plan = processingPlan,
+                        fileDurationSec = videoInfo.durationSec,
+                        onProgress = { step -> progress(step) }
+                    )
+                    val elapsedSeconds = (System.currentTimeMillis() - encodeStartMs) / 1000.0
+
+                    progress("Saving output…")
+                    FileResolver.writeToOutputTarget(this, tempOutput, outputTarget)
+
+                    val outputSizeMb = "%.2f".format(tempOutput.length() / 1_000_000.0)
+                    val result = "✓ $label complete\n\n" +
+                        "Output: ${outputTarget.label}\n" +
+                        "Size: ${outputSizeMb} MB\n" +
+                        "Processing time: ${formatElapsedHms(elapsedSeconds)}"
+
+                    broadcast(text = result, done = true)
+                    showDoneNotification(
+                        "SponsorCut done ✓",
+                        "Saved: ${outputTarget.label}"
                     )
                     finish(startId)
                     return@Thread
                 }
 
-                val sortedSegs = segments.sortedBy { it.start }
+                val segments = if (localSegmentsJson != null) {
+                    progress("Loading local TXT/JSON segments…")
+
+                    val parsed = mutableListOf<SponsorSegmentInfo>()
+                    val array = org.json.JSONArray(localSegmentsJson)
+
+                    for (i in 0 until array.length()) {
+                        val obj = array.getJSONObject(i)
+                        parsed += SponsorSegmentInfo(
+                            category = obj.getString("category"),
+                            start = obj.getDouble("start"),
+                            end = obj.getDouble("end")
+                        )
+                    }
+
+                    val selected = parsed.filter { it.category in categories }
+                    Log.i(
+                        tag,
+                        "Local segments: loaded=${parsed.size}, selected=${selected.size}"
+                    )
+
+                    if (selected.isEmpty()) {
+                        broadcast(
+                            text = "No selected categories match the loaded local segments. Nothing to remove.",
+                            done = true
+                        )
+                        finish(startId)
+                        return@Thread
+                    }
+
+                    selected
+                } else {
+                    progress("Fetching SponsorBlock segments…")
+                    val fetched = SponsorBlockClient().fetchRich(videoId, categories)
+                    Log.i(tag, "SponsorBlock result: $fetched")
+
+                    if (fetched.isEmpty()) {
+                        broadcast(
+                            text = "SponsorBlock had no segments for ID: $videoId. Nothing to remove.",
+                            done = true
+                        )
+                        finish(startId)
+                        return@Thread
+                    }
+
+                    fetched
+                }
+
+                val selectedSegments = if (selectedSegmentIndexes == null) {
+                    segments
+                } else {
+                    segments.filterIndexed { index, _ ->
+                        index in selectedSegmentIndexes
+                    }
+                }
+
+                if (selectedSegments.isEmpty()) {
+                    broadcast(
+                        text = "No individual segments were selected for removal. Nothing to do.",
+                        done = true
+                    )
+                    finish(startId)
+                    return@Thread
+                }
+
+                val sortedSegs = selectedSegments.sortedBy { it.start }
                 val totalCut = sortedSegs.sumOf { it.end - it.start }
                 progress("Removing ${segments.size} sponsor segment(s) (~%.1fs) [${processingPlan.rationale}]".format(totalCut))
 
@@ -184,6 +334,24 @@ class ProcessingService : Service() {
                 progress("Saving output…")
                 FileResolver.writeToOutputTarget(this, tempOutput, outputTarget)
                 val outputSizeMb = "%.2f".format(tempOutput.length() / 1_000_000.0)
+
+                val outputInfo = FFProbeInspector.inspect(tempOutput)
+                val executionMode = when {
+                    hwAccurate -> ExecutionMode.HW_ACCURATE
+                    frameAccurate -> ExecutionMode.SW_ACCURATE
+                    else -> ExecutionMode.FAST
+                }
+                val requestedVideoBitrateBps =
+                    outputPreferences.videoBitrate ?: videoInfo.videoBitrate
+                val sizeAdvisory = TranscodePolicy.buildSizeAdvisory(
+                    inputSizeBytes = inputFile.length(),
+                    outputSizeBytes = tempOutput.length(),
+                    inputDurationSec = videoInfo.durationSec,
+                    outputDurationSec = outputInfo?.durationSec,
+                    requestedVideoBitrateBps = requestedVideoBitrateBps,
+                    actualVideoBitrateBps = outputInfo?.videoBitrate,
+                    executionMode = executionMode
+                )
 
                 val segSummary = sortedSegs.joinToString("\n") {
                     "  [${it.category}] %s → %s (%.1fs rm)"
@@ -238,7 +406,8 @@ class ProcessingService : Service() {
                     "Mode: ${processingPlan.rationale}\n" +
                     "$timingLine\n\n" +
                     "Size: ${inputSizeMb}MB → ${outputSizeMb}MB ($sizeNote)\n\n" +
-                    "Saved to:\n${outputTarget.label}"
+                    "Saved to:\n${outputTarget.label}" +
+                    (sizeAdvisory?.let { "\n\n$it" } ?: "")
 
                 broadcast(text = result, done = true)
                 showDoneNotification("SponsorCut done ✓", "Saved: ${outputTarget.label}")
@@ -257,10 +426,13 @@ class ProcessingService : Service() {
                     showDoneNotification("SponsorCut failed", e.message ?: "unknown error")
                 }
             } finally {
+                stopElapsedUpdates()
+                cancelRequested = false
                 isProcessingActive = false
                 wakeLock?.let { if (it.isHeld) it.release() }
                 wakeLock = null
                 tempOutput?.delete()
+                cachedInput?.delete()
                 finish(startId)
             }
         }.start()
@@ -268,22 +440,92 @@ class ProcessingService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun cleanupPreviousRunArtifacts() {
+        val prefixes = listOf("input_", "part_", "concat_", "singlepass_", "processed_")
+        val removed = mutableListOf<String>()
+
+        cacheDir.listFiles()?.forEach { file ->
+            if (file.isFile && prefixes.any { file.name.startsWith(it) }) {
+                if (file.delete()) removed += file.name
+            }
+        }
+
+        if (removed.isNotEmpty()) {
+            DiagLog.append(
+                "Cleanup",
+                "Removed ${removed.size} stale temporary artifact(s): ${removed.joinToString(", ")}"
+            )
+        }
+    }
+
     private fun finish(startId: Int) {
+        // Remove the active foreground/progress notification. The separate
+        // completion notification uses NOTIF_DONE_ID and must remain visible.
+        runCatching {
+            nm.cancel(NOTIF_ID)
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            stopForeground(STOP_FOREGROUND_DETACH)
+            stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
-            stopForeground(false)
+            stopForeground(true)
         }
         stopSelf(startId)
     }
 
     private fun progress(text: String) {
+        lastProgressText = text
         nm.notify(NOTIF_ID, buildNotification("SponsorCut", text))
         broadcast(text = text)
     }
 
+    private fun startElapsedUpdates() {
+        stopElapsedUpdates()
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isProcessingActive) return
+
+                val body = if (lastProgressText == "Processing media…") {
+                    val elapsedSeconds =
+                        (SystemClock.elapsedRealtime() - jobStartElapsedRealtime) / 1000.0
+                    "$lastProgressText\nElapsed: ${formatElapsedHms(elapsedSeconds)}"
+                } else {
+                    lastProgressText
+                }
+
+                runCatching {
+                    nm.notify(
+                        NOTIF_ID,
+                        buildNotification("SponsorCut", body)
+                    )
+                }
+
+                elapsedHandler.postDelayed(this, 1_000L)
+            }
+        }
+
+        elapsedRunnable = runnable
+        elapsedHandler.post(runnable)
+    }
+
+    private fun stopElapsedUpdates() {
+        elapsedRunnable?.let { elapsedHandler.removeCallbacks(it) }
+        elapsedRunnable = null
+    }
+
     private fun broadcast(text: String, done: Boolean = false, error: Boolean = false, cancelled: Boolean = false) {
+        // Persist terminal results before announcing them. MainActivity may be
+        // paused and have unregistered its receiver, so it can otherwise miss
+        // the completion broadcast and restore only the last progress message.
+        if (done || error || cancelled) {
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString("last_completed_status", text)
+                .putString("last_completed_log", DiagLog.get())
+                .apply()
+        }
+
         sendBroadcast(Intent(BROADCAST_PROGRESS).apply {
             `package` = packageName
             putExtra(EXTRA_PROGRESS_TEXT, text)
@@ -307,34 +549,20 @@ class ProcessingService : Service() {
             Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setProgress(total, current, false)
-                .setContentIntent(pi)
-                .setOngoing(true)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setProgress(total, current, false)
-                .setContentIntent(pi)
-                .setOngoing(true)
-                .build()
-        }
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setProgress(total, current, false)
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build()
     }
 
     private fun createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL_ID, "SponsorCut", NotificationManager.IMPORTANCE_LOW)
-            ch.description = "Video processing progress"
-            nm.createNotificationChannel(ch)
-        }
+        val ch = NotificationChannel(CHANNEL_ID, "SponsorCut", NotificationManager.IMPORTANCE_LOW)
+        ch.description = "Video processing progress"
+        nm.createNotificationChannel(ch)
     }
 
     private fun buildNotification(title: String, body: String?): Notification {
@@ -345,25 +573,14 @@ class ProcessingService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setStyle(Notification.BigTextStyle().bigText(body))
-                .setContentIntent(pi)
-                .setOngoing(true)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setContentIntent(pi)
-                .setOngoing(true)
-                .build()
-        }
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build()
     }
 
     private fun showDoneNotification(title: String, body: String) {
@@ -374,25 +591,14 @@ class ProcessingService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val n = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setStyle(Notification.BigTextStyle().bigText(body))
-                .setContentIntent(pi)
-                .setAutoCancel(true)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setContentIntent(pi)
-                .setAutoCancel(true)
-                .build()
-        }
+        val n = Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
         nm.notify(NOTIF_DONE_ID, n)
     }
 
@@ -419,8 +625,7 @@ class ProcessingService : Service() {
                     plugged and BatteryManager.BATTERY_PLUGGED_AC != 0 -> "ac"
                     plugged and BatteryManager.BATTERY_PLUGGED_USB != 0 -> "usb"
                     plugged and BatteryManager.BATTERY_PLUGGED_WIRELESS != 0 -> "wireless"
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 &&
-                        plugged and BatteryManager.BATTERY_PLUGGED_DOCK != 0 -> "dock"
+                    plugged and BatteryManager.BATTERY_PLUGGED_DOCK != 0 -> "dock"
                     else -> "unplugged"
                 }
 

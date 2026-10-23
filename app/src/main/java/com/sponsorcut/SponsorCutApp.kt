@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/SponsorCutApp.kt
+
 package com.sponsorcut
 
 import android.app.Application
@@ -9,17 +11,22 @@ class SponsorCutApp : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        // Enable ffmpegkit log/stats redirection — required before any FFmpeg/FFprobe calls.
-        // Without this, native stdout/stderr pipes are not set up and sessions return empty output.
-        FFmpegKitConfig.enableRedirection()
+        android.util.Log.i("SponsorCutLaunch", "Application.onCreate: FFmpegKit startup starting")
 
-        // Suppress ffmpegkit logs from printing to logcat (they would flood the log and
-        // flash on screen via any debug overlay). All diagnostics go through DiagLog instead.
-        FFmpegKitConfig.setLogLevel(Level.AV_LOG_QUIET)
+        FFmpegKitConfig.enableRedirection()
+        android.util.Log.i("SponsorCutLaunch", "Application.onCreate: redirection enabled")
+
+        FFmpegKitConfig.setLogLevel(Level.AV_LOG_INFO)
+        android.util.Log.i("SponsorCutLaunch", "Application.onCreate: log level set")
+
         FFmpegKitConfig.enableLogCallback { log ->
-            // Route to DiagLog only — never to logcat or screen
-            DiagLog.append("ffkit", log.message ?: "")
+            try {
+                DiagLog.append("ffkit", log.message ?: "")
+            } catch (_: Throwable) {
+            }
         }
+
+        android.util.Log.i("SponsorCutLaunch", "Application.onCreate: FFmpegKit startup complete")
+        DiagLog.append("ffkit", "SponsorCut diagnostic build 2026-10-19-17:37; FFmpeg log level=INFO")
     }
 }
-

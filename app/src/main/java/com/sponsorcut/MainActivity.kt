@@ -1,15 +1,19 @@
+// app/src/main/java/com/sponsorcut/MainActivity.kt
+
 package com.sponsorcut
 
 import android.app.Activity
+import androidx.core.content.ContextCompat
 import android.content.BroadcastReceiver
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
@@ -22,16 +26,20 @@ import android.widget.ProgressBar
 import android.widget.CheckBox
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.Spinner
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import java.io.File
 import android.os.Handler
 import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.URLSpan
+import com.sponsorcut.core.model.ExecutionMode
+import com.sponsorcut.core.model.StreamSelection
 
 class MainActivity : Activity() {
 
@@ -42,19 +50,105 @@ class MainActivity : Activity() {
     private lateinit var radioFast: RadioButton
     private lateinit var radioSwAccurate: RadioButton
     private lateinit var radioHwAccurate: RadioButton
+    private lateinit var radioKeepBoth: RadioButton
+    private lateinit var radioAudioOnly: RadioButton
+    private lateinit var radioVideoOnly: RadioButton
+    private lateinit var containerSpinner: Spinner
+    private lateinit var videoCodecSpinner: Spinner
+    private lateinit var audioCodecSpinner: Spinner
+    private lateinit var videoSectionSpinner: Spinner
+    private lateinit var audioSectionSpinner: Spinner
+    private lateinit var qualityModeSpinner: Spinner
+    private lateinit var crfSpinner: Spinner
+    private lateinit var cqSpinner: Spinner
+    private lateinit var bitrateInput: EditText
+    private lateinit var presetSpinner: Spinner
+    private lateinit var frameRateSpinner: Spinner
+    private lateinit var resolutionSpinner: Spinner
+    private lateinit var audioSampleRateSpinner: Spinner
+    private lateinit var audioBitrateInput: EditText
+    private lateinit var videoInputInfoView: TextView
+    private lateinit var audioInputInfoView: TextView
+    private lateinit var segmentCategoryContainer: LinearLayout
+    private lateinit var segmentListContainer: LinearLayout
+    private lateinit var mergeCard: LinearLayout
+
+    private var encoderCatalog: List<EncoderOption> = emptyList()
+    private var uiVideoCatalog: List<EncoderOption> = emptyList()
+    private var uiAudioCatalog: List<EncoderOption> = emptyList()
+    private var uiVideoChoices: List<EncoderOption?> = emptyList()
+    private var uiAudioChoices: List<EncoderOption?> = emptyList()
+    private var refreshOutputOptionsCallback: (() -> Unit)? = null
+    private val segmentFetchHandler = Handler(Looper.getMainLooper())
+    private var pendingSegmentFetchId: String? = null
+    private var detectedCategories: List<String> = emptyList()
+    private val dynamicCategoryCheckboxes = mutableMapOf<String, CheckBox>()
+    private val selectedSegmentIndexes = mutableSetOf<Int>()
+    private val segmentCheckboxes = mutableMapOf<Int, CheckBox>()
+    private var currentSegments: List<SponsorSegmentInfo> = emptyList()
+    private var suppressCategoryCallbacks = false
+    private lateinit var streamGroup: RadioGroup
+    private lateinit var streamOptionsLabel: TextView
+
+    private var videoSectionCustom = false
+    private var audioSectionCustom = false
+    private var selectedVideoEncoder: String? = null
+    private var selectedAudioEncoder: String? = null
+    private var selectedContainer: String? = null
+    private var qualityUsesCrf = false
+    private var selectedCrf: Int = 23
+    private var selectedCq: Int? = null
+    private var selectedPreset: String = "medium"
+    private var inputFrameRate: String? = null
+
+    private val frameRateTable = DropdownTable(
+        originalValues = listOf(
+            "30",
+            "23.976",
+            "24",
+            "25",
+            "29.97",
+            "50",
+            "59.94",
+            "60"
+        ),
+        normalize = { value ->
+            val raw = value.trim()
+            val match = Regex("\\d+(?:\\.\\d+)?").find(raw)
+            val number = match?.value ?: raw
+            if (number.contains('.')) {
+                number.trimEnd('0').trimEnd('.')
+            } else {
+                number
+            }
+        }
+    )
+
+    private var frameRateRows: List<DropdownRow<String>> = emptyList()
+    private var selectedFrameRate: String? = null
+    private var selectedResolutionHeight: Int? = null
+    private var selectedAudioSampleRate: Int? = null
+    private var suppressOutputCallbacks = false
+    private lateinit var bitratePresetSpinner: Spinner
+    private lateinit var outputConsequenceView: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var browseFileButton: Button
+    private lateinit var loadSegmentsButton: Button
     private lateinit var openPlayerButton: Button
     private lateinit var cancelButton: Button
     private lateinit var logButton: Button
+    private lateinit var saveLogButton: Button
     private lateinit var logView: TextView
     private lateinit var donationView: LinearLayout
     private lateinit var modeHintView: TextView
     private lateinit var idCardView: LinearLayout
     private lateinit var idCardIcon: TextView
+    private lateinit var idCardNote: TextView
     private lateinit var fileCardView: LinearLayout
     private lateinit var fileCardIcon: TextView
     private lateinit var fileCardLabel: TextView
+    private lateinit var processWithoutSegmentsCheckBox: CheckBox
+    private lateinit var fileCardNote: TextView
 
     private enum class CardState { PENDING, CHECKING, OK, ERROR }
     private var idCardState = CardState.PENDING
@@ -75,6 +169,7 @@ class MainActivity : Activity() {
     private val keyOutputFolderUri = "output_folder_uri"
     private val keyFrameAccurate = "frame_accurate"
     private val keyHwAccurate = "hw_accurate"
+    private val keyUseSegmentation = "use_segmentation"
     private val keyLastFileUri = "last_file_uri"
     private val keyLastFileName = "last_file_name"
     private val keyActiveProcessingId = "active_processing_id"
@@ -82,10 +177,27 @@ class MainActivity : Activity() {
     private val keyActiveProcessingFileName = "active_processing_file_name"
     private val keyActiveProcessingTitle = "active_processing_title"
     private val keyActiveProcessingAuthor = "active_processing_author"
+    private val keyLastOutputFileName = "last_output_file_name"
+    private val keyLastCompletedStatus = "last_completed_status"
+    private val keyLastCompletedLog = "last_completed_log"
     private val recentIdMaxAgeMs = 7 * 24 * 60 * 60 * 1000L  // 7 days
     private val tag = "SponsorCut"
     private val pickFolderRequestCode = 42
     private val browseFileRequestCode = 43
+    private val pickSegmentsRequestCode = 44
+
+    private var localSegmentFileUri: Uri? = null
+
+    // Prevents programmatic YouTube-ID updates from being treated as an
+    // explicit user selection of SponsorBlock.
+    private var suppressIdTextWatcher = false
+    private var localSegmentFileName: String? = null
+    private var localSegments: List<SponsorSegmentInfo>? = null
+    private var localSegmentWarnings: List<SegmentWarning> = emptyList()
+    private var localSegmentText: String? = null
+    private var localSegmentsAwaitingDuration = false
+    private var localSegmentsResolvedDurationSec: Double? = null
+    private var suppressLocalSegmentReloadOnce = false
 
     // All SponsorBlock categories; only "sponsor" is checked by default
     private val allCategories = listOf(
@@ -120,6 +232,8 @@ class MainActivity : Activity() {
             val error = intent.getBooleanExtra(ProcessingService.EXTRA_ERROR, false)
             val cancelled = intent.getBooleanExtra(ProcessingService.EXTRA_CANCELLED, false)
             if (done || error || cancelled) {
+                val finalStatus = if (cancelled) "⏹ Cancelled." else text
+                saveCompletedRunState(finalStatus, DiagLog.get())
                 clearActiveProcessingSnapshot()
                 if (error && isUriAccessError(text)) {
                     pendingUri = null
@@ -129,10 +243,11 @@ class MainActivity : Activity() {
                         browseFileButton.text = "📁 Browse for video file…"
                     }
                 }
-                setStatus(if (cancelled) "⏹ Cancelled." else text)
+                setStatus(finalStatus)
                 runOnUiThread {
                     setProcessingUi(active = false)
                     logButton.visibility = View.VISIBLE
+                    saveLogButton.visibility = View.VISIBLE
                     if (done && !error && !cancelled) {
                         donationView.visibility = View.VISIBLE
                     }
@@ -146,19 +261,58 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Catch any uncaught exception and display it before crashing
+        // Show launch crashes even when statusView does not yet exist.
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             android.util.Log.e("SponsorCutCRASH", "UNCAUGHT", throwable)
+
+            val message = buildString {
+                append("LAUNCH CRASH\n\n")
+                append(throwable.javaClass.name)
+                append("\n\n")
+                append(throwable.message ?: "(no message)")
+                append("\n\n")
+                append(throwable.stackTraceToString().take(4000))
+            }
+
             try {
-                val msg = throwable.stackTraceToString().take(2000)
+                DiagLog.append("LAUNCH CRASH", message)
+            } catch (_: Throwable) {
+            }
+
+            try {
                 runOnUiThread {
-                    try { statusView.text = "CRASH:\n$msg" } catch (_: Exception) {}
+                    try {
+                        setContentView(
+                            TextView(this).apply {
+                                text = message
+                                textSize = 11f
+                                typeface = android.graphics.Typeface.MONOSPACE
+                                setTextIsSelectable(true)
+                                setPadding(32, 32, 32, 32)
+                                setBackgroundColor(0xFF220000.toInt())
+                                setTextColor(0xFFFFCCCC.toInt())
+                            }
+                        )
+                    } catch (_: Throwable) {
+                    }
                 }
-                Thread.sleep(200)
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {
+            }
+
+            try {
+                Thread.sleep(1000)
+            } catch (_: InterruptedException) {
+            }
         }
 
-        setupUi()
+        try {
+            DiagLog.append("Launch", "MainActivity.onCreate entered")
+            setupUi()
+            DiagLog.append("Launch", "MainActivity.setupUi completed")
+        } catch (e: Throwable) {
+            DiagLog.append("Launch", "setupUi failed: ${e.stackTraceToString()}")
+            throw e
+        }
         restoreActiveProcessingSnapshotIfNeeded()
 
         // Request notification permission on Android 13+
@@ -175,14 +329,46 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         val filter = IntentFilter(ProcessingService.BROADCAST_PROGRESS)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(progressReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(progressReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            progressReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         if (ProcessingService.isProcessingActive) {
             restoreActiveProcessingSnapshotIfNeeded()
             setProcessingUi(active = true)
+        } else {
+            // A completion, failure, or cancellation broadcast may have arrived
+            // while this Activity was paused and its receiver was unregistered.
+            // Reconcile the visible UI with the Service's actual state.
+            clearActiveProcessingSnapshot()
+            setProcessingUi(active = false)
+            restoreCompletedRunStateIfNeeded()
+
+            val savedInputUri = getSharedPreferences(prefsName, MODE_PRIVATE)
+                .getString("sponsorcut_last_input_uri", null)
+                ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+
+            if (savedInputUri != null) {
+                // A share intent can recreate this Activity. Restore the media
+                // selection before inspection; inspection alone does not set
+                // pendingUri or the file card.
+                if (pendingUri == null) {
+                    pendingUri = savedInputUri
+                    fileCardState = CardState.OK
+
+                    val savedFileName = FileResolver.getDisplayName(this, savedInputUri)
+                        .ifBlank {
+                            savedInputUri.lastPathSegment ?: "previous file"
+                        }
+
+                    fileCardLabel.text = "📄 $savedFileName"
+                    browseFileButton.text = "📁 Change file…"
+                }
+
+                inspectSelectedUri(savedInputUri)
+            }
         }
     }
 
@@ -212,6 +398,32 @@ class MainActivity : Activity() {
             setStatus("Output folder set to: $path")
             pickFolderButton.text = "Output: $path"
         }
+        if (requestCode == pickSegmentsRequestCode && resultCode == RESULT_OK) {
+            val segmentUri = data?.data ?: return
+            try {
+                contentResolver.takePersistableUriPermission(
+                    segmentUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+
+            clearLocalSegmentSource()
+
+            localSegmentFileUri = segmentUri
+            localSegmentFileName = FileResolver.getDisplayName(this, segmentUri)
+                .ifBlank { segmentUri.lastPathSegment ?: "segments" }
+            localSegments = null
+            localSegmentWarnings = emptyList()
+            cachedSegments = null
+            cachedTitle = null
+            cachedAuthor = null
+            lastFetchedId = ""
+
+            loadSegmentsButton.text = "📄 ${localSegmentFileName}"
+            setStatus("Segment file selected. Parsing segments…")
+            loadLocalSegments(segmentUri, pendingVideoInfo?.durationSec)
+        }
+
         if (requestCode == browseFileRequestCode && resultCode == RESULT_OK) {
             val fileUri = data?.data ?: return
             try {
@@ -226,6 +438,7 @@ class MainActivity : Activity() {
             browseFileButton.text = "📁 Change file…"
             saveFileUri(fileUri, fileName)
             updateCards()
+            inspectSelectedUri(fileUri)
 
             // Priority 1: whatever is already typed/shown in idInput (covers the URL-share→browse flow)
             val currentInput = idInput.text?.toString().orEmpty()
@@ -238,7 +451,7 @@ class MainActivity : Activity() {
             // Do NOT fall back to the cache here — a stale cached ID from a different
             // session will silently corrupt the pairing. The user must provide the ID explicitly.
 
-            idInput.setText(videoId)
+            setIdInputProgrammatically(videoId)
             idInput.visibility = View.VISIBLE
             retryButton.visibility = View.VISIBLE
             browseFileButton.visibility = View.VISIBLE
@@ -250,6 +463,61 @@ class MainActivity : Activity() {
             }
             applyModeRecommendation()
         }
+    }
+
+    private fun refreshFrameRateDropdown() {
+        frameRateRows = frameRateTable.rowsForInput(
+            inputValue = inputFrameRate
+        )
+
+        val selectedDisplay = frameRateTable.displayForRealValue(
+            rows = frameRateRows,
+            realValue = selectedFrameRate
+        ) ?: frameRateRows.first().displayValue
+
+        // Keep the selected value synchronized with the row actually shown.
+        // Without this, a stale numeric frame rate can remain in
+        // selectedFrameRate while the spinner visibly falls back to Input.
+        selectedFrameRate = frameRateTable.realValueForDisplay(
+            rows = frameRateRows,
+            displayValue = selectedDisplay
+        ) ?: selectedFrameRate
+
+        setAdapterKeepingSelection(
+            frameRateSpinner,
+            frameRateRows.map { it.displayValue },
+            selectedDisplay
+        )
+    }
+
+    private fun setAdapterKeepingSelection(
+        spinner: Spinner,
+        values: List<String>,
+        preferred: String?
+    ) {
+        val adapter = spinner.adapter
+        val existing = if (adapter == null) {
+            emptyList()
+        } else {
+            (0 until adapter.count).map { adapter.getItem(it)?.toString().orEmpty() }
+        }
+        if (existing == values) {
+            val index = preferred?.let { values.indexOf(it) } ?: -1
+            if (index >= 0 && spinner.selectedItemPosition != index) {
+                spinner.setSelection(index, false)
+            }
+            return
+        }
+
+        suppressOutputCallbacks = true
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            values
+        )
+        val index = preferred?.let { values.indexOf(it) } ?: -1
+        spinner.setSelection(if (index >= 0) index else 0, false)
+        suppressOutputCallbacks = false
     }
 
     private fun setupUi() {
@@ -268,10 +536,44 @@ class MainActivity : Activity() {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: Editable?) {
+                    if (suppressIdTextWatcher) return
+
                     val raw = s?.toString().orEmpty()
                     val id = if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' })
                         raw else extractId(raw)
-                    if (id.isNotBlank()) fetchSegmentsForId(id, force = true)
+
+                    segmentFetchHandler.removeCallbacksAndMessages(null)
+
+                    if (id.isBlank()) {
+                        pendingSegmentFetchId = null
+                        return
+                    }
+
+                    clearLocalSegmentSource()
+                    updateCards()
+                    statusView.text =
+                        "YouTube ID entered — previous TXT/JSON segment source discarded.\nChecking SponsorBlock…"
+
+                    pendingSegmentFetchId = id
+                    segmentFetchHandler.postDelayed({
+                        val currentId = idInput.text?.toString().orEmpty()
+                        val currentExtracted = if (
+                            currentId.length == 11 &&
+                            currentId.all { it.isLetterOrDigit() || it == '_' || it == '-' }
+                        ) {
+                            currentId
+                        } else {
+                            extractId(currentId)
+                        }
+
+                        if (currentExtracted == pendingSegmentFetchId) {
+                            fetchSegmentsForId(
+                                videoId = currentExtracted,
+                                force = true,
+                                replaceLocalSourceOnSuccess = true
+                            )
+                        }
+                    }, 450)
                 }
             })
         }
@@ -285,6 +587,21 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val uri = pendingUri
                 if (uri == null) { setStatus("No shared video is pending."); return@setOnClickListener }
+
+                // Local TXT/JSON segments are self-contained: they do not require
+                // or validate a YouTube ID.
+                if (localSegments != null) {
+                    if (localSegments.orEmpty().any { it.endIsOpen }) {
+                        setStatus(
+                            "Load a media file to resolve the \"end\" segment timing."
+                        )
+                        return@setOnClickListener
+                    }
+
+                    startProcessing(uri, "", "local")
+                    return@setOnClickListener
+                }
+
                 val raw = idInput.text?.toString().orEmpty()
                 val videoId = if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' }) raw
                               else extractId(raw)
@@ -318,6 +635,12 @@ class MainActivity : Activity() {
             setBackgroundColor(0xFFCC3333.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             setOnClickListener {
+                if (!ProcessingService.isProcessingActive) {
+                    clearActiveProcessingSnapshot()
+                    setProcessingUi(active = false)
+                    return@setOnClickListener
+                }
+
                 isEnabled = false
                 alpha = 0.5f
                 text = "Cancelling…"
@@ -350,6 +673,21 @@ class MainActivity : Activity() {
             }
         }
 
+        loadSegmentsButton = Button(this).apply {
+            text = "📄 Load TXT/JSON segments…"
+            setOnClickListener {
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        arrayOf("text/plain", "application/json", "application/octet-stream")
+                    )
+                }
+                startActivityForResult(i, pickSegmentsRequestCode)
+            }
+        }
+
         val scrollContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -357,20 +695,65 @@ class MainActivity : Activity() {
             addView(progressBar, lp)
             addView(cancelButton, lp)
 
+            // ── Provided segment categories ────────────────────────────────
+            segmentCategoryContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(p * 2, p / 4, p, p / 4)
+            }
+            addView(segmentCategoryContainer, lp)
+
+            // ── Individual segment rundown ─────────────────────────────
+            segmentListContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(p * 2, p / 4, p, p / 4)
+            }
+            addView(segmentListContainer, lp)
+
+            renderDetectedCategories()
+
             // ── Card 1: YouTube ID ────────────────────────────────────────────
             idCardView = makeCard(p, cardColor(CardState.PENDING)).also { card ->
+                processWithoutSegmentsCheckBox = CheckBox(context).apply {
+                    text = "Use segmentation"
+                    isChecked = getSharedPreferences(prefsName, MODE_PRIVATE)
+                        .getBoolean(keyUseSegmentation, true)
+                    setOnCheckedChangeListener { _, checked ->
+                        getSharedPreferences(prefsName, MODE_PRIVATE)
+                            .edit()
+                            .putBoolean(keyUseSegmentation, checked)
+                            .apply()
+                        updateCards()
+                    }
+                }
                 idCardIcon = TextView(context).apply {
                     text = "⏳"
                     textSize = 20f
                     setPadding(0, 0, p / 2, 0)
                 }
-                val col = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
+                idCardNote = TextView(context).apply {
+                    text = ""
+                    textSize = 12f
+                    visibility = View.GONE
+                }
+                val idTopRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    addView(processWithoutSegmentsCheckBox, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                     addView(idCardIcon, LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                }
+                val col = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(idTopRow, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                     addView(idInput, LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                     addView(openPlayerButton, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(loadSegmentsButton, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(idCardNote, LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 }
                 card.addView(col, LinearLayout.LayoutParams(
@@ -428,12 +811,12 @@ class MainActivity : Activity() {
             }
             radioHwAccurate = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "HW-Accurate (h264 single-pass, one-shot GPU init — lengthy)"
+                text = "HW-Accurate (single-pass, one-shot HW CODEC init — lengthy)"
                 isChecked = savedHwAccurate
             }
             radioSwAccurate = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "SW-Accurate (mpeg4 CPU encode, single-pass, one-shot - lengthy - heat producing)"
+                text = "SW-Accurate (single-pass, one-shot CPU encode - lengthy)"
                 isChecked = savedFrameAccurate
             }
             radioGroup.addView(radioFast)
@@ -454,50 +837,769 @@ class MainActivity : Activity() {
             }
             addView(radioGroup, lp)
 
+            // ── Processing options ─────────────────────────────────────────
+            val streamLabel = TextView(context).apply {
+                text = "Output streams:"
+                setPadding(p, p, p, 0)
+                textSize = 14f
+            }
+            streamOptionsLabel = streamLabel
+            addView(streamLabel, lp)
+
+            streamGroup = RadioGroup(context).apply {
+                orientation = RadioGroup.VERTICAL
+                setPadding(p * 2, 0, p, p / 2)
+            }
+
+            radioKeepBoth = RadioButton(context).apply {
+                id = View.generateViewId()
+                text = "Keep both audio and video"
+                isChecked = true
+            }
+            radioAudioOnly = RadioButton(context).apply {
+                id = View.generateViewId()
+                text = "Audio only"
+            }
+            radioVideoOnly = RadioButton(context).apply {
+                id = View.generateViewId()
+                text = "Video only"
+            }
+
+            streamGroup.addView(radioKeepBoth)
+            streamGroup.addView(radioAudioOnly)
+            streamGroup.addView(radioVideoOnly)
+            streamGroup.check(radioKeepBoth.id)
+            addView(streamGroup, lp)
+
+            // ── Output format controls ─────────────────────────────────────
+            fun makeRow(label: String, control: android.view.View, annotation: TextView? = null): LinearLayout {
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, p / 3, 0, p / 3)
+                }
+
+                val title = TextView(context).apply {
+                    text = label
+                    textSize = 13f
+                    setPadding(0, 0, p / 2, 0)
+                }
+                row.addView(title, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+
+                row.addView(control, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                ))
+
+                annotation?.let {
+                    it.textSize = 11f
+                    it.alpha = 0.65f
+                    it.setPadding(p / 2, 0, 0, 0)
+                    row.addView(it, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ))
+                }
+
+                return row
+            }
+
+            videoSectionSpinner = Spinner(context)
+            audioSectionSpinner = Spinner(context)
+            containerSpinner = Spinner(context)
+            videoCodecSpinner = Spinner(context)
+            audioCodecSpinner = Spinner(context)
+            qualityModeSpinner = Spinner(context)
+            bitratePresetSpinner = Spinner(context)
+            presetSpinner = Spinner(context)
+            frameRateSpinner = Spinner(context)
+            resolutionSpinner = Spinner(context)
+            audioSampleRateSpinner = Spinner(context)
+            audioBitrateInput = EditText(context).apply {
+                hint = "Audio bitrate, e.g. 163k"
+            }
+
+            crfSpinner = Spinner(context)
+            cqSpinner = Spinner(context)
+            bitrateInput = EditText(context).apply {
+                hint = "Bitrate, e.g. 4M or 4000k"
+            }
+            videoInputInfoView = TextView(context)
+            audioInputInfoView = TextView(context)
+
+            addView(makeRow("Video", videoSectionSpinner), lp)
+            addView(videoInputInfoView, lp)
+            addView(makeRow("Video codec", videoCodecSpinner), lp)
+            addView(makeRow("Container", containerSpinner), lp)
+            addView(makeRow("Quality", qualityModeSpinner, TextView(context)), lp)
+
+            val qualityValueRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(p * 2, 0, 0, 0)
+            }
+            qualityValueRow.addView(crfSpinner, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ))
+            qualityValueRow.addView(cqSpinner, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ))
+            qualityValueRow.addView(bitrateInput, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ))
+            qualityValueRow.addView(bitratePresetSpinner, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(qualityValueRow, lp)
+
+            addView(makeRow("Preset", presetSpinner), lp)
+            addView(makeRow("Frame rate", frameRateSpinner, TextView(context)), lp)
+            addView(makeRow("Resolution", resolutionSpinner), lp)
+
+            addView(makeRow("Audio", audioSectionSpinner), lp)
+            addView(audioInputInfoView, lp)
+            addView(makeRow("Audio codec", audioCodecSpinner), lp)
+            addView(makeRow("Sample rate", audioSampleRateSpinner), lp)
+            addView(makeRow("Audio bitrate", audioBitrateInput), lp)
+
+            outputConsequenceView = TextView(context).apply {
+                textSize = 12f
+                setTextColor(0xFFCCCCCC.toInt())
+                setPadding(p, p / 2, p, p)
+            }
+            addView(outputConsequenceView, lp)
+
+                fun resolvedVideoChoiceLabel(mode: ExecutionMode): String {
+                    val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.videoCodec)
+                    val matching = uiVideoCatalog.firstOrNull { it.codecFamily == inputFamily }
+
+                    if (matching != null) {
+                        return "${matching.label} - input"
+                    }
+
+                    val fallback = when (mode) {
+                        ExecutionMode.HW_ACCURATE ->
+                            uiVideoCatalog.firstOrNull { it.name == "h264_mediacodec" }
+                                ?: uiVideoCatalog.firstOrNull()
+                        ExecutionMode.SW_ACCURATE ->
+                            uiVideoCatalog.firstOrNull { it.name == "mpeg4" }
+                                ?: uiVideoCatalog.firstOrNull()
+                        else -> null
+                    }
+
+                    return fallback?.let { "${it.label} - fallback" }
+                        ?: "No compatible video encoder"
+                }
+
+                fun resolvedAudioChoiceLabel(): String {
+                    val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
+                    val matching = uiAudioCatalog.firstOrNull { it.codecFamily == inputFamily }
+
+                    return if (matching != null) {
+                        "${matching.label} - input"
+                    } else {
+                        "AAC - fallback"
+                    }
+                }
+
+                fun resolvedContainerChoiceLabel(): String {
+                    val summary = pendingVideoInfo?.summaryLine ?: ""
+
+                    return when {
+                        // MPEG-TS output is unsupported for transcoding.
+                        // TS input is automatically planned as MP4 output.
+                        summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
+                        summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
+                        summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
+                        summary.contains("WebM", ignoreCase = true) -> "WebM - input"
+                        summary.contains("AVI", ignoreCase = true) -> "AVI - input"
+                        else -> "MP4 - fallback"
+                    }
+                }
+
+            fun refreshOutputOptions() {
+                if (suppressOutputCallbacks) return
+
+                val mode = when {
+                    radioHwAccurate.isChecked -> ExecutionMode.HW_ACCURATE
+                    radioSwAccurate.isChecked -> ExecutionMode.SW_ACCURATE
+                    else -> ExecutionMode.FAST
+                }
+
+                val videoCatalog = EncoderCatalog.videoOptions(encoderCatalog, mode)
+                    .filter { it.available }
+                val audioCatalog = EncoderCatalog.audioOptions(encoderCatalog)
+                    .filter { it.available }
+
+                uiVideoCatalog = videoCatalog
+                uiAudioCatalog = audioCatalog
+
+                if (selectedVideoEncoder != null && uiVideoCatalog.none { it.name == selectedVideoEncoder }) {
+                    selectedVideoEncoder = null
+                    videoSectionCustom = false
+                }
+
+                if (selectedAudioEncoder != null && uiAudioCatalog.none { it.name == selectedAudioEncoder }) {
+                    selectedAudioEncoder = null
+                    audioSectionCustom = false
+                }
+
+                if (mode == ExecutionMode.FAST) {
+                    videoSectionCustom = false
+                    audioSectionCustom = false
+                    selectedVideoEncoder = null
+                    selectedAudioEncoder = null
+                    selectedContainer = null
+                }
+
+                setAdapterKeepingSelection(
+                    videoSectionSpinner,
+                    listOf("Auto", "Custom"),
+                    if (videoSectionCustom) "Custom" else "Auto"
+                )
+                setAdapterKeepingSelection(
+                    audioSectionSpinner,
+                    listOf("Auto", "Custom"),
+                    if (audioSectionCustom) "Custom" else "Auto"
+                )
+
+                val resolvedVideoLabel = resolvedVideoChoiceLabel(mode)
+                val resolvedVideoBase = resolvedVideoLabel.substringBefore(" - ")
+
+                uiVideoChoices = listOf(null) + videoCatalog.filter {
+                    it.label != resolvedVideoBase
+                }
+
+                val videoValues = if (mode == ExecutionMode.FAST) {
+                    listOf("Copy input video")
+                } else {
+                    listOf(resolvedVideoLabel) + uiVideoChoices.drop(1).mapNotNull {
+                        it?.label
+                    }
+                }
+                val preferredVideo = if (videoSectionCustom && selectedVideoEncoder != null) {
+                    videoCatalog.firstOrNull { it.name == selectedVideoEncoder }
+                        ?.let { "${it.label}${if (it.available) "" else " — unavailable"}" }
+                } else null
+                setAdapterKeepingSelection(videoCodecSpinner, videoValues, preferredVideo)
+
+                val resolvedAudioLabel = resolvedAudioChoiceLabel()
+                val resolvedAudioBase = resolvedAudioLabel.substringBefore(" - ")
+
+                uiAudioChoices = listOf(null) + audioCatalog.filter {
+                    it.label != resolvedAudioBase
+                }
+
+                val audioValues = if (mode == ExecutionMode.FAST) {
+                    listOf("Copy compatible audio")
+                } else {
+                    listOf(resolvedAudioLabel) + uiAudioChoices.drop(1).mapNotNull {
+                        it?.label
+                    }
+                }
+                val preferredAudio = if (audioSectionCustom && selectedAudioEncoder != null) {
+                    audioCatalog.firstOrNull { it.name == selectedAudioEncoder }
+                        ?.let { "${it.label}${if (it.available) "" else " — unavailable"}" }
+                } else null
+                setAdapterKeepingSelection(audioCodecSpinner, audioValues, preferredAudio)
+
+                val effectiveVideoEncoder = effectiveVideoEncoderName(mode)
+
+                val selectedVideo = effectiveVideoEncoder?.let { name ->
+                    videoCatalog.firstOrNull { it.name == name }
+                }
+
+                val supportsCrf = selectedVideo?.name in setOf(
+                    "libx264",
+                    "libx265"
+                )
+
+                val qualityLabel = when (selectedVideo?.name) {
+                    "hevc_mediacodec" -> "CQ"
+                    else -> "CRF"
+                }
+
+                setAdapterKeepingSelection(
+                    qualityModeSpinner,
+                    if (supportsCrf) listOf(qualityLabel, "Bitrate") else listOf("Bitrate"),
+                    if (qualityUsesCrf && supportsCrf) qualityLabel else "Bitrate"
+                )
+
+                val isSoftwareX264X265 = selectedVideo?.name in setOf(
+                    "libx264",
+                    "libx265"
+                )
+
+                val isMediaCodec = selectedVideo?.name in setOf(
+                    "h264_mediacodec",
+                    "hevc_mediacodec"
+                )
+
+                crfSpinner.visibility = if (
+                    supportsCrf && qualityUsesCrf && isSoftwareX264X265
+                ) View.VISIBLE else View.GONE
+
+                cqSpinner.visibility = if (
+                    supportsCrf && qualityUsesCrf && isMediaCodec
+                ) View.VISIBLE else View.GONE
+
+                bitrateInput.visibility = if (supportsCrf && qualityUsesCrf) {
+                    View.GONE
+                } else {
+                    View.VISIBLE
+                }
+
+                bitratePresetSpinner.visibility = bitrateInput.visibility
+
+                if (isSoftwareX264X265) {
+                    setAdapterKeepingSelection(
+                        crfSpinner,
+                        (0..51).map { it.toString() },
+                        selectedCrf.toString()
+                    )
+                }
+
+                if (supportsCrf && isMediaCodec && selectedVideo != null) {
+                    val capability = mediaCodecCqCapability(selectedVideo.codecFamily)
+
+                    val cqChoices = if (capability.supported) {
+                        (capability.min..capability.max).map { it.toString() }
+                    } else {
+                        listOf("CQ unavailable on this device")
+                    }
+
+                    val initialCq = selectedCq?.toString() ?: cqChoices.first()
+                    selectedCq = initialCq.toIntOrNull()
+
+                    setAdapterKeepingSelection(
+                        cqSpinner,
+                        cqChoices,
+                        initialCq
+                    )
+                }
+
+                setAdapterKeepingSelection(
+                    bitratePresetSpinner,
+                    listOf("Input", "1M", "2M", "4M", "8M", "12M", "Custom"),
+                    "Input"
+                )
+
+                setAdapterKeepingSelection(
+                    presetSpinner,
+                    listOf(
+                        "ultrafast", "superfast", "veryfast", "faster", "fast",
+                        "medium", "slow", "slower", "veryslow", "placebo"
+                    ),
+                    selectedPreset
+                )
+
+                presetSpinner.isEnabled = isSoftwareX264X265 &&
+                    mode == ExecutionMode.SW_ACCURATE
+                presetSpinner.alpha = if (presetSpinner.isEnabled) 1f else 0.4f
+
+                val probeFps = pendingVideoInfo?.fps
+                val frameRateInputValue = probeFps?.let { fps ->
+                    if (fps == fps.toInt().toFloat()) {
+                        fps.toInt().toString()
+                    } else {
+                        "%.2f".format(fps)
+                    }
+                }
+
+                inputFrameRate = frameRateInputValue
+                selectedFrameRate = null
+                refreshFrameRateDropdown()
+
+                val inputHeight = pendingVideoInfo?.height
+                val allHeights = listOf(2160, 1440, 1080, 720, 480, 360, 240, 144)
+                val availableHeights = inputHeight?.let { height ->
+                    allHeights.filter { it <= height }
+                } ?: allHeights
+
+                val resolutionInputValue = inputHeight?.let { "${it}p" }
+                val resolutionInputLabel = resolutionInputValue?.let { "$it - input" }
+                    ?: "Unknown - input"
+
+                val resolutionChoices = listOf(resolutionInputLabel) + availableHeights.map {
+                    "${it}p"
+                }.filter { it != resolutionInputValue }
+
+                setAdapterKeepingSelection(
+                    resolutionSpinner,
+                    resolutionChoices,
+                    selectedResolutionHeight?.let { selected ->
+                        val selectedLabel = "${selected}p"
+                        resolutionChoices.firstOrNull {
+                            it == selectedLabel || it.startsWith("$selectedLabel - input")
+                        }
+                    } ?: resolutionInputLabel
+                )
+
+                val probeSampleRate = pendingVideoInfo?.sampleRate
+                val sampleRateInputValue = probeSampleRate?.toString()
+                val sampleRateInputLabel = sampleRateInputValue?.let { "$it Hz - input" }
+                    ?: "Unknown - input"
+
+                val sampleRateChoices = listOf(sampleRateInputLabel) + listOf(
+                    44100, 48000
+                ).map { it.toString() }.filter { it != sampleRateInputValue }
+
+                setAdapterKeepingSelection(
+                    audioSampleRateSpinner,
+                    sampleRateChoices,
+                    selectedAudioSampleRate?.let { selected ->
+                        val selectedLabel = selected.toString()
+                        sampleRateChoices.firstOrNull {
+                            it == selectedLabel || it.startsWith("$selectedLabel - input")
+                        }
+                    } ?: sampleRateInputLabel
+                )
+
+                // Clear obsolete TS/M2TS selections saved by older builds.
+                if (selectedContainer?.lowercase() in setOf("ts", "m2ts")) {
+                    selectedContainer = null
+                }
+
+                val resolvedContainerLabel = resolvedContainerChoiceLabel()
+                val resolvedContainerBase = resolvedContainerLabel.substringBefore(" - ")
+
+                val containerInputSummary = pendingVideoInfo?.summaryLine ?: ""
+                val inputIsMp4Family = containerInputSummary.contains("MOV,MP4", ignoreCase = true)
+                val mp4Label = if (inputIsMp4Family) "MP4 (input)" else "MP4"
+
+                fun containerChoices(vararg options: String): List<String> {
+                    return listOf(resolvedContainerLabel) + options.filter {
+                        it.substringBefore(" (") != resolvedContainerBase
+                    }
+                }
+
+                // Container choices must follow the effective output encoder,
+                // not merely the input codec family. MPEG-TS output is currently
+                // unsupported for transcoding; TS inputs are automatically planned
+                // as MP4 output. TS preservation will be re-examined after the
+                // FFmpegKitNext upgrade.
+                val effectiveEncoderName = effectiveVideoEncoderName(mode)
+                val effectiveVideoFamily = effectiveEncoderName?.let { encoderName ->
+                    EncoderCatalog.find(encoderCatalog, encoderName)?.codecFamily
+                }
+
+                val containerValues = when {
+                    mode == ExecutionMode.FAST -> listOf(resolvedContainerLabel)
+                    effectiveVideoFamily == "H.264" ->
+                        containerChoices(mp4Label, "MKV", "MOV", "AVI")
+                    effectiveVideoFamily == "H.265/HEVC" ->
+                        containerChoices(mp4Label, "MKV", "MOV")
+                    effectiveVideoFamily == "VP9" ->
+                        containerChoices("WebM", "MKV")
+                    effectiveVideoFamily == "AV1" ->
+                        containerChoices(mp4Label, "MKV", "WebM")
+                    else -> containerChoices(mp4Label, "MKV", "AVI")
+                }
+                setAdapterKeepingSelection(
+                    containerSpinner,
+                    containerValues,
+                    selectedContainer?.replaceFirstChar { it.uppercase() }
+                )
+
+                val inputSummary = pendingVideoInfo?.summaryLine ?: "unknown"
+                val inputVideoCodec = pendingVideoInfo?.videoCodec ?: "unknown"
+                val inputFps = pendingVideoInfo?.fps?.let { "${"%.2f".format(it)} fps" } ?: "unknown"
+                val inputVideoBitrate = pendingVideoInfo?.videoBitrate
+                    ?.let { "${it / 1000} kbps" } ?: "unknown"
+                val inputAudioCodec = pendingVideoInfo?.audioCodec ?: "unknown"
+                val inputSampleRate = pendingVideoInfo?.sampleRate
+                    ?.let { "${it} Hz" } ?: "unknown"
+
+                videoInputInfoView.text = "input: $inputSummary"
+                audioInputInfoView.text = "input: $inputAudioCodec $inputSampleRate"
+
+                outputConsequenceView.text = buildString {
+                    append(
+                        when (mode) {
+                            ExecutionMode.FAST -> "Fast stream copy"
+                            ExecutionMode.SW_ACCURATE -> "SW accurate processing"
+                            ExecutionMode.HW_ACCURATE -> "HW accurate processing"
+                        }
+                    )
+                    append("; ")
+                    append(
+                        when {
+                            radioAudioOnly.isChecked -> "audio-only output"
+                            radioVideoOnly.isChecked -> "video-only output"
+                            else -> "both streams"
+                        }
+                    )
+                    append("; ")
+                    append("remove selected provided segments")
+                    append(".")
+                }
+            }
+
+            videoSectionSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        videoSectionCustom = position == 1
+                        if (!videoSectionCustom) {
+                            selectedVideoEncoder = null
+                            selectedContainer = null
+                        }
+                        refreshOutputOptions()
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            audioSectionSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        audioSectionCustom = position == 1
+                        if (!audioSectionCustom) {
+                            selectedAudioEncoder = null
+                        }
+                        refreshOutputOptions()
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            videoCodecSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks || position <= 0) return
+
+                        val mode = when {
+                            radioHwAccurate.isChecked -> ExecutionMode.HW_ACCURATE
+                            radioSwAccurate.isChecked -> ExecutionMode.SW_ACCURATE
+                            else -> ExecutionMode.FAST
+                        }
+
+                        val option = uiVideoChoices
+                            .getOrNull(position)
+
+                        if (option == null) {
+                            selectedVideoEncoder = null
+                            videoSectionCustom = false
+                        } else {
+                            selectedVideoEncoder = option.name
+                            videoSectionCustom = true
+                            DiagLog.append("UI", "video codec selected: ${option.name}")
+                        }
+
+                        selectedContainer = null
+                        refreshOutputOptions()
+                    }
+
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            audioCodecSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks || position <= 0) return
+
+                        val option = uiAudioChoices
+                            .getOrNull(position)
+
+                        if (option == null) {
+                            selectedAudioEncoder = null
+                            audioSectionCustom = false
+                        } else {
+                            selectedAudioEncoder = option.name
+                            audioSectionCustom = true
+                            DiagLog.append("UI", "audio codec selected: ${option.name}")
+                        }
+
+                        refreshOutputOptions()
+                    }
+
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            containerSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        selectedContainer = if (position == 0) {
+                            null
+                        } else {
+                            containerSpinner.selectedItem
+                                ?.toString()
+                                ?.substringBefore(" (")
+                                ?.lowercase()
+                        }
+                        if (selectedContainer != null) {
+                            videoSectionCustom = true
+                        }
+                        refreshOutputOptions()
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            resolutionSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        val selected = resolutionSpinner.selectedItem?.toString() ?: return
+                        selectedResolutionHeight = Regex("^(\\d+)p$").find(selected)
+                            ?.groupValues?.get(1)?.toInt()
+                        refreshOutputOptions()
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            qualityModeSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        qualityUsesCrf = qualityModeSpinner.selectedItem in setOf("CRF", "CQ")
+                        refreshOutputOptionsCallback = { refreshOutputOptions() }
+                        refreshOutputOptions()
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            cqSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+
+                        val value = cqSpinner.selectedItem
+                            ?.toString()
+                            ?.toIntOrNull()
+
+                        if (selectedCq != value) {
+                            selectedCq = value
+                            refreshOutputOptions()
+                        }
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            bitratePresetSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        val selected = bitratePresetSpinner.selectedItem?.toString() ?: return
+                        if (selected == "Custom") return
+
+                        if (selected == "Input") {
+                            val bps = pendingVideoInfo?.videoBitrate
+                            bitrateInput.setText(
+                                if (bps != null) "${bps / 1000}k" else ""
+                            )
+                        } else {
+                            bitrateInput.setText(selected.lowercase())
+                        }
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            presetSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        selectedPreset = presetSpinner.selectedItem?.toString() ?: "medium"
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            frameRateSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        selectedFrameRate = frameRateTable.realValueForDisplay(
+                            rows = frameRateRows,
+                            displayValue = frameRateSpinner.selectedItem as? String
+                        )
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            audioSampleRateSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+                        selectedAudioSampleRate = audioSampleRateSpinner.selectedItem
+                            ?.toString()
+                            ?.substringBefore(" (")
+                            ?.toIntOrNull()
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
+            refreshOutputOptions()
+
+            radioGroup.setOnCheckedChangeListener { _, _ ->
+                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+                    .putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
+                    .putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
+                    .apply()
+                refreshOutputOptions()
+            }
+
+            // ── Merge files placeholder ────────────────────────────────────
+            mergeCard = makeCard(p, 0x44666666).apply {
+                val title = TextView(context).apply {
+                    text = "🔗 Merge files"
+                    textSize = 15f
+                }
+                val subtitle = TextView(context).apply {
+                    text = "Combine multiple media files into one output. Coming soon."
+                    textSize = 12f
+                    alpha = 0.75f
+                }
+                val button = Button(context).apply {
+                    text = "Choose files"
+                    isEnabled = false
+                    alpha = 0.45f
+                }
+                addView(title)
+                addView(subtitle)
+                addView(button)
+            }
+            addView(mergeCard, lp)
+
+            radioGroup.setOnCheckedChangeListener { _, _ ->
+                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+                    .putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
+                    .putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
+                    .apply()
+                refreshOutputOptions()
+            }
+
             modeHintView = TextView(context).apply {
                 visibility = View.GONE
                 textSize = 13f
                 setPadding(p, p / 2, p, p / 2)
             }
             addView(modeHintView, lp)
-
-            // ── SponsorBlock category selector ─────────────────────────────
-            val catLabel = TextView(context).apply {
-                text = "Cut these SponsorBlock categories:"
-                setPadding(p, p, p, 0)
-                textSize = 14f
-            }
-            addView(catLabel, lp)
-
-            val catContainer = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(p * 2, p / 4, p, p / 4)
-            }
-            val catPrefs = getSharedPreferences(prefsName, MODE_PRIVATE)
-            for ((catKey, catName) in allCategories) {
-                val defaultChecked = catKey == "sponsor"
-                val cb = CheckBox(context).apply {
-                    text = catName
-                    isChecked = catPrefs.getBoolean("cat_$catKey", defaultChecked)
-                    setOnCheckedChangeListener { _, checked ->
-                        catPrefs.edit().putBoolean("cat_$catKey", checked).apply()
-                        // Re-filter from cache — no network re-fetch needed
-                        val segs = cachedSegments
-                        if (segs != null && lastFetchedId.isNotBlank()) {
-                            val visible = segs.filter { it.category in selectedCategories() }
-                            idCardState = if (visible.isEmpty()) CardState.ERROR else CardState.OK
-                            runOnUiThread {
-                                applySegmentUiState(lastFetchedId, visible, cachedTitle, cachedAuthor)
-                                updateCards()
-                            }
-                        }
-                    }
-                }
-                categoryCheckboxes[catKey] = cb
-                catContainer.addView(cb, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            }
-            addView(catContainer, lp)
 
             // Signature
             // val sig = TextView(context).apply {
@@ -547,6 +1649,15 @@ class MainActivity : Activity() {
                 }
             }
             addView(logButton, lp)
+
+            saveLogButton = Button(context).apply {
+                text = "💾 Save diagnostic log"
+                visibility = View.GONE
+                setOnClickListener {
+                    saveDiagnosticLog()
+                }
+            }
+            addView(saveLogButton, lp)
 
             logView = TextView(context).apply {
                 visibility = View.GONE
@@ -628,6 +1739,425 @@ class MainActivity : Activity() {
         setContentView(scroll)
     }
 
+    private var pendingVideoInfo: FFProbeInspector.VideoInfo? = null
+
+    private fun renderDetectedCategories() {
+        segmentCategoryContainer.removeAllViews()
+        dynamicCategoryCheckboxes.clear()
+
+        if (detectedCategories.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = "No segment categories detected."
+                textSize = 12f
+                alpha = 0.7f
+            }
+            segmentCategoryContainer.addView(empty)
+            return
+        }
+
+        val title = TextView(this).apply {
+            text = "Detected categories:"
+            textSize = 13f
+            setPadding(0, 0, 0, 8)
+        }
+        segmentCategoryContainer.addView(title)
+
+        val counts = currentSegments
+            .groupBy { it.category }
+            .mapValues { it.value.size }
+
+        for (category in detectedCategories) {
+            val checkbox = CheckBox(this).apply {
+                text = "${categoryLabel(category)} (${counts[category] ?: 0})"
+                isChecked = true
+                setOnCheckedChangeListener { _, isChecked ->
+                    if (suppressCategoryCallbacks) return@setOnCheckedChangeListener
+
+                    currentSegments.forEachIndexed { index, segment ->
+                        if (segment.category == category) {
+                            segmentCheckboxes[index]?.isChecked = isChecked
+                            if (isChecked) {
+                                selectedSegmentIndexes.add(index)
+                            } else {
+                                selectedSegmentIndexes.remove(index)
+                            }
+                        }
+                    }
+                }
+            }
+            dynamicCategoryCheckboxes[category] = checkbox
+            segmentCategoryContainer.addView(checkbox)
+        }
+    }
+
+    private fun categoryLabel(category: String): String = when (category) {
+        "sponsor" -> "Sponsor"
+        "selfpromo" -> "Self-promotion"
+        "interaction" -> "Interaction reminder"
+        "intro" -> "Intro / intermission"
+        "outro" -> "Outro / end cards"
+        "preview" -> "Preview / recap"
+        "filler" -> "Filler / tangent"
+        "music_offtopic" -> "Non-music section"
+        "poi_highlight" -> "Highlight"
+        "exclusive_access" -> "Members-only access"
+        "chapter" -> "Chapter"
+        else -> category.replace('_', ' ').replaceFirstChar { it.uppercase() }
+    }
+
+    private data class MediaCodecCqCapability(
+        val supported: Boolean,
+        val min: Int,
+        val max: Int
+    )
+
+    private fun mediaCodecCqCapability(codecFamily: String): MediaCodecCqCapability {
+        val mime = when (codecFamily) {
+            "H.264" -> "video/avc"
+            "H.265/HEVC" -> "video/hevc"
+            else -> return MediaCodecCqCapability(false, 0, 0)
+        }
+
+        return try {
+            val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+
+            for (codecInfo in codecList.codecInfos) {
+                if (!codecInfo.isEncoder) continue
+                if (codecInfo.supportedTypes.none { it.equals(mime, ignoreCase = true) }) continue
+
+                val capabilities = codecInfo.getCapabilitiesForType(mime)
+                val encoderCapabilities = capabilities.encoderCapabilities ?: continue
+
+                val supportsCq = encoderCapabilities.isBitrateModeSupported(
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ
+                )
+
+                if (supportsCq) {
+                    // EncoderCapabilities.getQualityRange() requires API 28.
+                    // Older Android versions do not expose a quality range, so
+                    // CQ cannot be safely offered there.
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) {
+                        return MediaCodecCqCapability(false, 0, 0)
+                    }
+
+                    val range = encoderCapabilities.qualityRange
+                    return MediaCodecCqCapability(
+                        supported = true,
+                        min = range.lower,
+                        max = range.upper
+                    )
+                }
+            }
+
+            MediaCodecCqCapability(false, 0, 0)
+        } catch (e: Exception) {
+            DiagLog.append(
+                "CQCapability",
+                "$codecFamily CQ probe failed: ${e.message}"
+            )
+            MediaCodecCqCapability(false, 0, 0)
+        }
+    }
+
+    private fun effectiveVideoEncoderName(mode: ExecutionMode): String? {
+        val info = pendingVideoInfo ?: return null
+
+        val preferences = OutputPreferences(
+            videoSectionMode = if (videoSectionCustom) {
+                SectionMode.CUSTOM
+            } else {
+                SectionMode.AUTO
+            },
+            videoCodec = selectedVideoEncoder,
+            qualityMode = if (qualityUsesCrf) {
+                QualityMode.CRF
+            } else {
+                QualityMode.BITRATE
+            }
+        )
+
+        return TranscodePolicy.resolveVideoEncoderForUi(
+            info = info,
+            mode = mode,
+            preferences = preferences,
+            catalog = encoderCatalog,
+            inputFamily = EncoderCatalog.familyForInputCodec(info.videoCodec)
+        )
+    }
+
+    private fun currentOutputPreferences(): OutputPreferences {
+        val mode = when {
+            radioHwAccurate.isChecked -> ExecutionMode.HW_ACCURATE
+            radioSwAccurate.isChecked -> ExecutionMode.SW_ACCURATE
+            else -> ExecutionMode.FAST
+        }
+
+        val effectiveEncoder = effectiveVideoEncoderName(mode)
+
+        val supportsCrf = effectiveEncoder in setOf(
+            "libx264",
+            "libx265"
+        )
+
+        return OutputPreferences(
+            videoSectionMode = if (videoSectionCustom) SectionMode.CUSTOM else SectionMode.AUTO,
+            audioSectionMode = if (audioSectionCustom) SectionMode.CUSTOM else SectionMode.AUTO,
+            videoCodec = selectedVideoEncoder,
+            audioCodec = selectedAudioEncoder,
+            container = selectedContainer,
+            qualityMode = if (supportsCrf && qualityUsesCrf) {
+                QualityMode.CRF
+            } else {
+                QualityMode.BITRATE
+            },
+            crf = if (effectiveEncoder in setOf("libx264", "libx265")) {
+                selectedCrf
+            } else {
+                null
+            },
+            cq = null,
+            videoBitrate = parseBitrate(bitrateInput.text?.toString()),
+            preset = if (presetSpinner.isEnabled) selectedPreset else null,
+            videoFrameRate = selectedFrameRate,
+            audioSampleRate = selectedAudioSampleRate,
+            audioBitrate = parseBitrate(audioBitrateInput.text?.toString()),
+            videoMaxHeight = selectedResolutionHeight
+        )
+    }
+
+    private fun inspectSelectedUri(uri: Uri) {
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .putString("sponsorcut_last_input_uri", uri.toString())
+            .apply()
+
+        Thread {
+            val info = try {
+                val cached = FileResolver.uriToFile(this, uri)
+                FFProbeInspector.inspect(cached)
+            } catch (e: Exception) {
+                DiagLog.append("TaskUI", "input inspection failed: ${e.message}")
+                null
+            }
+
+            runOnUiThread {
+                pendingVideoInfo = info
+
+                // Discover encoders now that we know an input is present.
+                encoderCatalog = EncoderCatalog.discover()
+
+                // Rebuild every output spinner using the real input and encoder catalog.
+                refreshOutputOptionsCallback?.invoke()
+
+                // Local TXT/JSON segments require the actual media duration for
+                // "end" resolution and duration clamping.
+                loadLocalSegmentsIfNeeded()
+
+                updateStreamSelectionAvailability()
+
+                val inputSummary = info?.summaryLine ?: "unknown"
+                val inputAudioCodec = info?.audioCodec ?: "unknown"
+                val inputSampleRate = info?.sampleRate?.let { "${it} Hz" } ?: "unknown"
+
+                videoInputInfoView.text = "Input: $inputSummary"
+                audioInputInfoView.text = "Input: $inputAudioCodec $inputSampleRate"
+
+                // Show the input bitrate immediately when Quality is set to Input.
+                // Prefer the video stream's own bitrate. If ffprobe cannot provide
+                // one, estimate it as container bitrate minus audio bitrate, but
+                // only when both values are present and internally consistent.
+                val detectedVideoBitrate = info?.videoBitrate
+                    ?: info?.containerBitrate?.let { container ->
+                        val audio = info.audioBitrate
+                        if (audio != null && container > audio) {
+                            container - audio
+                        } else {
+                            container
+                        }
+                    }
+
+                detectedVideoBitrate?.let { bitrateInput.setText("${it / 1000}k") }
+
+                // Show the detected audio bitrate as the default audio-bitrate target.
+                info?.audioBitrate?.let { audioBitrateInput.setText("${it / 1000}k") }
+            }
+        }.start()
+    }
+
+    private fun loadLocalSegmentsIfNeeded() {
+        if (suppressLocalSegmentReloadOnce) {
+            suppressLocalSegmentReloadOnce = false
+            return
+        }
+
+        val uri = localSegmentFileUri ?: return
+
+        val duration = pendingVideoInfo?.durationSec
+
+        // Keep parsed segments when the same media duration is still active.
+        // Reparse when they were provisional, or when the user switches to a
+        // different media file with a different duration.
+        if (
+            localSegments != null &&
+            !localSegmentsAwaitingDuration &&
+            duration == localSegmentsResolvedDurationSec
+        ) {
+            return
+        }
+
+        loadLocalSegments(uri, duration)
+    }
+
+    private fun loadLocalSegments(uri: Uri, duration: Double?) {
+        val fileName = localSegmentFileName ?: "segment file"
+
+        Thread {
+            try {
+                val text = try {
+                    contentResolver.openInputStream(uri)?.use { stream ->
+                        stream.bufferedReader().readText()
+                    } ?: throw SegmentParseException(
+                        code = "segment_file_read_failed",
+                        message = "Cannot open segment file: $fileName"
+                    )
+                } catch (e: Exception) {
+                    localSegmentText ?: throw e
+                }
+
+                localSegmentText = text
+
+                // Before media is available, parse provisionally with an
+                // effectively unbounded duration. This exposes categories and
+                // checkboxes immediately; media inspection later reparses with
+                // the real duration.
+                val parseDuration = duration ?: Double.MAX_VALUE
+
+                val parsed = SegmentParser.parseSegmentFile(
+                    text = text,
+                    duration = parseDuration,
+                    reference = fileName
+                )
+
+                // With real media, an explicit "end" becomes ffprobe's media
+                // duration. Without media, retain it as an unresolved marker.
+                val result = if (duration == null) {
+                    parsed
+                } else {
+                    parsed.copy(
+                        segments = parsed.segments.map { segment ->
+                            if (segment.endIsOpen) {
+                                segment.copy(
+                                    end = duration,
+                                    endIsOpen = false
+                                )
+                            } else {
+                                segment
+                            }
+                        }
+                    )
+                }
+
+                runOnUiThread {
+                    clearYouTubeIdSource()
+
+                    localSegments = result.segments
+                    localSegmentWarnings = result.warnings
+                    localSegmentsAwaitingDuration = duration == null
+                    localSegmentsResolvedDurationSec = duration
+                    cachedSegments = result.segments
+                    cachedTitle = null
+                    cachedAuthor = null
+                    idCardState = CardState.OK
+
+                    updateCategoryAvailability(result.segments)
+                    applySegmentUiState(
+                        videoId = "",
+                        segments = result.segments
+                    )
+                    updateCards()
+                    updateStreamSelectionAvailability()
+
+                    val unresolvedEndCount = result.segments.count { it.endIsOpen }
+                    val totalCut = result.segments
+                        .filter { !it.endIsOpen }
+                        .sumOf { it.end - it.start }
+                    val warningCount = result.warnings.size
+                    val durationPending = duration == null
+                    setStatus(
+                        (if (durationPending) {
+                            "Local segments loaded ✓ (waiting for media duration)\n"
+                        } else {
+                            "Local segments loaded ✓\n"
+                        }) +
+                            "File: $fileName\n" +
+                            "${result.segments.size} segment(s)" +
+                            (if (!durationPending) {
+                                ", removing ~${formatSegmentTimestamp(totalCut)}."
+                            } else {
+                                "."
+                            }) + "\n" +
+                            (if (unresolvedEndCount > 0) {
+                                "$unresolvedEndCount unresolved \"end\" segment(s) — load media to resolve timing.\n"
+                            } else {
+                                ""
+                            }) +
+                            (if (warningCount > 0) "$warningCount warning(s)." else "No warnings.")
+                    )
+                }
+            } catch (e: Exception) {
+                localSegments = null
+                localSegmentWarnings = emptyList()
+                cachedSegments = null
+                idCardState = CardState.ERROR
+
+                runOnUiThread {
+                    updateCards()
+
+                    val parseError = e as? SegmentParseException
+                    val details = parseError?.details
+                        .orEmpty()
+                        .filter { it.isNotBlank() }
+                        .joinToString("\n") { "• $it" }
+
+                    setStatus(
+                        "❌ Segment file failed\n" +
+                            "$fileName\n\n" +
+                            (e.message ?: e.toString()) +
+                            (if (details.isNotBlank()) "\n\n$details" else "") +
+                            "\n\nPlease correct the segment file and try again."
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun localSegmentsJson(): String? {
+        val segments = localSegments ?: return null
+
+        val array = org.json.JSONArray()
+        for (segment in segments) {
+            val obj = org.json.JSONObject()
+            obj.put("category", segment.category)
+            obj.put("start", segment.start)
+            obj.put("end", segment.end)
+            array.put(obj)
+        }
+
+        return array.toString()
+    }
+
+    private fun parseBitrate(raw: String?): Long? {
+        val value = raw?.trim()?.lowercase() ?: return null
+        if (value.isBlank() || value == "auto") return null
+        val match = Regex("^(\\d+(?:\\.\\d+)?)([kKmM]?)$").find(value) ?: return null
+        val amount = match.groupValues[1].toDouble()
+        val multiplier = when (match.groupValues[2]) {
+            "k" -> 1000.0
+            "m" -> 1_000_000.0
+            else -> 1.0
+        }
+        return (amount * multiplier).toLong()
+    }
+
     private fun handle(intent: Intent?) {
         when (intent?.action) {
             "com.sponsorcut.PROCESS_FILE" -> handleDirectIntent(intent)
@@ -641,13 +2171,24 @@ class MainActivity : Activity() {
                     return
                 }
 
+                // A launcher intent may arrive while an existing session already
+                // has media and a usable segment source. Preserve its status and
+                // do not invite the user to add another media file.
+                val sessionAlreadyReady =
+                    pendingUri != null &&
+                        (localSegments != null || idCardState == CardState.OK)
+
+                if (sessionAlreadyReady) {
+                    return
+                }
+
                 // Cold open — restore last remembered ID into the input field if recent enough
                 val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
                 val savedId = prefs.getString(keyLastVideoId, "").orEmpty()
                 val savedTs = prefs.getLong(keyLastVideoIdTs, 0L)
                 val isRecent = System.currentTimeMillis() - savedTs <= recentIdMaxAgeMs
                 if (savedId.isNotBlank() && isRecent) {
-                    idInput.setText(savedId)
+                    setIdInputProgrammatically(savedId)
                     idCardState = CardState.CHECKING
                     updateCards()
                     restoreLastFileUri()
@@ -678,9 +2219,11 @@ class MainActivity : Activity() {
             fileCardLabel.text = "📄 ${uri.lastPathSegment ?: uriString}"
             browseFileButton.text = "📁 Change file…"
         }
+        inspectSelectedUri(uri)
 
         if (videoId.length == 11) {
-            idInput.setText(videoId)
+            clearLocalSegmentSource()
+            setIdInputProgrammatically(videoId)
             idCardState = CardState.CHECKING
             updateCards()
             setStatus("PipePipe/NewPipe ✓\nFetching segments for ID: $videoId")
@@ -701,17 +2244,43 @@ class MainActivity : Activity() {
         // Discard share-sheet image previews (e.g. android_share_sheet_image_preview.jpg)
         val uri = if (rawUri != null && isImageUri(rawUri)) null else rawUri
 
+        if (uri != null) {
+            val sharedFileName = FileResolver.getDisplayName(this, uri)
+                .ifBlank { uri.lastPathSegment ?: "file" }
+            val sharedExtension = sharedFileName.substringAfterLast('.', "").lowercase()
+            val sharedMimeType = intent.type?.lowercase()
+
+            val isSegmentFile =
+                sharedExtension == "txt" ||
+                    sharedExtension == "json" ||
+                    sharedMimeType == "text/plain" ||
+                    sharedMimeType == "application/json"
+
+            if (isSegmentFile) {
+                handleSharedSegmentFile(uri, sharedFileName)
+                return
+            }
+        }
+
         if (uri == null) {
             val videoId = extractIdFromIntent(intent, Uri.EMPTY)
             if (videoId.isNotBlank()) {
                 saveId(videoId)  // save now so file-share later will find it
-                runOnUiThread { idInput.setText(videoId) }
+                runOnUiThread { setIdInputProgrammatically(videoId) }
                 idCardState = CardState.CHECKING
                 updateCards()
-                // Restore last known file if we have one
+                // A shared YouTube URL is an explicit SponsorBlock selection.
+                // Do not reparse the current TXT/JSON share URI; replace it only
+                // if SponsorBlock successfully returns usable segments.
+                clearLocalSegmentSource()
+                suppressLocalSegmentReloadOnce = true
                 restoreLastFileUri()
                 setStatus("✓ YouTube ID captured: $videoId\n\nNow browse to your downloaded video file.")
-                fetchSegmentsForId(videoId)
+                fetchSegmentsForId(
+                    videoId = videoId,
+                    force = true,
+                    replaceLocalSourceOnSuccess = true
+                )
                 return
             }
             setStatus("No video file detected. Share a downloaded video file.")
@@ -720,6 +2289,7 @@ class MainActivity : Activity() {
 
         pendingUri = uri
         fileCardState = CardState.OK
+        inspectSelectedUri(uri)
         val sharedFileName = FileResolver.getDisplayName(this, uri).ifBlank { uri.lastPathSegment ?: "file" }
         runOnUiThread {
             fileCardLabel.text = "📄 $sharedFileName"
@@ -754,7 +2324,7 @@ class MainActivity : Activity() {
         // Persist any ID we found so it survives Activity recreation (e.g. switching to file manager)
         if (videoId.isNotBlank()) saveId(videoId)
 
-        idInput.setText(videoId)
+        setIdInputProgrammatically(videoId)
         if (videoId.isBlank()) {
             setStatus("No YouTube ID detected.\nPaste a URL/ID in the field above.")
         } else {
@@ -764,6 +2334,307 @@ class MainActivity : Activity() {
             updateCards()
             fetchSegmentsForId(videoId, force = true)
             applyModeRecommendation()
+        }
+    }
+
+    private fun handleSharedSegmentFile(uri: Uri, fileName: String) {
+        clearYouTubeIdSource()
+        clearLocalSegmentSource()
+
+        localSegmentFileUri = uri
+        localSegmentFileName = fileName
+        localSegments = null
+        localSegmentWarnings = emptyList()
+        cachedSegments = null
+        cachedTitle = null
+        cachedAuthor = null
+        idCardState = CardState.PENDING
+
+        loadSegmentsButton.text = "📄 $fileName"
+        setStatus("Segment file shared ✓\n$fileName\n\nParsing segments…")
+        updateCards()
+        loadLocalSegments(uri, pendingVideoInfo?.durationSec)
+    }
+
+    private fun setIdInputProgrammatically(value: String) {
+        suppressIdTextWatcher = true
+        idInput.setText(value)
+        suppressIdTextWatcher = false
+    }
+
+    private fun clearLocalSegmentSource() {
+        // Release persisted access when the TXT/JSON was selected in-app.
+        // Share-intent URIs may not have persistable grants; ignore that.
+        localSegmentFileUri?.let { uri ->
+            runCatching {
+                contentResolver.releasePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        }
+
+        localSegmentFileUri = null
+        localSegmentFileName = null
+        localSegments = null
+        localSegmentWarnings = emptyList()
+        localSegmentText = null
+        localSegmentsAwaitingDuration = false
+        localSegmentsResolvedDurationSec = null
+        loadSegmentsButton.text = "📄 Load TXT/JSON segments…"
+
+        cachedSegments = null
+        currentSegments = emptyList()
+        selectedSegmentIndexes.clear()
+        segmentCheckboxes.clear()
+        segmentCategoryContainer.removeAllViews()
+        segmentListContainer.removeAllViews()
+    }
+
+    private fun clearYouTubeIdSource() {
+        setIdInputProgrammatically("")
+        pendingSegmentFetchId = null
+        segmentFetchHandler.removeCallbacksAndMessages(null)
+        lastFetchedId = ""
+        cachedSegments = null
+        cachedTitle = null
+        cachedAuthor = null
+        idCardState = CardState.PENDING
+
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .remove(keyLastVideoId)
+            .remove(keyLastVideoIdTs)
+            .apply()
+    }
+
+    private fun isAudioOnlyContainer(uri: Uri?): Boolean {
+        if (uri == null) return false
+
+        val mime = runCatching { contentResolver.getType(uri) }
+            .getOrNull()
+            ?.lowercase()
+
+        val audioMimePrefixes = listOf(
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/mp4",
+            "audio/x-m4a",
+            "audio/m4a",
+            "audio/aac",
+            "audio/opus",
+            "audio/ogg",
+            "audio/vorbis",
+            "audio/flac",
+            "audio/x-flac",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/x-aiff",
+            "audio/aiff",
+            "audio/x-ms-wma",
+            "audio/amr",
+            "audio/x-caf"
+        )
+
+        if (mime != null && audioMimePrefixes.any { mime.startsWith(it) }) {
+            return true
+        }
+
+        val extension = uri.lastPathSegment
+            ?.substringAfterLast('.', "")
+            ?.lowercase()
+
+        return extension in setOf(
+            "mp3",
+            "m4a",
+            "m4b",
+            "m4r",
+            "aac",
+            "opus",
+            "oga",
+            "ogg",
+            "wav",
+            "flac",
+            "alac",
+            "aiff",
+            "aif",
+            "wma",
+            "amr",
+            "caf"
+        )
+    }
+
+    private fun isAudioOnlyJob(
+        uri: Uri?,
+        info: FFProbeInspector.VideoInfo?
+    ): Boolean {
+        if (isAudioOnlyContainer(uri)) return true
+
+        if (info == null) return false
+
+        val videoCodec = info.videoCodec?.trim()?.lowercase()
+        val audioCodec = info.audioCodec?.trim()?.lowercase()
+
+        val hasAudio = !audioCodec.isNullOrBlank() && audioCodec != "unknown"
+        val hasVideo = !videoCodec.isNullOrBlank() && videoCodec != "unknown"
+
+        if (hasAudio && !hasVideo) return true
+
+        val extension = uri?.lastPathSegment
+            ?.substringAfterLast('.', "")
+            ?.lowercase()
+
+        val isMp3 = extension == "mp3" ||
+            info.summaryLine.contains("mp3", ignoreCase = true)
+
+        if (isMp3 && videoCodec == "mjpeg") return true
+
+        return false
+    }
+
+    private fun updateStreamSelectionAvailability() {
+        val info = pendingVideoInfo
+
+        val audioOnly = isAudioOnlyJob(pendingUri, info)
+
+        val videoCodec = info?.videoCodec?.trim()?.lowercase()
+        val audioCodec = info?.audioCodec?.trim()?.lowercase()
+
+        val hasAudio = !audioCodec.isNullOrBlank() && audioCodec != "unknown"
+        val hasVideo = !audioOnly &&
+            !videoCodec.isNullOrBlank() &&
+            videoCodec != "unknown"
+
+        val bothAvailable = hasVideo && hasAudio
+        val videoOnly = hasVideo && !hasAudio
+
+        DiagLog.append(
+            "StreamUI",
+            "videoCodec=$videoCodec audioCodec=$audioCodec " +
+                "hasVideo=$hasVideo hasAudio=$hasAudio " +
+                "audioOnly=$audioOnly videoOnly=$videoOnly"
+        )
+
+        applyStreamAwareUiState(
+            audioOnly = audioOnly,
+            hasVideo = hasVideo,
+            hasAudio = hasAudio,
+            videoOnly = videoOnly
+        )
+    }
+
+
+    private fun applyStreamAwareUiState(
+        hasVideo: Boolean,
+        hasAudio: Boolean,
+        audioOnly: Boolean,
+        videoOnly: Boolean
+    ) {
+        val processingActive = ProcessingService.isProcessingActive
+
+        fun setFormState(views: List<View>, enabled: Boolean) {
+            fun apply(view: View) {
+                view.isEnabled = enabled
+                view.alpha = if (enabled) 1f else 0.35f
+
+                if (view is android.view.ViewGroup) {
+                    for (index in 0 until view.childCount) {
+                        apply(view.getChildAt(index))
+                    }
+                }
+            }
+
+            views.forEach(::apply)
+        }
+
+        fun row(view: View): View = view.parent as View
+
+        fun commonAncestor(a: View, b: View): android.view.ViewGroup? {
+            var left: View? = a
+            while (left != null) {
+                var right: View? = b
+                while (right != null) {
+                    if (left === right) return left as? android.view.ViewGroup
+                    right = right.parent as? View
+                }
+                left = left.parent as? View
+            }
+            return null
+        }
+
+        val videoParent = commonAncestor(
+            row(videoSectionSpinner),
+            row(audioSectionSpinner)
+        ) ?: return
+        val audioParent = videoParent
+
+        val videoViews = listOf(
+            row(videoSectionSpinner),
+            videoInputInfoView,
+            row(videoCodecSpinner),
+            row(containerSpinner),
+            row(qualityModeSpinner),
+            row(crfSpinner),
+            row(presetSpinner),
+            row(frameRateSpinner),
+            row(resolutionSpinner)
+        )
+
+        val audioViews = listOf(
+            row(audioSectionSpinner),
+            audioInputInfoView,
+            row(audioCodecSpinner),
+            row(audioSampleRateSpinner)
+        )
+
+        val streamChoiceForced = audioOnly || videoOnly
+        val streamControlsEnabled = !processingActive && !streamChoiceForced
+
+        radioKeepBoth.isEnabled = streamControlsEnabled
+        radioAudioOnly.isEnabled = streamControlsEnabled
+        radioVideoOnly.isEnabled = streamControlsEnabled
+
+        if (audioOnly) {
+            streamOptionsLabel.text = "Output streams: Audio only — no usable video stream"
+            streamGroup.check(radioAudioOnly.id)
+        } else if (videoOnly) {
+            streamOptionsLabel.text = "Output streams: Video only — no usable audio stream"
+            streamGroup.check(radioVideoOnly.id)
+        } else {
+            streamOptionsLabel.text = "Output streams: Video and audio"
+            streamGroup.check(radioKeepBoth.id)
+        }
+
+        videoViews.forEach { it.visibility = View.VISIBLE }
+
+        if (audioOnly) {
+            audioViews.forEach { videoParent.removeView(it) }
+
+            var audioInsertIndex = videoParent.indexOfChild(row(videoSectionSpinner))
+            audioViews.forEach { view ->
+                videoParent.addView(view, audioInsertIndex, view.layoutParams)
+                audioInsertIndex++
+            }
+
+            setFormState(audioViews, hasAudio && !processingActive)
+            setFormState(videoViews, false)
+        } else {
+            val currentVideoIndex = videoParent.indexOfChild(row(videoSectionSpinner))
+            val currentAudioIndex = videoParent.indexOfChild(row(audioSectionSpinner))
+
+            if (currentAudioIndex < currentVideoIndex) {
+                audioViews.forEach { videoParent.removeView(it) }
+
+                val audioInsertIndex =
+                    videoParent.indexOfChild(outputConsequenceView).takeIf { it >= 0 }
+                        ?: videoParent.childCount
+
+                audioViews.forEach { view ->
+                    videoParent.addView(view, audioInsertIndex, view.layoutParams)
+                }
+            }
+
+            setFormState(videoViews, hasVideo && !processingActive)
+            setFormState(audioViews, hasAudio && !processingActive)
         }
     }
 
@@ -783,6 +2654,12 @@ class MainActivity : Activity() {
         val outputFolderUri = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(keyOutputFolderUri, null)
         val frameAccurate = radioSwAccurate.isChecked
+        val removeSegments = processWithoutSegmentsCheckBox.isChecked
+        val streamSelection = when {
+            radioAudioOnly.isChecked -> StreamSelection.AUDIO_ONLY
+            radioVideoOnly.isChecked -> StreamSelection.VIDEO_ONLY
+            else -> StreamSelection.BOTH
+        }
         val activeFileName = runCatching { FileResolver.getDisplayName(this, uri) }
             .getOrElse { uri.lastPathSegment ?: "file" }
         saveActiveProcessingSnapshot(
@@ -793,6 +2670,7 @@ class MainActivity : Activity() {
             author = cachedAuthor
         )
 
+        clearCompletedRunState()
         setProcessingUi(active = true)
         logButton.visibility = View.GONE
         logView.visibility = View.GONE
@@ -803,7 +2681,22 @@ class MainActivity : Activity() {
                 append("\n\n")
             }
         }
-        setStatus("${videoHeader}Starting processing… [${when {
+        setStatus("${videoHeader}Starting ${buildString {
+            if (removeSegments) {
+                append(
+                    if (localSegments != null) {
+                        "local TXT/JSON segment removal"
+                    } else {
+                        "SponsorBlock removal"
+                    }
+                )
+            }
+            when (streamSelection) {
+                StreamSelection.AUDIO_ONLY -> append(if (removeSegments) " + audio extraction" else "audio extraction")
+                StreamSelection.VIDEO_ONLY -> append(if (removeSegments) " + video extraction" else "video extraction")
+                StreamSelection.BOTH -> if (!removeSegments) append("media processing")
+            }
+        }}… [${when {
             radioHwAccurate.isChecked -> "HW-accurate"
             radioSwAccurate.isChecked   -> "SW-accurate"
             else                      -> "fast"
@@ -817,14 +2710,30 @@ class MainActivity : Activity() {
             putExtra(ProcessingService.EXTRA_FRAME_ACCURATE, frameAccurate)
             putStringArrayListExtra(ProcessingService.EXTRA_CATEGORIES, ArrayList(selectedCategories()))
             putExtra(ProcessingService.EXTRA_HW_ACCURATE, radioHwAccurate.isChecked)
+            putExtra(ProcessingService.EXTRA_REMOVE_SEGMENTS, removeSegments)
+            putExtra(ProcessingService.EXTRA_STREAM_SELECTION, streamSelection.name)
+
+            if (removeSegments) {
+                if (localSegments != null) {
+                    putExtra(
+                        ProcessingService.EXTRA_LOCAL_SEGMENTS_JSON,
+                        localSegmentsJson()
+                    )
+                }
+
+                putExtra(
+                    ProcessingService.EXTRA_SELECTED_SEGMENT_INDEXES,
+                    selectedSegmentIndexes.toIntArray()
+                )
+            }
+            putExtra(
+                ProcessingService.EXTRA_OUTPUT_PREFERENCES_JSON,
+                currentOutputPreferences().toJson()
+            )
             if (outputFolderUri != null) putExtra(ProcessingService.EXTRA_OUTPUT_FOLDER_URI, outputFolderUri)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
+        startForegroundService(serviceIntent)
     }
 
     /** Grey out / restore all interactive controls during processing. */
@@ -837,14 +2746,26 @@ class MainActivity : Activity() {
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
             val controls = listOf(retryButton, browseFileButton, openPlayerButton,
-                pickFolderButton, idInput, radioFast, radioSwAccurate, radioHwAccurate) +
+                pickFolderButton, idInput, radioFast, radioSwAccurate, radioHwAccurate,
+                radioKeepBoth, radioAudioOnly, radioVideoOnly,
+                processWithoutSegmentsCheckBox, audioBitrateInput,
+                videoSectionSpinner, audioSectionSpinner,
+                containerSpinner, videoCodecSpinner, audioCodecSpinner,
+                qualityModeSpinner, crfSpinner, cqSpinner,
+                bitrateInput, bitratePresetSpinner, presetSpinner,
+                frameRateSpinner, resolutionSpinner, audioSampleRateSpinner) +
                 categoryCheckboxes.values.toList()
             for (v in controls) {
                 v.isEnabled = !active
                 v.alpha = if (active) 0.35f else 1f
             }
             cancelButton.visibility = if (active) View.VISIBLE else View.GONE
+            cancelButton.isEnabled = active
+            cancelButton.alpha = 1f
+            cancelButton.text = "⏹ Cancel job"
             progressBar.visibility = if (active) View.VISIBLE else View.GONE
+            loadSegmentsButton.isEnabled = !active
+            loadSegmentsButton.alpha = if (active) 0.5f else 1f
             if (!active) {
                 progressBar.progress = 0
                 // Re-enable controls; retryButton state managed by updateCards()
@@ -861,36 +2782,21 @@ class MainActivity : Activity() {
      */
     private fun updateCategoryAvailability(segments: List<SponsorSegmentInfo>?) {
         runOnUiThread {
-            val countByCategory = segments?.groupBy { it.category }?.mapValues { it.value.size }
-                ?: emptyMap()
-            for ((catKey, catName) in allCategories) {
-                val cb = categoryCheckboxes[catKey] ?: continue
-                val count = countByCategory[catKey] ?: 0
-                if (count > 0) {
-                    // Show with count label, ensure visible and enabled
-                    cb.text = "$catName ($count)"
-                    cb.isEnabled = true
-                    cb.alpha = 1f
-                    cb.visibility = android.view.View.VISIBLE
-                } else {
-                    // Hide completely — not in this video's SponsorBlock data
-                    cb.visibility = android.view.View.GONE
-                    if (cb.isChecked) {
-                        cb.isChecked = false
-                        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                            .putBoolean("cat_$catKey", false).apply()
-                    }
-                }
-            }
+            detectedCategories = segments
+                ?.map { it.category }
+                ?.distinct()
+                ?.sorted()
+                ?: emptyList()
+            renderDetectedCategories()
         }
     }
 
     private fun selectedCategories(): List<String> {
-        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
-        return allCategories
-            .filter { (key, _) -> prefs.getBoolean("cat_$key", key == "sponsor") }
-            .map { (key, _) -> key }
-            .ifEmpty { listOf("sponsor") }
+        return dynamicCategoryCheckboxes
+            .filter { it.value.isChecked }
+            .keys
+            .toList()
+            .sorted()
     }
 
     private fun saveId(videoId: String) {
@@ -977,11 +2883,18 @@ class MainActivity : Activity() {
     }
 
     /** Fetch SponsorBlock segments for [videoId] in background; update UI when done. */
-    private fun fetchSegmentsForId(videoId: String, force: Boolean = false) {
+    private fun fetchSegmentsForId(
+        videoId: String,
+        force: Boolean = false,
+        replaceLocalSourceOnSuccess: Boolean = false
+    ) {
         if (ProcessingService.isProcessingActive) return
         if (videoId.length != 11) return
         if (!force && videoId == lastFetchedId) return
         lastFetchedId = videoId
+
+        // A local TXT/JSON source remains active until SponsorBlock returns a
+        // successful, non-empty segment list for the entered ID.
         cachedSegments = null
         cachedTitle = null
         cachedAuthor = null
@@ -1016,19 +2929,45 @@ class MainActivity : Activity() {
             }
 
             val segments = try {
-                SponsorBlockClient().fetchRich(videoId, allCategories.map { it.first })
+                SponsorBlockClient().fetchRich(
+                    videoId,
+                    listOf(
+                        "sponsor", "selfpromo", "interaction", "intro", "outro",
+                        "preview", "filler", "music_offtopic", "poi_highlight",
+                        "exclusive_access", "chapter"
+                    )
+                )
             } catch (e: Exception) {
                 Log.w(tag, "Segment pre-fetch failed: ${e.message}")
                 null
             }
+            // Only a direct user ID edit that produces a successful, non-empty
+            // SponsorBlock response replaces a local TXT/JSON source. Automatic
+            // fetches triggered by media or URL shares always preserve it.
+            val sponsorBlockSourceReady =
+                replaceLocalSourceOnSuccess &&
+                    segments != null &&
+                    segments.isNotEmpty()
+
             cachedSegments = segments
             cachedTitle = title
             cachedAuthor = author
-            val visibleSegments = segments?.filter { it.category in selectedCategories() }
+            val selected = selectedCategories()
+            val filteredSegments = segments?.filter { it.category in selected }
+            val visibleSegments = if (segments != null && filteredSegments.isNullOrEmpty()) {
+                segments
+            } else {
+                filteredSegments
+            }
+
             runOnUiThread {
+                if (sponsorBlockSourceReady) {
+                    clearLocalSegmentSource()
+                }
+
                 updateCategoryAvailability(segments)
                 idCardState = when {
-                    segments == null  -> CardState.OK   // network error — fail open
+                    segments == null -> CardState.ERROR
                     visibleSegments.isNullOrEmpty() -> CardState.ERROR
                     else -> CardState.OK
                 }
@@ -1044,15 +2983,17 @@ class MainActivity : Activity() {
         val titleLine = if (title != null) "\"$title\"${if (author != null) "\nby $author" else ""}\n\n" else ""
         when {
             segments == null -> {
-                retryButton.isEnabled = true
-                retryButton.alpha = 1f
-                retryButton.text = "Process with this ID"
+                renderSegmentList(emptyList())
+                retryButton.isEnabled = false
+                retryButton.alpha = 0.4f
+                retryButton.text = "No segments — cannot process"
                 if (title != null) {
                     val currentStatus = statusView.text?.toString().orEmpty()
                     if (!currentStatus.contains(title)) statusView.text = titleLine + currentStatus
                 }
             }
             segments.isEmpty() -> {
+                renderSegmentList(emptyList())
                 retryButton.isEnabled = false
                 retryButton.alpha = 0.4f
                 retryButton.text = "No segments — cannot process"
@@ -1062,14 +3003,15 @@ class MainActivity : Activity() {
                 if (!base.contains("No SponsorBlock segments")) statusView.text = base + note
             }
             else -> {
+                renderSegmentList(segments)
+                renderDetectedCategories()
                 retryButton.isEnabled = true
                 retryButton.alpha = 1f
                 retryButton.text = "Process with this ID"
-                val summary = segments.joinToString("\n") {
-                    "  [${it.category}] ${formatSegmentTimestamp(it.start)} - ${formatSegmentTimestamp(it.end)} (~${"%.0f".format(it.end - it.start)}s)"
-                }
                 val totalCut = segments.sumOf { it.end - it.start }
-                val note = "🔍 ${segments.size} segment(s) to cut (~${String.format("%.2f", totalCut)}):\n$summary"
+                val note =
+                    "🔍 ${segments.size} segment(s) to cut " +
+                        "(~${formatSegmentTimestamp(totalCut)}):"
                 // Replace full status with: title + note (clean, no stacking)
                 val currentStatus = statusView.text?.toString().orEmpty()
                 val baseStatus = when {
@@ -1087,6 +3029,70 @@ class MainActivity : Activity() {
                     note
             }
         }
+    }
+
+    private fun renderSegmentList(segments: List<SponsorSegmentInfo>) {
+        segmentListContainer.removeAllViews()
+        segmentCheckboxes.clear()
+        currentSegments = segments
+
+        if (segments.isEmpty()) {
+            selectedSegmentIndexes.clear()
+            return
+        }
+
+        val title = TextView(this).apply {
+            text = "Segments to remove:"
+            textSize = 13f
+            setPadding(0, 0, 0, 8)
+        }
+        segmentListContainer.addView(title)
+
+        selectedSegmentIndexes.clear()
+        selectedSegmentIndexes.addAll(segments.indices)
+
+        segments.forEachIndexed { index, segment ->
+            val checkbox = CheckBox(this).apply {
+                text =
+                    "[${segment.category}] " +
+                        "${formatSegmentTimestamp(segment.start)} - " +
+                        (if (segment.endIsOpen) {
+                            "end"
+                        } else {
+                            formatSegmentTimestamp(segment.end)
+                        }) + " " +
+                        (if (segment.endIsOpen) {
+                            "(duration unresolved)"
+                        } else {
+                          "(~${(segment.end - segment.start).toInt()})"
+//                             "(~${formatSegmentTimestamp(segment.end - segment.start)})"
+                        })
+                isChecked = true
+                setOnCheckedChangeListener { _, isChecked ->
+                    if (isChecked) {
+                        selectedSegmentIndexes.add(index)
+                    } else {
+                        selectedSegmentIndexes.remove(index)
+                    }
+
+                    suppressCategoryCallbacks = true
+                    syncCategoryCheckbox(segment.category)
+                    suppressCategoryCallbacks = false
+                }
+            }
+            segmentCheckboxes[index] = checkbox
+            segmentListContainer.addView(checkbox)
+        }
+    }
+
+    private fun syncCategoryCheckbox(category: String) {
+        val indexes = currentSegments.mapIndexedNotNull { index, segment ->
+            if (segment.category == category) index else null
+        }
+
+        val checkbox = dynamicCategoryCheckboxes[category] ?: return
+        checkbox.isChecked = indexes.isNotEmpty() &&
+            indexes.all { it in selectedSegmentIndexes }
     }
 
     private fun makeCard(p: Int, bgColor: Int): LinearLayout {
@@ -1145,13 +3151,58 @@ class MainActivity : Activity() {
         runOnUiThread {
             applyCardState(idCardView, idCardIcon, idCardState)
             applyCardState(fileCardView, fileCardIcon, fileCardState)
-            val bothOk = idCardState == CardState.OK && fileCardState == CardState.OK
-            retryButton.isEnabled = bothOk
-            retryButton.alpha = if (bothOk) 1f else 0.5f
+
+            val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
+
+            if (!segmentationEnabled) {
+                val greyShape = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    cornerRadius = 12f * resources.displayMetrics.density
+                    setColor(0x22888888)
+                    setStroke(
+                        (1.5f * resources.displayMetrics.density).toInt(),
+                        0x66888888.toInt()
+                    )
+                }
+                idCardView.background = greyShape
+                idCardIcon.alpha = 0.45f
+                idInput.alpha = 0.45f
+                loadSegmentsButton.alpha = 0.45f
+
+                segmentCategoryContainer.visibility = View.GONE
+                segmentListContainer.visibility = View.GONE
+
+                if (localSegmentFileName != null) {
+                    idCardNote.text =
+                        "Segment file loaded but ignored: $localSegmentFileName"
+                    idCardNote.visibility = View.VISIBLE
+                } else {
+                    idCardNote.visibility = View.GONE
+                }
+            } else {
+                idCardIcon.alpha = 1f
+                idInput.alpha = 1f
+                loadSegmentsButton.alpha = 1f
+                idCardNote.visibility = View.GONE
+
+                segmentCategoryContainer.visibility = View.VISIBLE
+                segmentListContainer.visibility = View.VISIBLE
+            }
+
+            val localSourceReady = segmentationEnabled && localSegments != null
+            val sponsorBlockSourceReady = segmentationEnabled && idCardState == CardState.OK
+            val segmentationReady = localSourceReady || sponsorBlockSourceReady
+            val mediaReady = fileCardState == CardState.OK
+            val canProcess = mediaReady && (segmentationEnabled || segmentationReady.not())
+
+            retryButton.isEnabled = canProcess
+            retryButton.alpha = if (canProcess) 1f else 0.5f
             retryButton.text = when {
+                !segmentationEnabled -> "▶ Process without segmentation"
+                localSourceReady -> "▶ Process local segments"
                 idCardState == CardState.CHECKING -> "Checking SponsorBlock…"
                 idCardState == CardState.ERROR -> "No segments — cannot process"
-                !bothOk -> "Process with this ID"
+                !canProcess -> "Process with this ID"
                 else -> "▶ Process with this ID"
             }
         }
@@ -1269,6 +3320,38 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun saveDiagnosticLog() {
+        val folderUri = getSharedPreferences(prefsName, MODE_PRIVATE)
+            .getString(keyOutputFolderUri, null)
+        val outputFileName = getSharedPreferences(prefsName, MODE_PRIVATE)
+            .getString(keyLastOutputFileName, null)
+
+        if (folderUri.isNullOrBlank()) {
+            setStatus("Set an output folder before saving the diagnostic log.")
+            return
+        }
+
+        if (outputFileName.isNullOrBlank()) {
+            setStatus("No completed output is available for a diagnostic-log file name.")
+            return
+        }
+
+        val logFileName = "${outputFileName.substringBeforeLast('.', outputFileName)}.txt"
+        val logText = DiagLog.get().ifBlank { "(log is empty)" }
+
+        try {
+            FileResolver.saveTextToOutputFolder(
+                context = this,
+                treeUri = Uri.parse(folderUri),
+                fileName = logFileName,
+                text = logText
+            )
+            setStatus("Diagnostic log saved:\n$logFileName")
+        } catch (e: Exception) {
+            setStatus("Failed to save diagnostic log:\n${e.message}")
+        }
+    }
+
     private fun toast(text: String) {
         runOnUiThread { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
     }
@@ -1300,6 +3383,40 @@ class MainActivity : Activity() {
             t.contains("bad uri") ||
             t.contains("permission denied") ||
             t.contains("no such file")
+    }
+    private fun saveCompletedRunState(status: String, log: String) {
+    getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+        .putString(keyLastCompletedStatus, status)
+        .putString(keyLastCompletedLog, log)
+        .apply()
+    }
+
+    private fun clearCompletedRunState() {
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
+            .remove(keyLastCompletedStatus)
+            .remove(keyLastCompletedLog)
+            .apply()
+    }
+
+    private fun restoreCompletedRunStateIfNeeded() {
+        if (ProcessingService.isProcessingActive) return
+
+        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+        val status = prefs.getString(keyLastCompletedStatus, null)
+        val log = prefs.getString(keyLastCompletedLog, null)
+
+        if (status.isNullOrBlank() && log.isNullOrBlank()) return
+
+        if (!status.isNullOrBlank()) {
+            setStatus(status)
+        }
+
+        if (!log.isNullOrBlank()) {
+            logView.text = log
+            logButton.visibility = View.VISIBLE
+            logView.visibility = View.VISIBLE
+        }
+        saveLogButton.visibility = View.VISIBLE
     }
 
     private fun saveActiveProcessingSnapshot(
@@ -1346,8 +3463,13 @@ class MainActivity : Activity() {
         cachedTitle = activeTitle
         cachedAuthor = activeAuthor
 
+        // Restore media probing and output-field state for the active file.
+        if (activeUri != null && pendingVideoInfo == null) {
+            inspectSelectedUri(activeUri)
+        }
+
         runOnUiThread {
-            idInput.setText(activeId)
+            setIdInputProgrammatically(activeId)
             idCardState = CardState.OK
 
             if (!activeFileName.isNullOrBlank()) {

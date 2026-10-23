@@ -1,572 +1,862 @@
 package com.sponsorcut
 
-import android.util.Log
+import com.sponsorcut.core.model.ExecutionMode
+import com.sponsorcut.core.model.JobKind
+import com.sponsorcut.core.model.StreamSelection
+import kotlin.math.roundToInt
 
-/**
- * Pure decision layer. Consumes VideoInfo, never touches files or ffprobe directly.
- */
 object TranscodePolicy {
 
     private const val TAG = "TranscodePolicy"
 
-    private val COPY_SAFE_VIDEO = setOf("h264", "hevc", "h265", "vp8", "vp9", "av1", "mpeg4")
-    private val COPY_SAFE_AUDIO = setOf("aac", "mp3", "opus", "vorbis", "ac3", "eac3", "flac", "pcm_s16le")
-
     enum class ComplexityTier { LOW, MEDIUM, HIGH }
-
-    private data class BitrateDecision(
-        val sourceStreamBitrate: Long?,
-        val sourceFormatBitrate: Long?,
-        val selectedSourceBitrate: Long?,
-        val targetBitrate: Long,
-        val decisionReason: String,
-        val warning: String? = null
-    )
-
-    /**
-     * SINGLE DECISION GRAPH: All copy/transcode decisions originate here and ONLY here.
-     *
-     * This is the CANONICAL SOURCE OF TRUTH. Both SW and HW/FAST paths must consume
-     * pre-computed canCopyVideo and canCopyAudio directly, never recomputing them.
-     *
-     * ARCHITECTURE RULE (ENFORCED):
-     * - canCopyVideo and canCopyAudio are computed ONCE by this function
-     * - All code paths access the final boolean decisions, not intermediate raw fields
-     * - No formula duplication → no drift possible
-     *
-     * If copy/transcode logic must change, modify ONLY this class and its computation.
-     */
-    private data class CoreDecisions(
-        // Raw codec compatibility inputs
-        val isAudioOnly: Boolean,
-        val videoCodecKnownBad: Boolean,
-        val videoIsCopyable: Boolean,
-        val audioCodecKnownBad: Boolean,
-        val forceReEncode: Boolean,
-        // FINAL CANONICAL DECISIONS (computed once, used everywhere)
-        val canCopyVideo: Boolean,
-        val canCopyAudio: Boolean
-    )
 
     data class ProcessingPlan(
         val canCopyVideo: Boolean,
         val canCopyAudio: Boolean,
-        /** Complete ffmpeg -c:v … args for video re-encode. Empty when canCopyVideo=true. */
         val videoEncoderArgs: List<String>,
-        /** Conservative fallback video args if source-matched args fail at runtime. */
         val fallbackVideoEncoderArgs: List<String>,
-        /** Args inserted before -i for HW-accelerated decode. Empty = SW decode. */
         val hwDecoderArgs: List<String>,
-        /** Complete ffmpeg -c:a … args for audio re-encode. Empty when canCopyAudio=true. */
         val audioEncoderArgs: List<String>,
-        /** Conservative fallback audio args if source-matched args fail at runtime. */
         val fallbackAudioEncoderArgs: List<String>,
-        /** Probed output extension to enforce at output write-time. */
         val outputExtension: String,
-        /** Optional FFmpeg muxer to force (e.g. mp4, matroska, webm). */
         val outputMuxer: String?,
         val complexity: ComplexityTier,
         val rationale: String,
         val useSlowSeek: Boolean = false,
-        /**
-         * When true FfmpegEngine uses a single filter_complex pass (trim+concat) instead of
-         * per-segment processing. MediaCodec is initialised exactly once → dramatically faster
-         * for HW-Accurate mode. Per-segment progress is replaced by elapsed-time display.
-         */
-        val singlePassFilter: Boolean = false
+        val singlePassFilter: Boolean = false,
+        val dropVideo: Boolean = false,
+        val dropAudio: Boolean = false,
+        val jobKind: JobKind = JobKind.REMOVE_SEGMENTS,
+        val removeSegments: Boolean = true,
+        val streamSelection: StreamSelection = StreamSelection.BOTH
     )
 
-    /**
-     * Derive the SINGLE DECISION GRAPH for all copy/transcode decisions.
-     *
-     * This function computes:
-     * 1. Raw codec compatibility inputs (videoCodecKnownBad, etc.)
-     * 2. FINAL CANONICAL DECISIONS: canCopyVideo, canCopyAudio
-     *
-     * Both SW and HW/FAST paths consume the returned CoreDecisions object.
-     * They NEVER recompute these formulas locally.
-     *
-     * ENFORCEMENT: If any path recomputes canCopyVideo or canCopyAudio,
-     * that is a violation of the single decision graph rule.
-     */
-    private fun deriveCoreDecisions(
-        info: FFProbeInspector.VideoInfo,
-        frameAccurate: Boolean,
-        hwAccurate: Boolean
-    ): CoreDecisions {
-        val isAudioOnly = info.videoCodec == "unknown" && info.audioCodec != null
-        val forceReEncode = frameAccurate || hwAccurate
+    private val VIDEO_CONTAINER_COMPATIBILITY = mapOf(
+        "H.264" to setOf("mp4", "mkv", "mov", "ts", "m2ts", "avi"),
+        "H.265/HEVC" to setOf("mp4", "mkv", "mov", "ts", "m2ts"),
+        "VP9" to setOf("webm", "mkv"),
+        "AV1" to setOf("mp4", "mkv", "webm"),
+        "MPEG-4 Part 2" to setOf("mp4", "mkv", "avi")
+    )
 
-        val videoCodecKnownBad = !isAudioOnly
-            && info.videoCodec != "unknown"
-            && info.videoCodec !in COPY_SAFE_VIDEO
+    private val AUDIO_CONTAINER_COMPATIBILITY = mapOf(
+        "AAC" to setOf("mp4", "mkv", "mov", "m4a", "aac", "ts", "m2ts"),
+        "Opus" to setOf("webm", "mkv", "opus", "oga", "ogg"),
+        "MP3" to setOf("mp3", "mkv", "avi"),
+        "Vorbis" to setOf("webm", "mkv", "ogg", "oga"),
+        "FLAC" to setOf("mkv", "flac")
+    )
 
-        val videoIsCopyable = isAudioOnly || !videoCodecKnownBad
+    private val DEFAULT_AUDIO_BY_FAMILY = mapOf(
+        "H.264" to "aac",
+        "H.265/HEVC" to "aac",
+        "VP9" to "opus",
+        "AV1" to "aac",
+        "MPEG-4 Part 2" to "aac"
+    )
 
-        val audioCodecKnownBad = info.audioCodec != null
-            && info.audioCodec != "unknown"
-            && info.audioCodec !in COPY_SAFE_AUDIO
+    private val SW_AUTO_BY_FAMILY = mapOf(
+        "H.264" to "libx264",
+        "H.265/HEVC" to "libx265",
+        "VP9" to "libvpx-vp9",
+        "AV1" to "libsvtav1",
+        "MPEG-4 Part 2" to "mpeg4"
+    )
 
-        // FINAL CANONICAL DECISIONS: Computed here, used everywhere, never recomputed
-        val canCopyVideo = videoIsCopyable && !forceReEncode
-        val canCopyAudio = !audioCodecKnownBad && !forceReEncode
+    private val SW_FALLBACK_FAMILIES = listOf(
+        "H.264",
+        "VP9",
+        "AV1",
+        "MPEG-4 Part 2"
+    )
 
-        return CoreDecisions(
-            isAudioOnly = isAudioOnly,
-            videoCodecKnownBad = videoCodecKnownBad,
-            videoIsCopyable = videoIsCopyable,
-            audioCodecKnownBad = audioCodecKnownBad,
-            forceReEncode = forceReEncode,
-            canCopyVideo = canCopyVideo,
-            canCopyAudio = canCopyAudio
-        )
-    }
+    private val HW_AUTO_BY_FAMILY = mapOf(
+        "H.264" to listOf("h264_mediacodec"),
+        "H.265/HEVC" to listOf("hevc_mediacodec")
+    )
 
-    /**
-     * @param frameAccurate  SW-Accurate: mpeg4 CPU encoder, single filter_complex pass.
-     *                       Always available (no GPL libs). Uses the shared target bitrate policy.
-     * @param hwAccurate     HW-Accurate: h264_mediacodec single filter_complex pass.
-     *                       MediaCodec initialised once → much faster on capable devices.
-     */
+    private val COPY_SAFE_AUDIO = setOf(
+        "aac", "mp3", "opus", "vorbis", "ac3", "eac3", "flac", "pcm_s16le"
+    )
+
     fun plan(
         info: FFProbeInspector.VideoInfo,
         frameAccurate: Boolean,
-        hwAccurate: Boolean = false
+        hwAccurate: Boolean = false,
+        removeSegments: Boolean = true,
+        streamSelection: StreamSelection = StreamSelection.BOTH,
+        preferences: OutputPreferences = OutputPreferences(),
+        catalog: List<EncoderOption> = EncoderCatalog.discover()
+    ): ProcessingPlan {
+        val mode = when {
+            hwAccurate -> ExecutionMode.HW_ACCURATE
+            frameAccurate -> ExecutionMode.SW_ACCURATE
+            else -> ExecutionMode.FAST
+        }
+
+        return if (streamSelection == StreamSelection.BOTH) {
+            planBoth(info, mode, removeSegments, preferences, catalog)
+        } else {
+            planExtraction(info, mode, removeSegments, streamSelection, preferences, catalog)
+        }
+    }
+
+    private fun planBoth(
+        info: FFProbeInspector.VideoInfo,
+        mode: ExecutionMode,
+        removeSegments: Boolean,
+        preferences: OutputPreferences,
+        catalog: List<EncoderOption>
     ): ProcessingPlan {
         val reasons = mutableListOf<String>()
 
-        // SINGLE DECISION GRAPH: Derive all copy/transcode decisions ONCE
-        // Both SW and HW/FAST paths consume these finalized boolean decisions.
-        // They never recompute canCopyVideo or canCopyAudio locally.
-        val decisions = deriveCoreDecisions(info, frameAccurate, hwAccurate)
+        val inputVideoFamily = EncoderCatalog.familyForInputCodec(info.videoCodec)
+        val inputAudioFamily = EncoderCatalog.familyForInputCodec(info.audioCodec)
 
-        if (decisions.videoCodecKnownBad) reasons += "video codec '${info.videoCodec}' requires transcode"
-        if (!decisions.isAudioOnly && decisions.forceReEncode && decisions.videoIsCopyable) {
-            reasons += when {
-                hwAccurate    -> "HW-Accurate single-pass (h264_mediacodec, one-shot init)"
-                frameAccurate -> "SW-Accurate single-pass (mpeg4 CPU, one-shot encode)"
-                else          -> ""
-            }
-        }
-        if (decisions.isAudioOnly) reasons += "audio-only file"
-        if (info.videoCodec == "unknown" && !decisions.isAudioOnly) reasons += "codec unknown — defaulting to copy"
-
-        if (decisions.audioCodecKnownBad) reasons += "audio codec '${info.audioCodec}' requires transcode"
-        // If SW (frameAccurate) is requested, build and return an isolated SW plan here.
-        // SW must be fully isolated from the HW/FAST decision logic below.
-        if (frameAccurate) {
-            return buildSwPlan(info, decisions, reasons)
-        }
-
-        // SW-Accurate uses mpeg4 (CPU, always available, no GPL libs needed).
-        // HW-Accurate uses h264_mediacodec (Android MediaCodec).
-        // The single-pass filter_complex architecture is the same for both.
-        val emptyArgs: List<String> = emptyList()
-        val modeLabel = if (hwAccurate) "HW" else "FAST"
-
-        // Bitrate decision / logging: compute once for HW/FAST modes only.
-        val bitrateDecision = computeTargetBitrate(info)
-        reasons += buildString {
-            append(
-                "bitrate policy=${bitrateDecision.decisionReason} " +
-                    "[stream=${formatBitrateLabel(bitrateDecision.sourceStreamBitrate)}, " +
-                    "format=${formatBitrateLabel(bitrateDecision.sourceFormatBitrate)}, " +
-                    "target=${formatBitrateLabel(bitrateDecision.targetBitrate)}]"
-            )
-            bitrateDecision.warning?.let { append("; $it") }
-        }
-
-        val (videoEncoderArgs, fallbackVideoEncoderArgs) = when {
-            decisions.isAudioOnly || decisions.canCopyVideo -> emptyArgs to emptyArgs
-            // ...existing code...
-            else -> {
-                // HW encode (hwAccurate) or forced transcode due to unsupported codec.
-                // HW encoder does not interpret bitrate as a quality target; device encoders
-                // configure parameters according to implementation constraints which may
-                // lead to quality variance between devices.
-                val targetBps = bitrateDecision.targetBitrate
-                val bitrateKbps = (targetBps / 1000L).coerceAtLeast(1L)
-                val sourcePixFmt = inferHwPixFmt(info.pixFmt)
-                listOf("-c:v", "h264_mediacodec", "-b:v", "${bitrateKbps}k", "-pix_fmt", sourcePixFmt) to
-                    listOf("-c:v", "h264_mediacodec", "-b:v", "${bitrateKbps}k", "-pix_fmt", "yuv420p")
-            }
-        }
-
-        val fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k")
-        val audioEncoderArgs = when {
-            decisions.canCopyAudio -> emptyList()
-            else -> inferAudioEncoderArgs(info) ?: fallbackAudioEncoderArgs
-        }
-
-        val (outputExtension, outputMuxer) = inferOutputContainer(
-            info = info,
-            forceReEncode = decisions.forceReEncode,
-            canCopyVideo = decisions.canCopyVideo,
-            canCopyAudio = decisions.canCopyAudio,
-            isAudioOnly = decisions.isAudioOnly,
-            audioEncoderArgs = audioEncoderArgs
+        val videoEncoder = resolveVideoEncoder(
+            info, mode, preferences, catalog, inputVideoFamily, reasons
         )
-        reasons += "output container=${outputExtension}${if (outputMuxer != null) " ($outputMuxer)" else ""}"
+        val audioEncoder = resolveAudioEncoder(
+            info, mode, preferences, catalog, inputAudioFamily, videoEncoder, reasons
+        )
+        val container = resolveContainer(
+            info, mode, preferences, catalog, videoEncoder, audioEncoder, reasons
+        )
 
-        // hwDecoderArgs are unused — both modes use single-pass filter_complex now.
-        val hwDecoderArgs: List<String> = emptyList()
+        val canCopyVideo = mode == ExecutionMode.FAST && videoEncoder == null
+        val canCopyAudio = mode == ExecutionMode.FAST && audioEncoder == null
 
-        val singlePassFilter = (hwAccurate) && !decisions.isAudioOnly && !decisions.canCopyVideo
+        val quality = resolveQuality(
+            mode, videoEncoder, preferences, info, audioEncoder, reasons
+        )
 
-        val pixels2 = info.pixels ?: 0
-        val fps = info.fps ?: 30f
-        val complexity = when {
-            decisions.isAudioOnly -> ComplexityTier.LOW
-            decisions.forceReEncode && pixels2 >= 1920 * 1080 && fps >= 50f -> ComplexityTier.HIGH
-            decisions.forceReEncode || pixels2 >= 1920 * 1080 -> ComplexityTier.MEDIUM
-            else -> ComplexityTier.LOW
+        val videoArgs = buildVideoArgs(
+            mode, videoEncoder, quality, preferences.videoFrameRate,
+            info.fps, info.height, preferences.videoMaxHeight
+        ).toMutableList()
+
+        val audioArgs = buildAudioArgs(
+            audioEncoder,
+            info,
+            preferences.audioSampleRate,
+            preferences.audioBitrate
+        )
+
+        val outputExtension = container
+        val outputMuxer = muxerForContainer(container)
+
+        val singlePass = removeSegments &&
+            mode != ExecutionMode.FAST &&
+            !canCopyVideo
+
+        if (preferences.videoFrameRate != null) {
+            reasons += "frame rate explicitly set to ${preferences.videoFrameRate}"
         }
 
-        val useSlowSeek = info.isTsEncapsulated
-        if (useSlowSeek) reasons += "TS-encapsulated — using slow seek + stream maps"
-
-        val rationale = if (reasons.isEmpty()) "stream copy (fast)" else reasons.joinToString("; ")
-        Log.i(TAG, "Plan: canCopyVideo=${decisions.canCopyVideo} canCopyAudio=${decisions.canCopyAudio} " +
-                "singlePass=$singlePassFilter useSlowSeek=$useSlowSeek rationale=$rationale")
-        DiagLog.append(
-            "BITRATE POLICY",
-            buildString {
-                append("mode=$modeLabel ")
-                append("resolution=${info.width ?: 0}x${info.height ?: 0} ")
-                append("source_stream=${formatBitrateLabel(bitrateDecision.sourceStreamBitrate)} ")
-                append("source_format=${formatBitrateLabel(bitrateDecision.sourceFormatBitrate)} ")
-                append("decision=${bitrateDecision.decisionReason} ")
-                append("final_target=${formatBitrateLabel(bitrateDecision.targetBitrate)}")
-                bitrateDecision.warning?.let { append(" warning=$it") }
-            }
+        return ProcessingPlan(
+            canCopyVideo = canCopyVideo,
+            canCopyAudio = canCopyAudio,
+            videoEncoderArgs = videoArgs,
+            fallbackVideoEncoderArgs = fallbackVideoArgs(mode, videoEncoder, quality),
+            hwDecoderArgs = emptyList(),
+            audioEncoderArgs = audioArgs,
+            fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k"),
+            outputExtension = outputExtension,
+            outputMuxer = outputMuxer,
+            complexity = complexityFor(info, mode),
+            rationale = reasons.joinToString("; ").ifBlank { "input-matched processing" },
+            useSlowSeek = info.isTsEncapsulated,
+            singlePassFilter = singlePass,
+            removeSegments = removeSegments,
+            streamSelection = StreamSelection.BOTH
         )
-        if (videoEncoderArgs.isNotEmpty()) {
-            DiagLog.append(
-                "BITRATE POLICY",
-                "final_video_args=${videoEncoderArgs.joinToString(" ")} fallback_video_args=${fallbackVideoEncoderArgs.joinToString(" ")}"
+    }
+
+    private fun planExtraction(
+        info: FFProbeInspector.VideoInfo,
+        mode: ExecutionMode,
+        removeSegments: Boolean,
+        streamSelection: StreamSelection,
+        preferences: OutputPreferences,
+        catalog: List<EncoderOption>
+    ): ProcessingPlan {
+        val reasons = mutableListOf<String>()
+        val empty = emptyList<String>()
+
+        if (streamSelection == StreamSelection.AUDIO_ONLY) {
+            val inputFamily = EncoderCatalog.familyForInputCodec(info.audioCodec)
+            val encoder = resolveAudioEncoder(
+                info, mode, preferences, catalog, inputFamily, null, reasons
+            )
+            val canCopy = mode == ExecutionMode.FAST && encoder == null
+            val container = if (preferences.audioSectionMode == SectionMode.CUSTOM &&
+                preferences.container != null
+            ) {
+                preferences.container!!
+            } else {
+                audioContainerFor(encoder ?: info.audioCodec)
+            }
+
+            return ProcessingPlan(
+                canCopyVideo = false,
+                canCopyAudio = canCopy,
+                videoEncoderArgs = empty,
+                fallbackVideoEncoderArgs = empty,
+                hwDecoderArgs = empty,
+                audioEncoderArgs = buildAudioArgs(
+                    encoder,
+                    info,
+                    preferences.audioSampleRate,
+                    preferences.audioBitrate
+                ),
+                fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k"),
+                outputExtension = container,
+                outputMuxer = muxerForContainer(container),
+                complexity = ComplexityTier.LOW,
+                rationale = reasons.joinToString("; ").ifBlank { "audio extraction" },
+                useSlowSeek = info.isTsEncapsulated,
+                singlePassFilter = removeSegments && !canCopy,
+                dropVideo = true,
+                dropAudio = false,
+                jobKind = JobKind.EXTRACT_AUDIO,
+                removeSegments = removeSegments,
+                streamSelection = streamSelection
             )
         }
-         if (audioEncoderArgs.isNotEmpty()) {
-             DiagLog.append(
-                 "BITRATE POLICY",
-                 "final_audio_args=${audioEncoderArgs.joinToString(" ")} fallback_audio_args=${fallbackAudioEncoderArgs.joinToString(" ")}"
-             )
-         }
 
-         return ProcessingPlan(
-             canCopyVideo     = decisions.canCopyVideo,
-             canCopyAudio     = decisions.canCopyAudio,
-             videoEncoderArgs = videoEncoderArgs,
-             fallbackVideoEncoderArgs = fallbackVideoEncoderArgs,
-             hwDecoderArgs    = hwDecoderArgs,
-             audioEncoderArgs = audioEncoderArgs,
-             fallbackAudioEncoderArgs = fallbackAudioEncoderArgs,
-             outputExtension = outputExtension,
-             outputMuxer = outputMuxer,
-             complexity       = complexity,
-             rationale        = rationale,
-             useSlowSeek      = useSlowSeek,
-             singlePassFilter = singlePassFilter
-         )
-     }
+        val inputFamily = EncoderCatalog.familyForInputCodec(info.videoCodec)
+        val encoder = resolveVideoEncoder(
+            info, mode, preferences, catalog, inputFamily, reasons
+        )
+        val canCopy = mode == ExecutionMode.FAST && encoder == null
+        val quality = resolveQuality(mode, encoder, preferences, info, null, reasons)
+        val container = if (preferences.videoSectionMode == SectionMode.CUSTOM &&
+            preferences.container != null
+        ) {
+            preferences.container!!
+        } else {
+            videoContainerFor(encoder ?: info.videoCodec)
+        }
 
-    private fun inferSwPixFmt(source: String?): String {
-        val fmt = source?.lowercase() ?: return "yuv420p"
-        return when {
-            fmt.startsWith("yuv420") || fmt.startsWith("yuvj420") -> "yuv420p"
-            fmt.startsWith("yuv422") -> "yuv422p"
-            fmt.startsWith("yuv444") -> "yuv444p"
-            else -> "yuv420p"
+        return ProcessingPlan(
+            canCopyVideo = canCopy,
+            canCopyAudio = false,
+            videoEncoderArgs = buildVideoArgs(
+                mode, encoder, quality, preferences.videoFrameRate,
+                info.fps, info.height, preferences.videoMaxHeight
+            ),
+            fallbackVideoEncoderArgs = fallbackVideoArgs(mode, encoder, quality),
+            hwDecoderArgs = emptyList(),
+            audioEncoderArgs = empty,
+            fallbackAudioEncoderArgs = empty,
+            outputExtension = container,
+            outputMuxer = muxerForContainer(container),
+            complexity = complexityFor(info, mode),
+            rationale = reasons.joinToString("; ").ifBlank { "video extraction" },
+            useSlowSeek = info.isTsEncapsulated,
+            singlePassFilter = removeSegments && !canCopy,
+            dropVideo = false,
+            dropAudio = true,
+            jobKind = JobKind.EXTRACT_VIDEO,
+            removeSegments = removeSegments,
+            streamSelection = streamSelection
+        )
+    }
+
+    fun resolveVideoEncoderForUi(
+        info: FFProbeInspector.VideoInfo,
+        mode: ExecutionMode,
+        preferences: OutputPreferences,
+        catalog: List<EncoderOption>,
+        inputFamily: String?
+    ): String? {
+        return try {
+            resolveVideoEncoder(
+                info,
+                mode,
+                preferences,
+                catalog,
+                inputFamily,
+                mutableListOf()
+            )
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private fun inferHwPixFmt(source: String?): String {
-        val fmt = source?.lowercase() ?: return "yuv420p"
-        return when {
-            fmt.startsWith("yuv420") || fmt.startsWith("yuvj420") -> "yuv420p"
-            // Most MediaCodec stacks accept yuv420p reliably; keep fallback conservative.
-            else -> "yuv420p"
+    private fun resolveVideoEncoder(
+        info: FFProbeInspector.VideoInfo,
+        mode: ExecutionMode,
+        preferences: OutputPreferences,
+        catalog: List<EncoderOption>,
+        inputFamily: String?,
+        reasons: MutableList<String>
+    ): String? {
+        if (mode == ExecutionMode.FAST) {
+            reasons += "Fast stream copy"
+            return null
         }
+
+        if (preferences.videoSectionMode == SectionMode.CUSTOM &&
+            preferences.videoCodec == null
+        ) {
+            reasons += "Custom video section had no codec selected; using Auto"
+        } else if (preferences.videoSectionMode == SectionMode.CUSTOM) {
+            val requested = preferences.videoCodec
+                ?: error("Video is Custom but no video codec was selected")
+            val option = EncoderCatalog.find(catalog, requested)
+                ?: error("Unknown video encoder: $requested")
+            if (!option.available) error("Video encoder $requested is unavailable")
+            if (mode == ExecutionMode.SW_ACCURATE && option.hardware) {
+                error("$requested is a hardware encoder; select HW mode")
+            }
+            if (mode == ExecutionMode.HW_ACCURATE && !option.hardware) {
+                error("$requested is a software encoder; select SW mode")
+            }
+            reasons += "Custom video encoder: $requested"
+            return requested
+        }
+
+        val family = inputFamily
+            ?: error("No input-matching policy for video codec '${info.videoCodec}'")
+
+        if (mode == ExecutionMode.HW_ACCURATE) {
+            val candidates = HW_AUTO_BY_FAMILY[family]
+                ?: error("HW Auto is not defined for $family input; choose SW or a custom HW encoder")
+            val available = candidates.firstOrNull { name ->
+                EncoderCatalog.find(catalog, name)?.available == true
+            }
+
+            if (available != null) {
+                reasons += "HW Auto matches $family using $available"
+                return available
+            }
+
+            val softwareFallback = SW_AUTO_BY_FAMILY[family]
+            val softwareOption = softwareFallback?.let {
+                EncoderCatalog.find(catalog, it)
+            }
+
+            if (softwareOption?.available == true) {
+                reasons += "No HW encoder for $family; using SW fallback $softwareFallback"
+                return softwareFallback
+            }
+
+            error("No available HW or SW encoder for $family input")
+        }
+
+        val preferred = SW_AUTO_BY_FAMILY[family]
+        val orderedFamilies = buildList {
+            if (preferred != null) add(family)
+            SW_FALLBACK_FAMILIES.forEach { if (it !in this) add(it) }
+        }
+
+        for (candidateFamily in orderedFamilies) {
+            val candidateName = SW_AUTO_BY_FAMILY[candidateFamily] ?: continue
+            val option = EncoderCatalog.find(catalog, candidateName)
+            if (option?.available == true) {
+                reasons += if (candidateFamily == family) {
+                    "SW Auto matches $family using $candidateName"
+                } else {
+                    "SW Auto fallback: $family -> $candidateName"
+                }
+                return candidateName
+            }
+        }
+
+        error("No available SW video encoder matches the fallback hierarchy")
     }
 
-    private fun inferAudioEncoderArgs(info: FFProbeInspector.VideoInfo): List<String>? {
-        val codec = info.audioCodec?.lowercase() ?: return null
-        val sourceKbps = info.audioBitrate?.div(1000)?.toInt()
-        val clamped = sourceKbps?.coerceIn(48, 512)
-        return when (codec) {
-            "aac" -> listOf("-c:a", "aac", "-b:a", "${clamped ?: 128}k")
-            "opus" -> listOf("-c:a", "opus", "-b:a", "${(clamped ?: 128).coerceIn(64, 256)}k")
-            "vorbis" -> listOf("-c:a", "vorbis", "-b:a", "${(clamped ?: 128).coerceIn(64, 320)}k")
-            "mp3" -> listOf("-c:a", "mp3", "-b:a", "${(clamped ?: 192).coerceIn(96, 320)}k")
-            "flac" -> listOf("-c:a", "flac")
-            "ac3", "eac3" -> listOf("-c:a", "ac3", "-b:a", "${(clamped ?: 192).coerceIn(96, 640)}k")
-            "pcm_s16le" -> listOf("-c:a", "pcm_s16le")
+    private fun resolveAudioEncoder(
+        info: FFProbeInspector.VideoInfo,
+        mode: ExecutionMode,
+        preferences: OutputPreferences,
+        catalog: List<EncoderOption>,
+        inputFamily: String?,
+        videoEncoder: String?,
+        reasons: MutableList<String>
+    ): String? {
+        if (mode == ExecutionMode.FAST) {
+            reasons += "Fast audio stream copy"
+            return null
+        }
+
+        if (preferences.audioSectionMode == SectionMode.CUSTOM) {
+            val requested = preferences.audioCodec
+                ?: error("Audio is Custom but no audio codec was selected")
+            val option = EncoderCatalog.find(catalog, requested)
+                ?: error("Unknown audio encoder: $requested")
+            if (!option.available) error("Audio encoder $requested is unavailable")
+            reasons += "Custom audio encoder: $requested"
+            return requested
+        }
+
+        val inputEncoder = when (inputFamily) {
+            "AAC" -> "aac"
+            "Opus" -> "libopus"
+            "MP3" -> "libmp3lame"
+            "Vorbis" -> "libvorbis"
+            "FLAC" -> "flac"
             else -> null
         }
-    }
 
-    /**
-     * SINGLE SOURCE OF TRUTH FOR FAST + HW MODES ONLY.
-     * This policy is mode-agnostic and returns an inferred BitrateDecision based on ffprobe
-     * data (stream bitrate, container bitrate) or resolution fallback when metadata is absent.
-     * MediaCodec does NOT interpret bitrate as a quality intent; it only configures encoder
-     * parameters and implementation differences between devices may cause quality variance.
-     */
-    private fun computeTargetBitrate(
-        info: FFProbeInspector.VideoInfo
-    ): BitrateDecision {
-        val sourceStream = info.videoBitrate?.takeIf { it > 0L }
-        val sourceFormat = info.containerBitrate?.takeIf { it > 0L }
-        val source = sourceStream ?: sourceFormat
-
-        val target = if (source != null) {
-            val floor = knownSourceFloorBitrate(info)
-            val maxAllowed = (source * 1.5).toLong().coerceAtLeast(source)
-            source.coerceAtLeast(floor).coerceAtMost(maxAllowed)
-        } else {
-            fallbackBitrate(info)
+        if (inputEncoder != null &&
+            EncoderCatalog.find(catalog, inputEncoder)?.available == true
+        ) {
+            reasons += "Audio Auto matches input family $inputFamily using $inputEncoder"
+            return inputEncoder
         }
 
-        val decisionReason = when {
-            source == null -> "used resolution fallback"
-            target == source -> "used source bitrate"
-            else -> "used clamped source bitrate"
+        val videoFamily = videoEncoder?.let {
+            EncoderCatalog.find(catalog, it)?.codecFamily
         }
-
-        val overshootWarning = if (source != null && target > source * 5) {
-            "BITRATE OVERSHOOT DETECTED target=${formatBitrateLabel(target)} source=${formatBitrateLabel(source)}"
-        } else null
-
-        return BitrateDecision(
-            sourceStreamBitrate = sourceStream,
-            sourceFormatBitrate = sourceFormat,
-            selectedSourceBitrate = source,
-            targetBitrate = target,
-            decisionReason = decisionReason,
-            warning = overshootWarning
-        )
+        val fallback = DEFAULT_AUDIO_BY_FAMILY[videoFamily] ?: "aac"
+        val fallbackOption = EncoderCatalog.find(catalog, fallback)
+        if (fallbackOption?.available != true) {
+            error("Required audio encoder $fallback is unavailable")
+        }
+        reasons += "Audio Auto fallback: $fallback"
+        return fallback
     }
 
-    // Build a ProcessingPlan for SW-Accurate mode (frameAccurate). This path is intentionally
-    // isolated from the HW/FAST policy-driven logic and uses the deterministic legacy
-    // resolution-based bitrate ladder.
-    //
-    // ARCHITECTURE: SW must consume the same CoreDecisions as HW/FAST to prevent policy drift.
-    // The only difference is the bitrate model (legacy resolution ladder vs. computed bitrate policy).
-    //
-    // CRITICAL: SW does NOT recompute canCopyVideo/canCopyAudio.
-    // It uses the finalized boolean decisions from CoreDecisions.
-    // This enforces the single decision graph at the output level.
-    private fun buildSwPlan(
+    private fun resolveContainer(
         info: FFProbeInspector.VideoInfo,
-        decisions: CoreDecisions,
+        mode: ExecutionMode,
+        preferences: OutputPreferences,
+        catalog: List<EncoderOption>,
+        videoEncoder: String?,
+        audioEncoder: String?,
         reasons: MutableList<String>
-    ): ProcessingPlan {
-        // CRITICAL: No recomputation of canCopyVideo/canCopyAudio here.
-        // Both paths consume the SAME finalized decisions from CoreDecisions.
+    ): String {
+        val videoFamily = videoEncoder?.let {
+            EncoderCatalog.find(catalog, it)?.codecFamily
+        } ?: EncoderCatalog.familyForInputCodec(info.videoCodec)
 
-        if (decisions.videoCodecKnownBad) reasons += "video codec '${info.videoCodec}' requires transcode"
-        if (decisions.isAudioOnly) reasons += "audio-only file"
+        val audioFamily = audioEncoder?.let {
+            EncoderCatalog.find(catalog, it)?.codecFamily
+        } ?: EncoderCatalog.familyForInputCodec(info.audioCodec)
 
-        if (decisions.audioCodecKnownBad) reasons += "audio codec '${info.audioCodec}' requires transcode"
+        if (preferences.videoSectionMode == SectionMode.CUSTOM &&
+            preferences.container != null
+        ) {
+            val requested = preferences.container.lowercase()
 
-        val emptyArgs: List<String> = emptyList()
+            if (requested == "ts" || requested == "m2ts") {
+                error(
+                    "MPEG-TS output is currently unsupported for transcoding. " +
+                        "TS inputs are automatically processed to MP4. " +
+                        "TS output preservation will be re-examined after the FFmpegKitNext upgrade."
+                )
+            }
 
-        // Compute SW legacy bitrate exactly once (kbps) and convert to bps for logging.
-        val swKbps = swLegacyBitrate(info)
-        val swBps = swKbps.toLong() * 1000L
+            validateContainer(videoFamily, audioFamily, requested)
+            reasons += "Custom container: $requested"
+            return requested
+        }
 
-        val (videoEncoderArgs, fallbackVideoEncoderArgs) = when {
-            decisions.isAudioOnly || decisions.canCopyVideo -> emptyArgs to emptyArgs
-            else -> {
-                val sourcePixFmt = inferSwPixFmt(info.pixFmt)
-                listOf(
-                    "-c:v", "mpeg4",
-                    "-b:v", "${swKbps}k",
-                    "-pix_fmt", sourcePixFmt
-                ) to listOf(
-                    "-c:v", "mpeg4",
-                    "-b:v", "${swKbps}k",
-                    "-pix_fmt", "yuv420p"
+        val allowed = VIDEO_CONTAINER_COMPATIBILITY[videoFamily]
+            ?: error("No container policy for video family $videoFamily")
+
+        val inputFormats = info.containerFormat
+            ?.split(',')
+            ?.map { it.trim().lowercase() }
+            ?.toSet()
+            ?: emptySet()
+
+        val inputContainer = allowed.firstOrNull { it in inputFormats }
+
+        val isMpegTsInput = "mpegts" in inputFormats
+
+        val selected = when {
+            // MPEG-TS output transcoding is currently unsupported on this
+            // FFmpegKit build. TS inputs are deliberately planned as MP4
+            // output. TS preservation requires the validated two-stage
+            // MP4-to-TS remux path and will be re-examined after the
+            // FFmpegKitNext upgrade.
+            isMpegTsInput -> "mp4"
+            inputContainer != null -> inputContainer
+            videoFamily == "VP9" -> "webm"
+            else -> "mp4"
+        }
+
+        validateContainer(videoFamily, audioFamily, selected)
+
+        reasons += if (isMpegTsInput) {
+            "Auto container: mp4 (MPEG-TS input; direct TS output transcoding is unsupported)"
+        } else {
+            "Auto container: $selected"
+        }
+
+        return selected
+    }
+
+    private fun validateContainer(
+        videoFamily: String?,
+        audioFamily: String?,
+        container: String
+    ) {
+        if (videoFamily != null) {
+            val allowed = VIDEO_CONTAINER_COMPATIBILITY[videoFamily]
+            if (allowed != null && container !in allowed) {
+                error(
+                    "$videoFamily video is incompatible with .$container; " +
+                        "allowed: ${allowed.joinToString(", ") { ".$it" }}"
                 )
             }
         }
+        if (audioFamily != null) {
+            val allowed = AUDIO_CONTAINER_COMPATIBILITY[audioFamily]
+            if (allowed != null && container !in allowed) {
+                error(
+                    "$audioFamily audio is incompatible with .$container; " +
+                        "allowed: ${allowed.joinToString(", ") { ".$it" }}"
+                )
+            }
+        }
+    }
 
-        val fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k")
-        val audioEncoderArgs = when {
-            decisions.canCopyAudio -> emptyList()
-            else -> inferAudioEncoderArgs(info) ?: fallbackAudioEncoderArgs
+    private fun resolveQuality(
+        mode: ExecutionMode,
+        videoEncoder: String?,
+        preferences: OutputPreferences,
+        info: FFProbeInspector.VideoInfo,
+        audioEncoder: String?,
+        reasons: MutableList<String>
+    ): Quality {
+        if (mode == ExecutionMode.FAST) {
+            return Quality(mode = QualityMode.BITRATE, bitrate = null)
         }
 
-        val (outputExtension, outputMuxer) = inferOutputContainer(
-            info = info,
-            forceReEncode = decisions.forceReEncode,
-            canCopyVideo = decisions.canCopyVideo,
-            canCopyAudio = decisions.canCopyAudio,
-            isAudioOnly = decisions.isAudioOnly,
-            audioEncoderArgs = audioEncoderArgs
+        val supportsCrf = videoEncoder in setOf(
+            "libx264",
+            "libx265"
         )
-        reasons += "output container=${outputExtension}${if (outputMuxer != null) " ($outputMuxer)" else ""}"
-
-        val hwDecoderArgs: List<String> = emptyList()
-        val singlePassFilter = true && !decisions.isAudioOnly && !decisions.canCopyVideo
-
-        val pixels2 = info.pixels ?: 0
-        val fps = info.fps ?: 30f
-        val complexity = when {
-            decisions.isAudioOnly -> ComplexityTier.LOW
-            pixels2 >= 1920 * 1080 && fps >= 50f -> ComplexityTier.HIGH
-            pixels2 >= 1920 * 1080 -> ComplexityTier.MEDIUM
-            else -> ComplexityTier.LOW
+        val effectiveMode = if (supportsCrf) {
+            preferences.qualityMode
+        } else {
+            QualityMode.BITRATE
         }
 
-        val useSlowSeek = info.isTsEncapsulated
-        if (useSlowSeek) reasons += "TS-encapsulated — using slow seek + stream maps"
+        return when (effectiveMode) {
+            QualityMode.CRF -> {
+                if (videoEncoder in setOf("h264_mediacodec", "hevc_mediacodec")) {
+                    val cq = preferences.cq
+                        ?: error("CQ value is required for $videoEncoder CQ mode")
 
-        val rationale = if (reasons.isEmpty()) "stream copy (fast)" else reasons.joinToString("; ")
-        Log.i(TAG, "SW Plan: canCopyVideo=${decisions.canCopyVideo} canCopyAudio=${decisions.canCopyAudio} singlePass=$singlePassFilter useSlowSeek=$useSlowSeek rationale=$rationale")
+                    reasons += "$videoEncoder CQ $cq"
+                    Quality(
+                        mode = QualityMode.CRF,
+                        cq = cq
+                    )
+                } else {
+                    val crf = preferences.crf ?: 23
+                    if (crf !in 0..51) error("CRF must be between 0 and 51")
+
+                    reasons += "$videoEncoder CRF $crf"
+                    Quality(
+                        mode = QualityMode.CRF,
+                        crf = crf
+                    )
+                }
+            }
+            QualityMode.BITRATE -> {
+                val bitrate = preferences.videoBitrate
+                    ?: effectiveVideoBitrate(info)
+                    ?: fallbackBitrate(info)
+
+                val source = when {
+                    preferences.videoBitrate != null -> "requested"
+                    info.videoBitrate != null &&
+                        info.videoBitrate >= minPlausibleVideoBitrate -> "input stream"
+                    info.containerBitrate != null -> "container minus audio"
+                    else -> "resolution fallback"
+                }
+
+                reasons += "$videoEncoder bitrate ${formatBitrate(bitrate)} ($source)"
+                Quality(mode = QualityMode.BITRATE, bitrate = bitrate)
+            }
+        }
+    }
+
+    private data class Quality(
+        val mode: QualityMode,
+        val crf: Int? = null,
+        val cq: Int? = null,
+        val bitrate: Long? = null
+    )
+
+    private fun buildVideoArgs(
+        mode: ExecutionMode,
+        encoder: String?,
+        quality: Quality,
+        frameRate: String?,
+        inputFrameRate: Float?,
+        inputHeight: Int?,
+        maxHeight: Int?
+    ): List<String> {
+        if (mode == ExecutionMode.FAST || encoder == null) return emptyList()
+
+        val safeFrameRate = frameRate
+            ?.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
+
+        val args = mutableListOf("-c:v", encoder)
+        when (quality.mode) {
+            QualityMode.CRF -> {
+                when (encoder) {
+                    "libx264", "libx265" -> {
+                        val crf = quality.crf ?: 23
+                        args += listOf("-crf", crf.toString())
+                    }
+                    "h264_mediacodec", "hevc_mediacodec" -> {
+                        val cq = quality.cq
+                            ?: error("CQ value is required for $encoder CQ mode")
+
+                        args += listOf(
+                            "-bitrate_mode", "cq",
+                            "-global_quality", cq.toString()
+                        )
+
+                        // MediaCodec derives i-frame-interval from GOP size / FPS.
+                        // Ensure GOP size is at least the output FPS; otherwise the
+                        // rounded interval can become zero and configure() can fail.
+                        val gopSize = safeFrameRate
+                            ?.toDoubleOrNull()
+                            ?.roundToInt()
+                            ?.coerceAtLeast(30)
+                            ?: 120
+                        args += listOf("-g", gopSize.toString())
+                    }
+                    else -> {
+                        quality.bitrate?.let {
+                            args += listOf("-b:v", "${it / 1000L}k")
+                        }
+                    }
+                }
+            }
+            QualityMode.BITRATE -> {
+                quality.bitrate?.let {
+                    args += listOf("-b:v", "${it / 1000L}k")
+                }
+            }
+        }
+        // Preserve the source frame timing when the selected rate matches the
+        // input. Forcing -r on an already-matching stream can normalize VFR or
+        // fractional-rate MPEG-TS input and has caused MediaCodec video-duration
+        // loss on long files.
+        val shouldForceFrameRate = safeFrameRate != null && run {
+            val requested = safeFrameRate.toDoubleOrNull()
+            val source = inputFrameRate?.toDouble()
+
+            requested == null ||
+                source == null ||
+                kotlin.math.abs(requested - source) > 0.01
+        }
+
+        if (shouldForceFrameRate) {
+            args += listOf("-r", safeFrameRate)
+        }
+
+        // Downscale only. Never upscale an input that is already smaller.
+        if (maxHeight != null && inputHeight != null && inputHeight > maxHeight) {
+            args += listOf("-vf", "scale=-2:$maxHeight")
+        }
+        return args
+    }
+
+    private fun fallbackVideoArgs(
+        mode: ExecutionMode,
+        encoder: String?,
+        quality: Quality
+    ): List<String> {
+        if (mode != ExecutionMode.HW_ACCURATE || encoder == null) {
+            return listOf("-c:v", "libx264", "-crf", "23")
+        }
+        val bitrate = quality.bitrate ?: 4_000_000L
+        return listOf(
+            "-c:v", encoder,
+            "-b:v", "${bitrate / 1000L}k",
+            "-pix_fmt", "yuv420p"
+        )
+    }
+
+    private val minPlausibleAudioBitrate = 32_000L
+    private val fallbackAudioBitrate = 128_000L
+
+    private fun effectiveAudioBitrate(info: FFProbeInspector.VideoInfo): Long {
+        val parsed = info.audioBitrate
+        return if (parsed != null && parsed >= minPlausibleAudioBitrate) {
+            parsed
+        } else {
+            DiagLog.append(
+                "AudioPolicy",
+                "Source audio bitrate ${parsed ?: "missing"} is missing or below " +
+                    "${minPlausibleAudioBitrate / 1000}k; using ${fallbackAudioBitrate / 1000}k"
+            )
+            fallbackAudioBitrate
+        }
+    }
+
+    private val minPlausibleVideoBitrate = 64_000L
+
+    private fun effectiveVideoBitrate(info: FFProbeInspector.VideoInfo): Long? {
+        val streamBitrate = info.videoBitrate
+        if (streamBitrate != null && streamBitrate >= minPlausibleVideoBitrate) {
+            return streamBitrate
+        }
+
+        val audioBitrate = effectiveAudioBitrate(info)
+        val inferred = info.containerBitrate?.minus(audioBitrate)
+        if (inferred != null && inferred >= minPlausibleVideoBitrate) {
+            DiagLog.append(
+                "VideoPolicy",
+                "Stream video bitrate ${streamBitrate ?: "missing"} is missing or implausible; " +
+                    "inferred ${inferred} from container ${info.containerBitrate} minus audio $audioBitrate"
+            )
+            return inferred
+        }
 
         DiagLog.append(
-            "BITRATE POLICY",
-            "mode=SW resolution=${info.width ?: 0}x${info.height ?: 0} final_target=${formatBitrateLabel(swBps)}"
+            "VideoPolicy",
+            "Unable to infer plausible video bitrate; stream=${streamBitrate ?: "missing"}, " +
+                "container=${info.containerBitrate ?: "missing"}, inferred=${inferred ?: "missing"}"
+        )
+        return null
+    }
+
+
+
+
+    private fun buildAudioArgs(
+        encoder: String?,
+        info: FFProbeInspector.VideoInfo,
+        sampleRate: Int?,
+        requestedBitrate: Long? = null
+    ): List<String> {
+        if (encoder == null) return emptyList()
+        val args = mutableListOf("-c:a", encoder)
+        val bitrate = requestedBitrate?.takeIf { it >= minPlausibleAudioBitrate }
+            ?: effectiveAudioBitrate(info)
+
+        DiagLog.append(
+            "AudioPolicy",
+            "Audio bitrate: requested=${requestedBitrate ?: "none"}, " +
+                "source=${info.audioBitrate ?: "missing"}, effective=${bitrate / 1000L}k"
         )
 
-        if (videoEncoderArgs.isNotEmpty()) {
-            DiagLog.append(
-                "BITRATE POLICY",
-                "final_video_args=${videoEncoderArgs.joinToString(" ")} fallback_video_args=${fallbackVideoEncoderArgs.joinToString(" ") }"
-            )
+        if (encoder in setOf("aac", "libopus", "libmp3lame", "libvorbis")) {
+            args += listOf("-b:a", "${bitrate / 1000L}k")
         }
-         if (audioEncoderArgs.isNotEmpty()) {
-             DiagLog.append(
-                 "BITRATE POLICY",
-                 "final_audio_args=${audioEncoderArgs.joinToString(" ")} fallback_audio_args=${fallbackAudioEncoderArgs.joinToString(" ") }"
-             )
-         }
-
-         return ProcessingPlan(
-             canCopyVideo     = decisions.canCopyVideo,
-             canCopyAudio     = decisions.canCopyAudio,
-             videoEncoderArgs = videoEncoderArgs,
-             fallbackVideoEncoderArgs = fallbackVideoEncoderArgs,
-             hwDecoderArgs    = hwDecoderArgs,
-             audioEncoderArgs = audioEncoderArgs,
-             fallbackAudioEncoderArgs = fallbackAudioEncoderArgs,
-             outputExtension = outputExtension,
-             outputMuxer = outputMuxer,
-             complexity       = complexity,
-             rationale        = rationale,
-             useSlowSeek      = useSlowSeek,
-             singlePassFilter = singlePassFilter
-         )
-     }
-
-    private fun knownSourceFloorBitrate(info: FFProbeInspector.VideoInfo): Long {
-        val pixels = info.pixels ?: 0
-        val kbps = when {
-            pixels >= 1920 * 1080 -> 1500
-            pixels >= 1280 * 720  -> 800
-            pixels >= 854 * 480   -> 400
-            else                  -> 250
-        }
-        return kbps * 1000L
+        sampleRate?.let { args += listOf("-ar", it.toString()) }
+        return args
     }
 
     private fun fallbackBitrate(info: FFProbeInspector.VideoInfo): Long {
         val pixels = info.pixels ?: 0
         val kbps = when {
             pixels >= 1920 * 1080 -> 1500
-            pixels >= 1280 * 720  -> 1000
-            pixels >= 854 * 480   -> 600
-            else                  -> 400
+            pixels >= 1280 * 720 -> 1000
+            pixels >= 854 * 480 -> 600
+            else -> 400
         }
         return kbps * 1000L
     }
 
-    private fun swLegacyBitrate(info: FFProbeInspector.VideoInfo): Int {
-        val pixels = info.pixels ?: 0
-
-        return when {
-            pixels >= 1920 * 1080 -> 1500
-            pixels >= 1280 * 720  -> 1000
-            pixels >= 854 * 480   -> 600
-            else                  -> 400
-        }
-    }
-
-    /**
-     * CONTAINER POLICY (FIRST-CLASS DECISION)
-     *
-     * This is NOT a formatting utility; it is a critical POLICY FUNCTION.
-     * All container selection logic for both SW and HW/FAST paths originates here.
-     *
-     * ARCHITECTURE RULE: Any future container selection decision MUST be made
-     * by modifying this function. Do not branch container logic elsewhere.
-     *
-     * Inputs are:
-     *   - forceReEncode: whether re-encoding is happening (affects MP4 normalization)
-     *   - canCopyVideo / canCopyAudio: codec compatibility decisions
-     *   - isAudioOnly: determines audio-only vs video container logic
-     *   - audioEncoderArgs: used to infer target audio codec for audio-only re-encodes
-     *
-     * This ensures container decisions are deterministic, auditable, and versioned
-     * alongside core encoding policy.
-     */
-    private fun inferOutputContainer(
+    private fun complexityFor(
         info: FFProbeInspector.VideoInfo,
-        forceReEncode: Boolean,
-        canCopyVideo: Boolean,
-        canCopyAudio: Boolean,
-        isAudioOnly: Boolean,
-        audioEncoderArgs: List<String>
-    ): Pair<String, String?> {
-        val formats = info.containerFormat
-            ?.split(',')
-            ?.map { it.trim().lowercase() }
-            ?.filter { it.isNotBlank() }
-            ?.toSet()
-            ?: emptySet()
-
-        // Re-encoded video is normalised to MP4 for the broadest mux/decoder compatibility,
-        // especially for HW-Accurate (h264_mediacodec) outputs from WEBM/Matroska sources.
-        if (forceReEncode && !canCopyVideo) return "mp4" to "mp4"
-
-        // Audio-only re-encode uses container best matching the target audio codec.
-        if (isAudioOnly && !canCopyAudio) {
-            val targetAudioCodec = audioCodecFromArgs(audioEncoderArgs)
-            return when (targetAudioCodec) {
-                "opus", "vorbis" -> "ogg" to "ogg"
-                "mp3" -> "mp3" to "mp3"
-                "flac" -> "flac" to "flac"
-                "pcm_s16le" -> "wav" to "wav"
-                else -> "m4a" to "mp4"
-            }
-        }
-
+        mode: ExecutionMode
+    ): ComplexityTier {
+        val pixels = info.pixels ?: 0
+        val fps = info.fps ?: 30f
         return when {
-            // ffprobe often reports "matroska,webm" for WEBM files; prefer WEBM in copy paths.
-            "webm" in formats -> "webm" to "webm"
-            "matroska" in formats -> "mkv" to "matroska"
-            "mov" in formats || "mp4" in formats || "m4a" in formats ||
-                "3gp" in formats || "3g2" in formats || "mj2" in formats -> {
-                if (isAudioOnly) "m4a" to "mp4" else "mp4" to "mp4"
-            }
-            "ogg" in formats -> if (info.audioCodec == "opus") "opus" to "ogg" else "ogg" to "ogg"
-            "mp3" in formats -> "mp3" to "mp3"
-            "flac" in formats -> "flac" to "flac"
-            "wav" in formats -> "wav" to "wav"
-            "mpegts" in formats -> "ts" to "mpegts"
-            else -> if (isAudioOnly) "m4a" to "mp4" else "mp4" to "mp4"
+            mode == ExecutionMode.FAST -> ComplexityTier.LOW
+            pixels >= 1920 * 1080 && fps >= 50f -> ComplexityTier.HIGH
+            pixels >= 1920 * 1080 -> ComplexityTier.MEDIUM
+            else -> ComplexityTier.LOW
         }
     }
 
-    private fun audioCodecFromArgs(args: List<String>): String? {
-        val idx = args.indexOf("-c:a")
-        return if (idx >= 0 && idx + 1 < args.size) args[idx + 1].lowercase() else null
-    }
+    private fun audioContainerFor(codec: String?): String =
+        when (codec?.lowercase()) {
+            "aac" -> "m4a"
+            "mp3" -> "mp3"
+            "opus" -> "opus"
+            "vorbis" -> "ogg"
+            "flac" -> "flac"
+            else -> "m4a"
+        }
 
-    private fun formatBitrateLabel(rawBps: Long?): String {
-        if (rawBps == null || rawBps <= 0L) return "null"
-        return "${rawBps / 1000}kbps"
+    private fun videoContainerFor(codec: String?): String =
+        when (codec?.lowercase()) {
+            "vp8", "vp9" -> "webm"
+            "h264", "hevc", "h265", "av1", "mpeg4" -> "mp4"
+            else -> "mp4"
+        }
+
+    private fun muxerForContainer(container: String): String? =
+        when (container) {
+            "mp4" -> "mp4"
+            "webm" -> "webm"
+            "mkv" -> "matroska"
+            "mov" -> "mov"
+            "ts", "m2ts" -> "mpegts"
+            "avi" -> "avi"
+            "ogg", "oga", "opus" -> "ogg"
+            "mp3" -> "mp3"
+            "flac" -> "flac"
+            "wav" -> "wav"
+            else -> null
+        }
+
+    private fun formatBitrate(bitsPerSecond: Long): String =
+        "${bitsPerSecond / 1000L}k"
+
+
+    fun buildSizeAdvisory(
+        inputSizeBytes: Long,
+        outputSizeBytes: Long,
+        inputDurationSec: Double?,
+        outputDurationSec: Double?,
+        requestedVideoBitrateBps: Long?,
+        actualVideoBitrateBps: Long?,
+        executionMode: ExecutionMode
+    ): String? {
+        if (executionMode == ExecutionMode.FAST) return null
+        if (outputSizeBytes <= inputSizeBytes) return null
+
+        val ratio = outputSizeBytes.toDouble() / inputSizeBytes.toDouble()
+        if (ratio < 1.10) return null
+
+        val removedSeconds = inputDurationSec?.let { inputDuration ->
+            outputDurationSec?.let { outputDuration ->
+                inputDuration - outputDuration
+            }
+        }
+
+        val requested = requestedVideoBitrateBps?.let { bitrate ->
+            "${"%.0f".format(bitrate / 1000.0)} kb/s"
+        }
+
+        val actual = actualVideoBitrateBps?.let { bitrate ->
+            "${"%.0f".format(bitrate / 1000.0)} kb/s"
+        }
+
+        val bitrateClause = if (requested != null && actual != null) {
+            "Requested video target: $requested; actual output video: $actual."
+        } else {
+            "The selected encoder could not preserve the source video bitrate exactly."
+        }
+
+        val durationClause = removedSeconds?.takeIf { it > 0.5 }?.let { seconds ->
+            "Removed ${"%.1f".format(seconds)} seconds. "
+        } ?: ""
+
+        return """
+            ⚠️ Output is ${"%.1f".format(ratio)}× the original size.
+            $durationClause$bitrateClause
+            The source’s unusually low video bitrate is difficult for this
+            device’s hardware encoder to preserve. Try SW Accurate mode, or
+            Fast mode if frame-accurate re-encoding is not required.
+        """.trimIndent()
     }
 }
