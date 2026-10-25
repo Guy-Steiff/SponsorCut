@@ -107,7 +107,6 @@ object EncoderCatalog {
             ExecutionMode.FAST -> ordered.filter { !it.hardware }
             ExecutionMode.SW_ACCURATE -> ordered.filter { !it.hardware }
             ExecutionMode.HW_ACCURATE -> ordered.filter { it.hardware }
-            else -> ordered
         }
     }
 

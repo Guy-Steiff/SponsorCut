@@ -34,12 +34,27 @@ import android.widget.TextView
 import android.widget.Toast
 import android.os.Handler
 import android.os.Looper
+import androidx.core.content.edit
+import androidx.core.content.withStyledAttributes
+import androidx.core.net.toUri
+import androidx.core.view.isVisible
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.URLSpan
 import com.sponsorcut.core.model.ExecutionMode
 import com.sponsorcut.core.model.StreamSelection
+
+enum class SegmentSource { SPONSORBLOCK, LOCAL_FILE, MANUAL }
+
+data class EditableSegment(
+    val id: String,
+    val category: String,
+    val startSeconds: Double,
+    val endSeconds: Double,
+    val endIsOpen: Boolean = false,
+    val enabled: Boolean = true
+)
 
 class MainActivity : Activity() {
 
@@ -56,6 +71,7 @@ class MainActivity : Activity() {
     private lateinit var containerSpinner: Spinner
     private lateinit var videoCodecSpinner: Spinner
     private lateinit var audioCodecSpinner: Spinner
+    private lateinit var audioContainerSpinner: Spinner
     private lateinit var videoSectionSpinner: Spinner
     private lateinit var audioSectionSpinner: Spinner
     private lateinit var qualityModeSpinner: Spinner
@@ -86,14 +102,25 @@ class MainActivity : Activity() {
     private val selectedSegmentIndexes = mutableSetOf<Int>()
     private val segmentCheckboxes = mutableMapOf<Int, CheckBox>()
     private var currentSegments: List<SponsorSegmentInfo> = emptyList()
+    private val invalidSegmentIndexes = mutableSetOf<Int>()
+    private val editableSegments = mutableListOf<EditableSegment>()
+    private var hasManualSegmentEdits = false
+    private var pendingSegmentSaveFormat: String? = null
+    private lateinit var addSegmentButton: Button
+    private lateinit var saveSegmentsTxtButton: Button
+    private lateinit var saveSegmentsJsonButton: Button
+    private lateinit var clearSummaryButton: Button
     private var suppressCategoryCallbacks = false
     private lateinit var streamGroup: RadioGroup
+    private var manualStreamSelection: StreamSelection = StreamSelection.BOTH
+    private var suppressStreamCallbacks = false
     private lateinit var streamOptionsLabel: TextView
 
     private var videoSectionCustom = false
     private var audioSectionCustom = false
     private var selectedVideoEncoder: String? = null
     private var selectedAudioEncoder: String? = null
+    private var selectedAudioContainer: String? = null
     private var selectedContainer: String? = null
     private var qualityUsesCrf = false
     private var selectedCrf: Int = 23
@@ -185,6 +212,8 @@ class MainActivity : Activity() {
     private val pickFolderRequestCode = 42
     private val browseFileRequestCode = 43
     private val pickSegmentsRequestCode = 44
+    private val saveSegmentsTxtRequestCode = 45
+    private val saveSegmentsJsonRequestCode = 46
 
     private var localSegmentFileUri: Uri? = null
 
@@ -262,7 +291,8 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         // Show launch crashes even when statusView does not yet exist.
-        Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
+        val previousExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             android.util.Log.e("SponsorCutCRASH", "UNCAUGHT", throwable)
 
             val message = buildString {
@@ -303,6 +333,7 @@ class MainActivity : Activity() {
                 Thread.sleep(1000)
             } catch (_: InterruptedException) {
             }
+            previousExceptionHandler?.uncaughtException(thread, throwable)
         }
 
         try {
@@ -348,13 +379,28 @@ class MainActivity : Activity() {
 
             val savedInputUri = getSharedPreferences(prefsName, MODE_PRIVATE)
                 .getString("sponsorcut_last_input_uri", null)
-                ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                ?.let { runCatching { it.toUri() }.getOrNull() }
 
             if (savedInputUri != null) {
-                // A share intent can recreate this Activity. Restore the media
-                // selection before inspection; inspection alone does not set
-                // pendingUri or the file card.
-                if (pendingUri == null) {
+                // Only restore a previous media selection if Android still has
+                // usable access to it. Otherwise, clear the stale entry and show
+                // the normal pending state.
+                if (!canReadUri(savedInputUri)) {
+                    pendingUri = null
+                    fileCardState = CardState.PENDING
+                    fileCardLabel.text = "No file selected"
+                    browseFileButton.text = "📁 Browse for video file…"
+
+                    getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+                        remove("sponsorcut_last_input_uri")
+                        remove(keyLastFileName)
+                    }
+
+                    updateCards()
+                } else if (pendingUri == null) {
+                    // A share intent can recreate this Activity. Restore the media
+                    // selection before inspection; inspection alone does not set
+                    // pendingUri or the file card.
                     pendingUri = savedInputUri
                     fileCardState = CardState.OK
 
@@ -365,9 +411,8 @@ class MainActivity : Activity() {
 
                     fileCardLabel.text = "📄 $savedFileName"
                     browseFileButton.text = "📁 Change file…"
+                    inspectSelectedUri(savedInputUri)
                 }
-
-                inspectSelectedUri(savedInputUri)
             }
         }
     }
@@ -391,13 +436,38 @@ class MainActivity : Activity() {
                 treeUri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-            getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                .putString(keyOutputFolderUri, treeUri.toString())
-                .apply()
+            getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+                putString(keyOutputFolderUri, treeUri.toString())
+            }
             val path = treeUri.lastPathSegment ?: treeUri.toString()
             setStatus("Output folder set to: $path")
             pickFolderButton.text = "Output: $path"
         }
+        if (
+            (requestCode == saveSegmentsTxtRequestCode ||
+                requestCode == saveSegmentsJsonRequestCode) &&
+            resultCode == RESULT_OK
+        ) {
+            val uri = data?.data ?: return
+            val format = if (requestCode == saveSegmentsJsonRequestCode) "json" else "txt"
+            val content = if (format == "json") {
+                segmentsJsonExport(currentSegments)
+            } else {
+                segmentsTxtExport(currentSegments)
+            }
+
+            try {
+                contentResolver.openOutputStream(uri)?.use { stream ->
+                    stream.write(content.toByteArray())
+                }
+                setStatus("Segments saved:\n$uri")
+            } catch (e: Exception) {
+                setStatus("Failed to save segments: ${e.message}")
+            }
+
+            pendingSegmentSaveFormat = null
+        }
+
         if (requestCode == pickSegmentsRequestCode && resultCode == RESULT_OK) {
             val segmentUri = data?.data ?: return
             try {
@@ -412,6 +482,7 @@ class MainActivity : Activity() {
             localSegmentFileUri = segmentUri
             localSegmentFileName = FileResolver.getDisplayName(this, segmentUri)
                 .ifBlank { segmentUri.lastPathSegment ?: "segments" }
+            clearCompletedRunState()
             localSegments = null
             localSegmentWarnings = emptyList()
             cachedSegments = null
@@ -433,6 +504,7 @@ class MainActivity : Activity() {
             } catch (_: Exception) {}
             pendingUri = fileUri
             fileCardState = CardState.OK
+            clearCompletedRunState()
             val fileName = FileResolver.getDisplayName(this, fileUri).ifBlank { fileUri.lastPathSegment ?: "file" }
             fileCardLabel.text = "📄 $fileName"
             browseFileButton.text = "📁 Change file…"
@@ -588,17 +660,28 @@ class MainActivity : Activity() {
                 val uri = pendingUri
                 if (uri == null) { setStatus("No shared video is pending."); return@setOnClickListener }
 
-                // Local TXT/JSON segments are self-contained: they do not require
-                // or validate a YouTube ID.
-                if (localSegments != null) {
-                    if (localSegments.orEmpty().any { it.endIsOpen }) {
+                // Local TXT/JSON segments and manually created segments are
+                // self-contained: neither requires or validates a YouTube ID.
+                val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
+                val hasManualSegments = segmentationEnabled &&
+                    hasManualSegmentEdits &&
+                    currentSegments.isNotEmpty()
+
+                if (localSegments != null || hasManualSegments) {
+                    if (currentSegments.any { !isSegmentRowValid(it) }) {
+                        setStatus("Fix the invalid segment timestamps before processing.")
+                        return@setOnClickListener
+                    }
+
+                    if (currentSegments.any { it.endIsOpen }) {
                         setStatus(
                             "Load a media file to resolve the \"end\" segment timing."
                         )
                         return@setOnClickListener
                     }
 
-                    startProcessing(uri, "", "local")
+                    val idSource = if (localSegments != null) "local" else "manual"
+                    startProcessing(uri, "", idSource)
                     return@setOnClickListener
                 }
 
@@ -613,7 +696,7 @@ class MainActivity : Activity() {
 
         val savedFolder = getSharedPreferences(prefsName, MODE_PRIVATE).getString(keyOutputFolderUri, null)
         val folderLabel = if (savedFolder != null)
-            "Output: ${Uri.parse(savedFolder).lastPathSegment ?: savedFolder}"
+            "Output: ${savedFolder.toUri().lastPathSegment ?: savedFolder}"
         else
             "Pick output folder (optional)"
         pickFolderButton = Button(this).apply {
@@ -692,6 +775,22 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             addView(statusView, lp)
+
+            clearSummaryButton = Button(context).apply {
+                text = "Clear summary"
+                isEnabled = false
+                alpha = 0.5f
+                visibility = View.GONE
+                setOnClickListener {
+                    clearCompletedRunState()
+                    statusView.text = ""
+                    isEnabled = false
+                    alpha = 0.5f
+                    visibility = View.GONE
+                }
+            }
+            addView(clearSummaryButton, lp)
+
             addView(progressBar, lp)
             addView(cancelButton, lp)
 
@@ -709,6 +808,38 @@ class MainActivity : Activity() {
             }
             addView(segmentListContainer, lp)
 
+            val segmentToolbar = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                visibility = View.GONE
+            }
+            fun toolbarButton(label: String, onClick: () -> Unit): Button {
+                return Button(context).apply {
+                    text = label
+                    gravity = android.view.Gravity.CENTER
+                    setSingleLine(true)
+                    setPadding(0, 0, 0, 0)
+                    setOnClickListener { onClick() }
+                }
+            }
+
+            addSegmentButton = toolbarButton("+ Add segment") {
+                addManualSegment()
+            }
+            saveSegmentsTxtButton = toolbarButton("Save TXT") {
+                beginSaveSegments("txt")
+            }
+            saveSegmentsJsonButton = toolbarButton("Save JSON") {
+                beginSaveSegments("json")
+            }
+            segmentToolbar.addView(addSegmentButton, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            segmentToolbar.addView(saveSegmentsTxtButton, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            segmentToolbar.addView(saveSegmentsJsonButton, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(segmentToolbar, lp)
+            segmentListContainer.tag = segmentToolbar
+
             renderDetectedCategories()
 
             // ── Card 1: YouTube ID ────────────────────────────────────────────
@@ -718,10 +849,9 @@ class MainActivity : Activity() {
                     isChecked = getSharedPreferences(prefsName, MODE_PRIVATE)
                         .getBoolean(keyUseSegmentation, true)
                     setOnCheckedChangeListener { _, checked ->
-                        getSharedPreferences(prefsName, MODE_PRIVATE)
-                            .edit()
-                            .putBoolean(keyUseSegmentation, checked)
-                            .apply()
+                        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+                            putBoolean(keyUseSegmentation, checked)
+                        }
                         updateCards()
                     }
                 }
@@ -830,12 +960,19 @@ class MainActivity : Activity() {
             }
             radioGroup.check(initialId)
             radioGroup.setOnCheckedChangeListener { _, _ ->
-                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                    .putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
-                    .putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
-                    .apply()
+                getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+                    putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
+                    putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
+                }
             }
             addView(radioGroup, lp)
+
+            modeHintView = TextView(context).apply {
+                visibility = View.GONE
+                textSize = 13f
+                setPadding(p, p / 2, p, p / 2)
+            }
+            addView(modeHintView, lp)
 
             // ── Processing options ─────────────────────────────────────────
             val streamLabel = TextView(context).apply {
@@ -870,6 +1007,25 @@ class MainActivity : Activity() {
             streamGroup.addView(radioVideoOnly)
             streamGroup.check(radioKeepBoth.id)
             addView(streamGroup, lp)
+
+            outputConsequenceView = TextView(context).apply {
+                textSize = 12f
+                setTextColor(0xFFCCCCCC.toInt())
+                setPadding(p, p / 2, p, p)
+            }
+            addView(outputConsequenceView, lp)
+
+            streamGroup.setOnCheckedChangeListener { _, _ ->
+                if (suppressStreamCallbacks) return@setOnCheckedChangeListener
+
+                manualStreamSelection = when {
+                    radioAudioOnly.isChecked -> StreamSelection.AUDIO_ONLY
+                    radioVideoOnly.isChecked -> StreamSelection.VIDEO_ONLY
+                    else -> StreamSelection.BOTH
+                }
+
+                updateStreamSelectionAvailability()
+            }
 
             // ── Output format controls ─────────────────────────────────────
             fun makeRow(label: String, control: android.view.View, annotation: TextView? = null): LinearLayout {
@@ -911,6 +1067,7 @@ class MainActivity : Activity() {
             containerSpinner = Spinner(context)
             videoCodecSpinner = Spinner(context)
             audioCodecSpinner = Spinner(context)
+            audioContainerSpinner = Spinner(context)
             qualityModeSpinner = Spinner(context)
             bitratePresetSpinner = Spinner(context)
             presetSpinner = Spinner(context)
@@ -962,15 +1119,9 @@ class MainActivity : Activity() {
             addView(makeRow("Audio", audioSectionSpinner), lp)
             addView(audioInputInfoView, lp)
             addView(makeRow("Audio codec", audioCodecSpinner), lp)
+            addView(makeRow("Audio container", audioContainerSpinner), lp)
             addView(makeRow("Sample rate", audioSampleRateSpinner), lp)
             addView(makeRow("Audio bitrate", audioBitrateInput), lp)
-
-            outputConsequenceView = TextView(context).apply {
-                textSize = 12f
-                setTextColor(0xFFCCCCCC.toInt())
-                setPadding(p, p / 2, p, p)
-            }
-            addView(outputConsequenceView, lp)
 
                 fun resolvedVideoChoiceLabel(mode: ExecutionMode): String {
                     val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.videoCodec)
@@ -1105,6 +1256,51 @@ class MainActivity : Activity() {
                         ?.let { "${it.label}${if (it.available) "" else " — unavailable"}" }
                 } else null
                 setAdapterKeepingSelection(audioCodecSpinner, audioValues, preferredAudio)
+
+                val effectiveAudioName = selectedAudioEncoder
+                    ?: uiAudioCatalog.firstOrNull {
+                        it.codecFamily == EncoderCatalog.familyForInputCodec(
+                            pendingVideoInfo?.audioCodec
+                        )
+                    }?.name
+
+                val effectiveAudioFamily = effectiveAudioName?.let {
+                    EncoderCatalog.find(encoderCatalog, it)?.codecFamily
+                } ?: EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
+
+
+                val inputAudioCodecForContainer =
+                    pendingVideoInfo?.audioCodec?.lowercase().orEmpty()
+
+                val resolvedAudioContainerLabel = when {
+                    inputAudioCodecForContainer.contains("aac") -> "M4A - input"
+                    inputAudioCodecForContainer.contains("mp3") -> "MP3 - input"
+                    inputAudioCodecForContainer.contains("opus") -> "OPUS - input"
+                    inputAudioCodecForContainer.contains("vorbis") -> "OGG - input"
+                    else -> "M4A - fallback"
+                }
+
+                val resolvedAudioContainerBase =
+                    resolvedAudioContainerLabel.substringBefore(" - ")
+
+                val audioContainerOptions = when (effectiveAudioFamily) {
+                    "AAC" -> listOf("M4A", "ADTS")
+                    "MP3" -> listOf("MP3")
+                    "Opus" -> listOf("OPUS", "OGG")
+                    "Vorbis" -> listOf("OGG")
+                    else -> listOf("M4A", "MKV")
+                }
+
+                val audioContainerValues =
+                    listOf(resolvedAudioContainerLabel) + audioContainerOptions.filter {
+                        it != resolvedAudioContainerBase
+                    }
+
+                setAdapterKeepingSelection(
+                    audioContainerSpinner,
+                    audioContainerValues,
+                    selectedAudioContainer?.replaceFirstChar { it.uppercase() }
+                )
 
                 val effectiveVideoEncoder = effectiveVideoEncoderName(mode)
 
@@ -1426,6 +1622,28 @@ class MainActivity : Activity() {
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
+            audioContainerSpinner.onItemSelectedListener =
+                object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+
+                        selectedAudioContainer = if (position == 0) {
+                            null
+                        } else {
+                            audioContainerSpinner.selectedItem
+                                ?.toString()
+                                ?.substringBefore(" (")
+                                ?.lowercase()
+                        }
+
+                        refreshOutputOptions()
+                    }
+
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+
             containerSpinner.onItemSelectedListener =
                 object : AdapterView.OnItemSelectedListener {
                     override fun onItemSelected(
@@ -1557,62 +1775,46 @@ class MainActivity : Activity() {
             refreshOutputOptions()
 
             radioGroup.setOnCheckedChangeListener { _, _ ->
-                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                    .putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
-                    .putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
-                    .apply()
+                getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+                    putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
+                    putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
+                }
                 refreshOutputOptions()
             }
 
             // ── Merge files placeholder ────────────────────────────────────
-            mergeCard = makeCard(p, 0x44666666).apply {
-                val title = TextView(context).apply {
-                    text = "🔗 Merge files"
-                    textSize = 15f
-                }
-                val subtitle = TextView(context).apply {
-                    text = "Combine multiple media files into one output. Coming soon."
-                    textSize = 12f
-                    alpha = 0.75f
-                }
-                val button = Button(context).apply {
-                    text = "Choose files"
-                    isEnabled = false
-                    alpha = 0.45f
-                }
-                addView(title)
-                addView(subtitle)
-                addView(button)
-            }
-            addView(mergeCard, lp)
+//            mergeCard = makeCard(p, 0x44666666).apply {
+//                val title = TextView(context).apply {
+//                    text = "🔗 Merge files"
+//                    textSize = 15f
+//                }
+//                val subtitle = TextView(context).apply {
+//                    text = "Combine multiple media files into one output. Coming soon."
+//                    textSize = 12f
+//                    alpha = 0.75f
+//                }
+//                val button = Button(context).apply {
+//                    text = "Choose files"
+//                    isEnabled = false
+//                    alpha = 0.45f
+//                }
+//                addView(title)
+//                addView(subtitle)
+//                addView(button)
+//            }
+//            addView(mergeCard, lp)
 
             radioGroup.setOnCheckedChangeListener { _, _ ->
-                getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-                    .putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
-                    .putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
-                    .apply()
+                getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+                    putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
+                    putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
+                }
                 refreshOutputOptions()
             }
 
-            modeHintView = TextView(context).apply {
-                visibility = View.GONE
-                textSize = 13f
-                setPadding(p, p / 2, p, p / 2)
-            }
-            addView(modeHintView, lp)
-
-            // Signature
-            // val sig = TextView(context).apply {
-            //     text = "By: Guy Steiff\nAbout: https://guysteiff.vercel.app/"
-            //     textSize = 12f
-            //     setPadding(p, p * 2, p, p)
-            //     alpha = 0.5f
-            // }
-            // addView(sig, lp)
-
             // Signature
             val sig = TextView(context).apply {
-                val url = "https://guysteiff.vercel.app/"
+                val url = "https://megacut.onrender.com/"
                 val textContent = "By: Guy Steiff\nAbout: $url"
 
                 val spannable = SpannableString(textContent)
@@ -1642,8 +1844,8 @@ class MainActivity : Activity() {
                 text = "📋 Show diagnostic log"
                 visibility = View.GONE
                 setOnClickListener {
-                    val showing = logView.visibility == View.VISIBLE
-                    logView.visibility = if (showing) View.GONE else View.VISIBLE
+                    val showing = logView.isVisible
+                    logView.isVisible = !showing
                     text = if (showing) "📋 Show diagnostic log" else "📋 Hide diagnostic log"
                     if (!showing) logView.text = DiagLog.get().ifBlank { "(log is empty)" }
                 }
@@ -1654,6 +1856,9 @@ class MainActivity : Activity() {
                 text = "💾 Save diagnostic log"
                 visibility = View.GONE
                 setOnClickListener {
+                    if (ProcessingService.isProcessingActive) {
+                        return@setOnClickListener
+                    }
                     saveDiagnosticLog()
                 }
             }
@@ -1699,7 +1904,7 @@ class MainActivity : Activity() {
                     text = "☕ Buy Me a Coffee"
                     setOnClickListener {
                         val i = android.content.Intent(android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse("https://buymeacoffee.com/steiff"))
+                            "https://buymeacoffee.com/steiff".toUri())
                         startActivity(i)
                     }
                 }
@@ -1905,6 +2110,7 @@ class MainActivity : Activity() {
             videoCodec = selectedVideoEncoder,
             audioCodec = selectedAudioEncoder,
             container = selectedContainer,
+            audioContainer = if (radioAudioOnly.isChecked) selectedAudioContainer else null,
             qualityMode = if (supportsCrf && qualityUsesCrf) {
                 QualityMode.CRF
             } else {
@@ -1926,9 +2132,9 @@ class MainActivity : Activity() {
     }
 
     private fun inspectSelectedUri(uri: Uri) {
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .putString("sponsorcut_last_input_uri", uri.toString())
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            putString("sponsorcut_last_input_uri", uri.toString())
+        }
 
         Thread {
             val info = try {
@@ -2130,11 +2336,32 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun localSegmentsJson(): String? {
-        val segments = localSegments ?: return null
+    private fun segmentSourceLabel(videoId: String): String {
+        if (hasManualSegmentEdits) return "ID: Manual"
+
+        return when {
+            localSegmentFileUri != null -> {
+                val name = localSegmentFileName ?: "segment file"
+                "Segmentation file TXT/JSON: $name (${localSegmentFileUri})"
+            }
+            videoId.isNotBlank() -> "YouTube: https://youtu.be/$videoId"
+            else -> "ID: Manual"
+        }
+    }
+
+    private fun localSegmentsJson(
+        segments: List<SponsorSegmentInfo>? = null
+    ): String? {
+        // The visible, editable segment list is the authoritative processing
+        // payload. Callers may pass an already-selected subset; otherwise use
+        // the full current editable list, falling back to a parsed local file.
+        val effectiveSegments: List<SponsorSegmentInfo> = segments
+            ?: currentSegments.ifEmpty { localSegments.orEmpty() }
+
+        if (effectiveSegments.isEmpty()) return null
 
         val array = org.json.JSONArray()
-        for (segment in segments) {
+        for (segment in effectiveSegments) {
             val obj = org.json.JSONObject()
             obj.put("category", segment.category)
             obj.put("start", segment.start)
@@ -2212,9 +2439,10 @@ class MainActivity : Activity() {
             setStatus("Direct intent missing 'uri' extra.")
             return
         }
-        val uri = Uri.parse(uriString)
+        val uri = uriString.toUri()
         pendingUri = uri
         fileCardState = CardState.OK
+        clearCompletedRunState()
         runOnUiThread {
             fileCardLabel.text = "📄 ${uri.lastPathSegment ?: uriString}"
             browseFileButton.text = "📁 Change file…"
@@ -2233,12 +2461,20 @@ class MainActivity : Activity() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun Intent.getUriExtra(name: String): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(name, Uri::class.java)
+        } else {
+            getParcelableExtra(name)
+        }
+
     private fun handleShareIntent(intent: Intent) {
         if (rejectIfBusy()) return
         Log.d(tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
             "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
-            "EXTRA_STREAM=${intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)}")
-        val rawUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            "EXTRA_STREAM=${intent.getUriExtra(Intent.EXTRA_STREAM)}")
+        val rawUri = intent.getUriExtra(Intent.EXTRA_STREAM)
             ?: intent.clipData?.getItemAt(0)?.uri
 
         // Discard share-sheet image previews (e.g. android_share_sheet_image_preview.jpg)
@@ -2289,6 +2525,7 @@ class MainActivity : Activity() {
 
         pendingUri = uri
         fileCardState = CardState.OK
+        clearCompletedRunState()
         inspectSelectedUri(uri)
         val sharedFileName = FileResolver.getDisplayName(this, uri).ifBlank { uri.lastPathSegment ?: "file" }
         runOnUiThread {
@@ -2343,6 +2580,7 @@ class MainActivity : Activity() {
 
         localSegmentFileUri = uri
         localSegmentFileName = fileName
+        clearCompletedRunState()
         localSegments = null
         localSegmentWarnings = emptyList()
         cachedSegments = null
@@ -2385,6 +2623,7 @@ class MainActivity : Activity() {
 
         cachedSegments = null
         currentSegments = emptyList()
+        hasManualSegmentEdits = false
         selectedSegmentIndexes.clear()
         segmentCheckboxes.clear()
         segmentCategoryContainer.removeAllViews()
@@ -2401,10 +2640,10 @@ class MainActivity : Activity() {
         cachedAuthor = null
         idCardState = CardState.PENDING
 
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .remove(keyLastVideoId)
-            .remove(keyLastVideoIdTs)
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            remove(keyLastVideoId)
+            remove(keyLastVideoIdTs)
+        }
     }
 
     private fun isAudioOnlyContainer(uri: Uri?): Boolean {
@@ -2583,30 +2822,63 @@ class MainActivity : Activity() {
             row(audioSectionSpinner),
             audioInputInfoView,
             row(audioCodecSpinner),
-            row(audioSampleRateSpinner)
+            row(audioContainerSpinner),
+            row(audioSampleRateSpinner),
+            row(audioBitrateInput)
         )
 
         val streamChoiceForced = audioOnly || videoOnly
-        val streamControlsEnabled = !processingActive && !streamChoiceForced
+
+        // Until ffprobe has inspected the media, do not let the user select a
+        // stream mode. Content URIs often hide the real file extension, so an
+        // audio-only file cannot be identified reliably before inspection.
+        val inspectionPending = pendingVideoInfo == null && !audioOnly
+        val streamControlsEnabled =
+            !processingActive && !streamChoiceForced && !inspectionPending
 
         radioKeepBoth.isEnabled = streamControlsEnabled
         radioAudioOnly.isEnabled = streamControlsEnabled
         radioVideoOnly.isEnabled = streamControlsEnabled
 
+        suppressStreamCallbacks = true
+
         if (audioOnly) {
             streamOptionsLabel.text = "Output streams: Audio only — no usable video stream"
+            manualStreamSelection = StreamSelection.AUDIO_ONLY
             streamGroup.check(radioAudioOnly.id)
         } else if (videoOnly) {
             streamOptionsLabel.text = "Output streams: Video only — no usable audio stream"
+            manualStreamSelection = StreamSelection.VIDEO_ONLY
             streamGroup.check(radioVideoOnly.id)
+        } else if (inspectionPending) {
+            streamOptionsLabel.text = "Output streams: detecting…"
+
+            when (manualStreamSelection) {
+                StreamSelection.AUDIO_ONLY -> streamGroup.check(radioAudioOnly.id)
+                StreamSelection.VIDEO_ONLY -> streamGroup.check(radioVideoOnly.id)
+                StreamSelection.BOTH -> streamGroup.check(radioKeepBoth.id)
+            }
         } else {
             streamOptionsLabel.text = "Output streams: Video and audio"
-            streamGroup.check(radioKeepBoth.id)
+
+            when (manualStreamSelection) {
+                StreamSelection.AUDIO_ONLY -> streamGroup.check(radioAudioOnly.id)
+                StreamSelection.VIDEO_ONLY -> streamGroup.check(radioVideoOnly.id)
+                StreamSelection.BOTH -> streamGroup.check(radioKeepBoth.id)
+            }
         }
+
+        suppressStreamCallbacks = false
 
         videoViews.forEach { it.visibility = View.VISIBLE }
 
-        if (audioOnly) {
+        val selectedAudioOnly = audioOnly ||
+            (!videoOnly && manualStreamSelection == StreamSelection.AUDIO_ONLY)
+
+        val selectedVideoOnly = videoOnly ||
+            (!audioOnly && manualStreamSelection == StreamSelection.VIDEO_ONLY)
+
+        if (selectedAudioOnly) {
             audioViews.forEach { videoParent.removeView(it) }
 
             var audioInsertIndex = videoParent.indexOfChild(row(videoSectionSpinner))
@@ -2633,8 +2905,19 @@ class MainActivity : Activity() {
                 }
             }
 
-            setFormState(videoViews, hasVideo && !processingActive)
-            setFormState(audioViews, hasAudio && !processingActive)
+            if (selectedVideoOnly) {
+                setFormState(videoViews, hasVideo && !processingActive)
+                setFormState(audioViews, false)
+            } else {
+                setFormState(videoViews, hasVideo && !processingActive)
+                setFormState(audioViews, hasAudio && !processingActive)
+            }
+
+            // The Audio container is meaningful only when the output is audio-only.
+            // It must remain disabled for Keep-both and Video-only jobs.
+            val audioContainerEnabled = selectedAudioOnly && !processingActive
+            audioContainerSpinner.isEnabled = audioContainerEnabled
+            audioContainerSpinner.alpha = if (audioContainerEnabled) 1f else 0.35f
         }
     }
 
@@ -2672,7 +2955,11 @@ class MainActivity : Activity() {
 
         clearCompletedRunState()
         setProcessingUi(active = true)
+        DiagLog.clear()
+        logButton.text = "📋 Show diagnostic log"
         logButton.visibility = View.GONE
+        saveLogButton.visibility = View.GONE
+        logView.text = ""
         logView.visibility = View.GONE
         val videoHeader = buildString {
             if (cachedTitle != null) {
@@ -2712,19 +2999,44 @@ class MainActivity : Activity() {
             putExtra(ProcessingService.EXTRA_HW_ACCURATE, radioHwAccurate.isChecked)
             putExtra(ProcessingService.EXTRA_REMOVE_SEGMENTS, removeSegments)
             putExtra(ProcessingService.EXTRA_STREAM_SELECTION, streamSelection.name)
+            putExtra(
+                ProcessingService.EXTRA_INPUT_SUMMARY,
+                pendingVideoInfo?.summaryLine ?: "unknown"
+            )
+            putExtra(
+                ProcessingService.EXTRA_SEGMENT_SOURCE_LABEL,
+                segmentSourceLabel(videoId)
+            )
 
             if (removeSegments) {
-                if (localSegments != null) {
+                // Serialize exactly the checked visible segments. The service
+                // processes this payload directly, avoiding any mismatch
+                // between UI indexes, category filtering, and source lists.
+                val selectedVisibleSegments = currentSegments
+                    .filterIndexed { index, _ -> index in selectedSegmentIndexes }
+
+                if (selectedVisibleSegments.isNotEmpty()) {
+                    putExtra(
+                        ProcessingService.EXTRA_LOCAL_SEGMENTS_JSON,
+                        localSegmentsJson(selectedVisibleSegments)
+                    )
+                } else if (localSegments != null) {
                     putExtra(
                         ProcessingService.EXTRA_LOCAL_SEGMENTS_JSON,
                         localSegmentsJson()
                     )
                 }
 
-                putExtra(
-                    ProcessingService.EXTRA_SELECTED_SEGMENT_INDEXES,
-                    selectedSegmentIndexes.toIntArray()
-                )
+                // Checkbox indexes are meaningful only for the SponsorBlock
+                // branch. The local/manual JSON payload already contains exactly
+                // the selected visible segments, so sending indexes too would
+                // apply selection twice.
+                if (selectedVisibleSegments.isEmpty() && localSegments == null) {
+                    putExtra(
+                        ProcessingService.EXTRA_SELECTED_SEGMENT_INDEXES,
+                        selectedSegmentIndexes.toIntArray()
+                    )
+                }
             }
             putExtra(
                 ProcessingService.EXTRA_OUTPUT_PREFERENCES_JSON,
@@ -2751,6 +3063,7 @@ class MainActivity : Activity() {
                 processWithoutSegmentsCheckBox, audioBitrateInput,
                 videoSectionSpinner, audioSectionSpinner,
                 containerSpinner, videoCodecSpinner, audioCodecSpinner,
+                audioContainerSpinner,
                 qualityModeSpinner, crfSpinner, cqSpinner,
                 bitrateInput, bitratePresetSpinner, presetSpinner,
                 frameRateSpinner, resolutionSpinner, audioSampleRateSpinner) +
@@ -2800,17 +3113,17 @@ class MainActivity : Activity() {
     }
 
     private fun saveId(videoId: String) {
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .putString(keyLastVideoId, videoId)
-            .putLong(keyLastVideoIdTs, System.currentTimeMillis())
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            putString(keyLastVideoId, videoId)
+            putLong(keyLastVideoIdTs, System.currentTimeMillis())
+        }
     }
 
     private fun saveFileUri(uri: Uri, displayName: String) {
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .putString(keyLastFileUri, uri.toString())
-            .putString(keyLastFileName, displayName)
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            putString(keyLastFileUri, uri.toString())
+            putString(keyLastFileName, displayName)
+        }
     }
 
     /** Restores last known file URI from prefs if pendingUri is still null. Shows it with a note. */
@@ -2819,9 +3132,12 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
         val uriString = prefs.getString(keyLastFileUri, null) ?: return
         val fileName = prefs.getString(keyLastFileName, null) ?: "previous file"
-        val uri = Uri.parse(uriString)
+        val uri = uriString.toUri()
         if (!canReadUri(uri)) {
-            prefs.edit().remove(keyLastFileUri).remove(keyLastFileName).apply()
+            prefs.edit {
+                remove(keyLastFileUri)
+                remove(keyLastFileName)
+            }
             return
         }
         pendingUri = uri
@@ -2892,6 +3208,7 @@ class MainActivity : Activity() {
         if (videoId.length != 11) return
         if (!force && videoId == lastFetchedId) return
         lastFetchedId = videoId
+        clearCompletedRunState()
 
         // A local TXT/JSON source remains active until SponsorBlock returns a
         // successful, non-empty segment list for the entered ID.
@@ -3031,10 +3348,17 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun renderSegmentList(segments: List<SponsorSegmentInfo>) {
+    private fun renderSegmentList(
+        segments: List<SponsorSegmentInfo>,
+        preserveSelection: Boolean = false
+    ) {
+        val previousSelection =
+            if (preserveSelection) selectedSegmentIndexes.toSet() else null
+
         segmentListContainer.removeAllViews()
         segmentCheckboxes.clear()
         currentSegments = segments
+        invalidSegmentIndexes.clear()
 
         if (segments.isEmpty()) {
             selectedSegmentIndexes.clear()
@@ -3049,40 +3373,586 @@ class MainActivity : Activity() {
         segmentListContainer.addView(title)
 
         selectedSegmentIndexes.clear()
-        selectedSegmentIndexes.addAll(segments.indices)
+        if (preserveSelection && previousSelection != null) {
+            selectedSegmentIndexes.addAll(
+                previousSelection.filter { it in segments.indices }
+            )
+        } else {
+            selectedSegmentIndexes.addAll(segments.indices)
+        }
+
+        val lastIndex = segments.lastIndex
 
         segments.forEachIndexed { index, segment ->
-            val checkbox = CheckBox(this).apply {
-                text =
-                    "[${segment.category}] " +
-                        "${formatSegmentTimestamp(segment.start)} - " +
-                        (if (segment.endIsOpen) {
-                            "end"
-                        } else {
-                            formatSegmentTimestamp(segment.end)
-                        }) + " " +
-                        (if (segment.endIsOpen) {
-                            "(duration unresolved)"
-                        } else {
-                          "(~${(segment.end - segment.start).toInt()})"
-//                             "(~${formatSegmentTimestamp(segment.end - segment.start)})"
-                        })
-                isChecked = true
-                setOnCheckedChangeListener { _, isChecked ->
-                    if (isChecked) {
-                        selectedSegmentIndexes.add(index)
-                    } else {
-                        selectedSegmentIndexes.remove(index)
-                    }
+            segmentListContainer.addView(
+                buildCompactSegmentRow(index, segment, index == lastIndex)
+            )
+        }
+    }
 
-                    suppressCategoryCallbacks = true
-                    syncCategoryCheckbox(segment.category)
-                    suppressCategoryCallbacks = false
+    private fun updatedIndicesForValidation(): Boolean {
+        return true
+    }
+
+    private fun isSegmentRowValid(segment: SponsorSegmentInfo): Boolean {
+        if (segment.endIsOpen) {
+            val duration = pendingVideoInfo?.durationSec ?: return false
+            return segment.start < duration
+        }
+
+        if (segment.end <= segment.start) return false
+
+        val duration = pendingVideoInfo?.durationSec
+        if (duration != null && segment.end > duration) return false
+
+        return true
+    }
+
+    private fun circularControl(label: String, onClick: () -> Unit): TextView {
+        val size = (26 * resources.displayMetrics.density).toInt()
+        return TextView(this).apply {
+            text = label
+            textSize = 14f
+            gravity = android.view.Gravity.CENTER
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                setMargins(2, 0, 2, 0)
+            }
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(0xFF333333.toInt())
+                setStroke(1, 0x66FFFFFF)
+            }
+            setTextColor(0xFFFFFFFF.toInt())
+        }
+    }
+
+    private fun buildCompactSegmentRow(
+        index: Int,
+        segment: SponsorSegmentInfo,
+        isLastRow: Boolean
+    ): android.view.View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, 1, 0, 1)
+        }
+
+        row.addView(
+            circularControl("−") {
+                val updated = currentSegments.toMutableList()
+                if (index in updated.indices) {
+                    hasManualSegmentEdits = true
+                    // Remove the deleted index and shift later selections so
+                    // the user's enabled segments remain enabled.
+                    val remappedSelection = selectedSegmentIndexes
+                        .filter { it != index }
+                        .map { if (it > index) it - 1 else it }
+                        .toSet()
+
+                    selectedSegmentIndexes.clear()
+                    selectedSegmentIndexes.addAll(remappedSelection)
+
+                    updated.removeAt(index)
+                    renderSegmentList(updated, preserveSelection = true)
+                    updateCards()
                 }
             }
-            segmentCheckboxes[index] = checkbox
-            segmentListContainer.addView(checkbox)
+        )
+
+        val checkbox = CheckBox(this).apply {
+            isChecked = index in selectedSegmentIndexes
+            setOnCheckedChangeListener { _, checked ->
+                if (checked) {
+                    selectedSegmentIndexes.add(index)
+                } else {
+                    selectedSegmentIndexes.remove(index)
+                }
+
+                suppressCategoryCallbacks = true
+                syncCategoryCheckbox(segment.category)
+                suppressCategoryCallbacks = false
+            }
         }
+        segmentCheckboxes[index] = checkbox
+        row.addView(checkbox)
+
+        if (segment.category == "manual") {
+            val categoryEditor = android.widget.EditText(this).apply {
+                hint = "Category"
+                setText(segment.category)
+                textSize = 12f
+                setSingleLine(true)
+                setPadding(4, 1, 4, 1)
+                setBackgroundColor(0xFF222222.toInt())
+                setTextColor(0xFFFFFFFF.toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    0.8f
+                )
+                setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val newCategory = text?.toString().orEmpty().trim()
+                            .ifBlank { "manual" }
+
+                        val updated = currentSegments.toMutableList()
+                        if (index in updated.indices && newCategory != segment.category) {
+                            updated[index] = updated[index].copy(category = newCategory)
+                            currentSegments = updated
+                            hasManualSegmentEdits = true
+
+                            post {
+                                renderSegmentList(currentSegments, preserveSelection = true)
+                            }
+                        }
+                    }
+                }
+            }
+            row.addView(categoryEditor)
+        } else {
+            row.addView(TextView(this).apply {
+                text = "[${segment.category}]"
+                textSize = 12f
+            })
+        }
+
+        val startView = timestampTextView(segment.start)
+        startView.setOnClickListener {
+            replaceWithTimestampEditor(row, startView, index, true)
+        }
+        row.addView(startView)
+
+        row.addView(TextView(this).apply {
+            text = "-"
+            textSize = 12f
+            setPadding(2, 0, 2, 0)
+        })
+
+        if (segment.endIsOpen) {
+            row.addView(TextView(this).apply {
+                text = "end"
+                textSize = 12f
+            })
+        } else {
+            val endView = timestampTextView(segment.end)
+            endView.setOnClickListener {
+                replaceWithTimestampEditor(row, endView, index, false)
+            }
+            row.addView(endView)
+        }
+
+        if (isLastRow) {
+            val endToken = CheckBox(this).apply {
+                text = "end"
+                textSize = 10f
+                isChecked = segment.endIsOpen
+                isEnabled = pendingVideoInfo?.durationSec != null
+                alpha = if (isEnabled) 1f else 0.4f
+                setOnCheckedChangeListener { _, checked ->
+                    val updated = currentSegments.toMutableList()
+                    if (index in updated.indices) {
+                        updated[index] = updated[index].copy(endIsOpen = checked)
+                        hasManualSegmentEdits = true
+                        renderSegmentList(updated, preserveSelection = true)
+                    }
+                }
+            }
+            row.addView(endToken)
+
+            row.addView(
+                circularControl("+") {
+                    addManualSegment()
+                }
+            )
+        }
+
+        // Red means the start value conflicts with an already-entered end time.
+        // An incomplete manual segment (end still 00:00:00.000) must not make
+        // a correctly entered start time look invalid.
+        val startConflictsWithEnd =
+            !segment.endIsOpen &&
+                segment.end > 0.0 &&
+                segment.end <= segment.start
+
+        val startInvalid = index in invalidSegmentIndexes || startConflictsWithEnd
+
+        if (startInvalid) {
+            startView.setTextColor(0xFFFF6666.toInt())
+        } else {
+            startView.setTextColor(0xFFFFFFFF.toInt())
+        }
+
+        return row
+    }
+
+    private fun timestampTextView(seconds: Double): TextView {
+        return TextView(this).apply {
+            text = formatSegmentTimestamp(seconds)
+            textSize = 12f
+            setPadding(4, 1, 4, 1)
+            setBackgroundColor(0xFF222222.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+        }
+    }
+
+    private fun replaceWithTimestampEditor(
+        row: LinearLayout,
+        timestampView: TextView,
+        index: Int,
+        editingStart: Boolean
+    ) {
+        val segment = currentSegments.getOrNull(index) ?: return
+        val initialSeconds = if (editingStart) segment.start else segment.end
+
+        // Exactly nine digits are the editable state. ":" and "." are display
+        // separators only and can never be deleted.
+        val digits = StringBuilder(maskedDigitsFromSeconds(initialSeconds))
+        var suppressMaskUpdate = false
+
+        val editor = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            textSize = 12f
+            setSingleLine(true)
+            setPadding(4, 1, 4, 1)
+            setBackgroundColor(0xFF333333.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            setText(formatMaskedDigits(digits.toString()))
+        }
+
+        val maskWatcher = object : android.text.TextWatcher {
+            private var oldText = ""
+            private var changeStart = 0
+            private var removedCount = 0
+            private var addedCount = 0
+
+            override fun beforeTextChanged(
+                text: CharSequence?, start: Int, count: Int, after: Int
+            ) {
+                oldText = text?.toString().orEmpty()
+                changeStart = start
+                removedCount = count
+                addedCount = after
+            }
+
+            override fun onTextChanged(
+                text: CharSequence?, start: Int, before: Int, count: Int
+            ) {}
+
+            override fun afterTextChanged(editable: android.text.Editable?) {
+                if (suppressMaskUpdate) return
+                val editable = editable ?: return
+
+                var targetDigitIndex: Int
+
+                if (removedCount == 1 && addedCount == 0) {
+                    // Backspace: replace one digit with zero. Never delete a
+                    // separator or change the template length.
+                    val deletedChar = oldText.getOrNull(changeStart)
+                    val digitsBefore = oldText
+                        .substring(0, changeStart)
+                        .count { it.isDigit() }
+
+                    val digitIndex = if (deletedChar?.isDigit() == true) {
+                        digitsBefore
+                    } else {
+                        digitsBefore - 1
+                    }
+
+                    if (digitIndex in digits.indices) {
+                        digits[digitIndex] = '0'
+                    }
+
+                    targetDigitIndex = digitIndex.coerceIn(0, digits.length - 1)
+                } else {
+                    // Typing overwrites the digit at the cursor, then advances.
+                    // This makes 000515 become 00:05:15.000.
+                    val digitsBefore = oldText
+                        .substring(0, changeStart)
+                        .count { it.isDigit() }
+
+                    val insertedEnd = (changeStart + addedCount)
+                        .coerceAtMost(editable.length)
+
+                    val insertedDigits = editable
+                        .toString()
+                        .getOrNull(changeStart)
+                        ?.let {
+                            editable.toString().substring(changeStart, insertedEnd)
+                        }
+                        .orEmpty()
+                        .filter { it.isDigit() }
+
+                    var digitIndex = digitsBefore
+                    for (digit in insertedDigits) {
+                        if (digitIndex > digits.lastIndex) break
+                        digits[digitIndex] = digit
+                        digitIndex++
+                    }
+
+                    targetDigitIndex = digitIndex.coerceIn(0, digits.length)
+                }
+
+                val formatted = formatMaskedDigits(digits.toString())
+
+                // Avoid re-entrant TextWatcher updates. Remove, replace, then
+                // reattach before moving the cursor.
+                suppressMaskUpdate = true
+                editor.removeTextChangedListener(this)
+                editor.setText(formatted)
+                editor.addTextChangedListener(this)
+                suppressMaskUpdate = false
+
+                val cursorPosition = if (targetDigitIndex >= digits.length) {
+                    formatted.length
+                } else {
+                    digitPosition(formatted, targetDigitIndex)
+                }
+
+                editor.setSelection(cursorPosition.coerceIn(0, formatted.length))
+            }
+
+            fun digitPosition(formatted: String, digitIndex: Int): Int {
+                var seen = 0
+                for (position in formatted.indices) {
+                    if (formatted[position].isDigit()) {
+                        if (seen == digitIndex) return position
+                        seen++
+                    }
+                }
+                return formatted.length
+            }
+        }
+
+        editor.addTextChangedListener(maskWatcher)
+
+        editor.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                editor.clearFocus()
+                true
+            } else {
+                false
+            }
+        }
+
+        editor.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                val value = maskedFieldValue(editor)
+                val isValid = value != null
+
+                if (index < currentSegments.size) {
+                    if (isValid) {
+                        invalidSegmentIndexes.remove(index)
+
+                        val updated = currentSegments.toMutableList()
+                        updated[index] = if (editingStart) {
+                            updated[index].copy(start = value)
+                        } else {
+                            updated[index].copy(end = value, endIsOpen = false)
+                        }
+                        currentSegments = updated
+                        hasManualSegmentEdits = true
+                    } else {
+                        invalidSegmentIndexes.add(index)
+                    }
+                }
+
+                editor.post {
+                    renderSegmentList(currentSegments, preserveSelection = true)
+                    updateCards()
+                }
+            }
+        }
+
+        val editorIndex = row.indexOfChild(timestampView)
+        row.removeView(timestampView)
+        row.addView(editor, editorIndex)
+
+        editor.requestFocus()
+        editor.setSelection(0)
+
+        val imm = getSystemService(INPUT_METHOD_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+        imm.showSoftInput(editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun cursorPositionForDigitCount(
+        formatted: String,
+        digitCount: Int
+    ): Int {
+        if (digitCount <= 0) return 0
+
+        var seen = 0
+        for (i in formatted.indices) {
+            if (formatted[i].isDigit()) {
+                seen++
+                if (seen == digitCount) {
+                    return i + 1
+                }
+            }
+        }
+
+        return formatted.length
+    }
+
+    private fun maskedDigitsFromSeconds(seconds: Double): String {
+        val totalMillis = (seconds * 1000).toLong()
+        val hh = totalMillis / 3600000
+        val mm = (totalMillis % 3600000) / 60000
+        val ss = (totalMillis % 60000) / 1000
+        val mmm = totalMillis % 1000
+
+        return String.format("%02d%02d%02d%03d", hh, mm, ss, mmm)
+    }
+
+    private fun formatMaskedDigits(digits: String): String {
+        val d = digits.take(9)
+        val parts = mutableListOf<String>()
+
+        if (d.isNotEmpty()) parts += d.take(2)
+        if (d.length > 2) parts += d.substring(2, 4)
+        if (d.length > 4) parts += d.substring(4, 6)
+        if (d.length > 6) parts += d.substring(6)
+
+        val timePart = parts.take(3).joinToString(":")
+        val millisPart = if (d.length > 6) parts.last() else ""
+
+        return if (millisPart.isEmpty()) timePart else "$timePart.$millisPart"
+    }
+
+    private fun maskedFieldValue(field: android.widget.EditText): Double? {
+        val digits = field.text?.toString().orEmpty().filter { it.isDigit() }
+        if (digits.length != 9) return null
+
+        val hh = digits.substring(0, 2).toLong()
+        val mm = digits.substring(2, 4).toLong()
+        val ss = digits.substring(4, 6).toLong()
+        val mmm = digits.substring(6, 9).toLong()
+
+        if (mm > 59 || ss > 59 || mmm > 999) return null
+
+        return hh * 3600.0 + mm * 60.0 + ss + mmm / 1000.0
+    }
+
+    private fun addManualSegment() {
+        hasManualSegmentEdits = true
+        val updated = currentSegments.toMutableList()
+        updated.add(
+            SponsorSegmentInfo(
+                category = "manual",
+                start = 0.0,
+                end = 0.0
+            )
+        )
+        renderSegmentList(updated, preserveSelection = true)
+        updateCards()
+    }
+
+    private fun beginSaveSegments(format: String) {
+        val segments = currentSegments
+        if (segments.isEmpty()) {
+            toast("No segments to save.")
+            return
+        }
+
+        val baseName = pendingUri?.let { uri ->
+            runCatching { FileResolver.getDisplayName(this, uri) }.getOrNull()
+        }?.substringBeforeLast('.').takeUnless { it.isNullOrBlank() } ?: "output"
+
+        val fileName = "$baseName-segments.$format"
+        val mime = if (format == "json") "application/json" else "text/plain"
+        val content = if (format == "json") {
+            segmentsJsonExport(segments)
+        } else {
+            segmentsTxtExport(segments)
+        }
+
+        val folderUri = getSharedPreferences(prefsName, MODE_PRIVATE)
+            .getString(keyOutputFolderUri, null)
+            ?.let { runCatching { it.toUri() }.getOrNull() }
+
+        if (folderUri != null) {
+            try {
+                val documentUri = android.provider.DocumentsContract.createDocument(
+                    contentResolver,
+                    folderUri,
+                    mime,
+                    fileName
+                )
+
+                if (documentUri != null) {
+                    contentResolver.openOutputStream(documentUri)?.use { stream ->
+                        stream.write(content.toByteArray())
+                    }
+
+                    setStatus("Segments saved:\n$documentUri")
+                    return
+                }
+            } catch (e: Exception) {
+                DiagLog.append("SegmentExport", "Output-folder save failed: ${e.message}")
+            }
+        }
+
+        pendingSegmentSaveFormat = format
+        val request = if (format == "json") {
+            saveSegmentsJsonRequestCode
+        } else {
+            saveSegmentsTxtRequestCode
+        }
+
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = mime
+            putExtra(Intent.EXTRA_TITLE, fileName)
+        }
+
+        startActivityForResult(intent, request)
+    }
+
+    private fun formatSegmentExportTimestamp(seconds: Double): String {
+        val totalMs = (seconds * 1000.0).toLong().coerceAtLeast(0L)
+        val hours = totalMs / 3_600_000
+        val minutes = (totalMs % 3_600_000) / 60_000
+        val secs = (totalMs % 60_000) / 1000
+        val millis = totalMs % 1000
+
+        return if (hours > 0) {
+            "%d:%02d:%02d.%03d".format(hours, minutes, secs, millis)
+        } else {
+            "%d:%02d.%03d".format(minutes, secs, millis)
+        }
+    }
+
+    private fun segmentsTxtExport(segments: List<SponsorSegmentInfo>): String {
+        return segments.joinToString("\n") { segment ->
+            val end = if (segment.endIsOpen) {
+                "end"
+            } else {
+                formatSegmentExportTimestamp(segment.end)
+            }
+
+            formatSegmentExportTimestamp(segment.start) + " - " + end + " " + segment.category
+        } + "\n"
+    }
+
+    private fun segmentsJsonExport(segments: List<SponsorSegmentInfo>): String {
+        val array = org.json.JSONArray()
+
+        segments.forEach { segment ->
+            val interval = org.json.JSONArray()
+            interval.put(segment.start)
+            interval.put(segment.end)
+
+            array.put(
+                org.json.JSONObject().apply {
+                    put("category", segment.category)
+                    put("segment", interval)
+                }
+            )
+        }
+
+        return array.toString(2)
     }
 
     private fun syncCategoryCheckbox(category: String) {
@@ -3189,17 +4059,34 @@ class MainActivity : Activity() {
                 segmentListContainer.visibility = View.VISIBLE
             }
 
+            (segmentListContainer.tag as? android.view.View)?.visibility =
+                if (segmentationEnabled) View.VISIBLE else View.GONE
+
+            val hasExportableSegments = segmentationEnabled && currentSegments.isNotEmpty()
+            saveSegmentsTxtButton.isEnabled = hasExportableSegments
+            saveSegmentsTxtButton.alpha = if (hasExportableSegments) 1f else 0.45f
+            saveSegmentsJsonButton.isEnabled = hasExportableSegments
+            saveSegmentsJsonButton.alpha = if (hasExportableSegments) 1f else 0.45f
+
             val localSourceReady = segmentationEnabled && localSegments != null
+            val manualSourceReady = segmentationEnabled && currentSegments.isNotEmpty()
             val sponsorBlockSourceReady = segmentationEnabled && idCardState == CardState.OK
-            val segmentationReady = localSourceReady || sponsorBlockSourceReady
+            val segmentationReady =
+                localSourceReady || manualSourceReady || sponsorBlockSourceReady
             val mediaReady = fileCardState == CardState.OK
-            val canProcess = mediaReady && (segmentationEnabled || segmentationReady.not())
+            val hasInvalidSegments = invalidSegmentIndexes.isNotEmpty() ||
+                (segmentationEnabled && currentSegments.any { !isSegmentRowValid(it) })
+
+            val canProcess = mediaReady &&
+                (segmentationEnabled || segmentationReady.not()) &&
+                !(segmentationEnabled && hasInvalidSegments)
 
             retryButton.isEnabled = canProcess
             retryButton.alpha = if (canProcess) 1f else 0.5f
             retryButton.text = when {
                 !segmentationEnabled -> "▶ Process without segmentation"
                 localSourceReady -> "▶ Process local segments"
+                manualSourceReady -> "▶ Process manual segments"
                 idCardState == CardState.CHECKING -> "Checking SponsorBlock…"
                 idCardState == CardState.ERROR -> "No segments — cannot process"
                 !canProcess -> "Process with this ID"
@@ -3268,12 +4155,9 @@ class MainActivity : Activity() {
             button.setTextColor(0xFFFF8C00.toInt())
         } else {
             button.background = null
-            button.setTextColor(android.graphics.Color.WHITE.also {
-                // Use default text color from theme
-                val ta = obtainStyledAttributes(intArrayOf(android.R.attr.textColorPrimary))
-                button.setTextColor(ta.getColor(0, android.graphics.Color.WHITE))
-                ta.recycle()
-            })
+            withStyledAttributes(attrs = intArrayOf(android.R.attr.textColorPrimary)) {
+                button.setTextColor(getColor(0, android.graphics.Color.WHITE))
+            }
         }
     }
 
@@ -3342,7 +4226,7 @@ class MainActivity : Activity() {
         try {
             FileResolver.saveTextToOutputFolder(
                 context = this,
-                treeUri = Uri.parse(folderUri),
+                treeUri = folderUri.toUri(),
                 fileName = logFileName,
                 text = logText
             )
@@ -3385,17 +4269,27 @@ class MainActivity : Activity() {
             t.contains("no such file")
     }
     private fun saveCompletedRunState(status: String, log: String) {
-    getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-        .putString(keyLastCompletedStatus, status)
-        .putString(keyLastCompletedLog, log)
-        .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            putString(keyLastCompletedStatus, status)
+            putString(keyLastCompletedLog, log)
+        }
+        if (this::clearSummaryButton.isInitialized) {
+            clearSummaryButton.isEnabled = true
+            clearSummaryButton.alpha = 1f
+            clearSummaryButton.visibility = View.VISIBLE
+        }
     }
 
     private fun clearCompletedRunState() {
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .remove(keyLastCompletedStatus)
-            .remove(keyLastCompletedLog)
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            remove(keyLastCompletedStatus)
+            remove(keyLastCompletedLog)
+        }
+        if (this::clearSummaryButton.isInitialized) {
+            clearSummaryButton.isEnabled = false
+            clearSummaryButton.alpha = 0.5f
+            clearSummaryButton.visibility = View.GONE
+        }
     }
 
     private fun restoreCompletedRunStateIfNeeded() {
@@ -3414,9 +4308,17 @@ class MainActivity : Activity() {
         if (!log.isNullOrBlank()) {
             logView.text = log
             logButton.visibility = View.VISIBLE
-            logView.visibility = View.VISIBLE
+            logView.visibility = View.GONE
         }
         saveLogButton.visibility = View.VISIBLE
+
+        // The Clear Summary control must remain available for exactly as long
+        // as its restored summary remains available.
+        if (this::clearSummaryButton.isInitialized) {
+            clearSummaryButton.isEnabled = true
+            clearSummaryButton.alpha = 1f
+            clearSummaryButton.visibility = View.VISIBLE
+        }
     }
 
     private fun saveActiveProcessingSnapshot(
@@ -3426,23 +4328,23 @@ class MainActivity : Activity() {
         title: String?,
         author: String?
     ) {
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .putString(keyActiveProcessingId, videoId)
-            .putString(keyActiveProcessingUri, uri.toString())
-            .putString(keyActiveProcessingFileName, fileName)
-            .putString(keyActiveProcessingTitle, title)
-            .putString(keyActiveProcessingAuthor, author)
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            putString(keyActiveProcessingId, videoId)
+            putString(keyActiveProcessingUri, uri.toString())
+            putString(keyActiveProcessingFileName, fileName)
+            putString(keyActiveProcessingTitle, title)
+            putString(keyActiveProcessingAuthor, author)
+        }
     }
 
     private fun clearActiveProcessingSnapshot() {
-        getSharedPreferences(prefsName, MODE_PRIVATE).edit()
-            .remove(keyActiveProcessingId)
-            .remove(keyActiveProcessingUri)
-            .remove(keyActiveProcessingFileName)
-            .remove(keyActiveProcessingTitle)
-            .remove(keyActiveProcessingAuthor)
-            .apply()
+        getSharedPreferences(prefsName, MODE_PRIVATE).edit {
+            remove(keyActiveProcessingId)
+            remove(keyActiveProcessingUri)
+            remove(keyActiveProcessingFileName)
+            remove(keyActiveProcessingTitle)
+            remove(keyActiveProcessingAuthor)
+        }
     }
 
     private fun restoreActiveProcessingSnapshotIfNeeded() {
@@ -3453,7 +4355,7 @@ class MainActivity : Activity() {
         if (activeId.isBlank()) return
 
         val activeUri = prefs.getString(keyActiveProcessingUri, null)?.let {
-            runCatching { Uri.parse(it) }.getOrNull()
+            runCatching { it.toUri() }.getOrNull()
         }
         val activeFileName = prefs.getString(keyActiveProcessingFileName, null)
         val activeTitle = prefs.getString(keyActiveProcessingTitle, null)
@@ -3491,5 +4393,3 @@ class MainActivity : Activity() {
         }
     }
 }
-
-

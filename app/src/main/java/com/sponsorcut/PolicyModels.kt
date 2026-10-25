@@ -30,6 +30,7 @@ data class OutputPreferences(
     val videoCodec: String? = null,
     val audioCodec: String? = null,
     val container: String? = null,
+    val audioContainer: String? = null,
     val qualityMode: QualityMode = QualityMode.BITRATE,
     val crf: Int? = null,
     val cq: Int? = null,
@@ -59,6 +60,10 @@ data class OutputPreferences(
             append("\"videoFrameRate\":${q(videoFrameRate)},")
             append("\"audioSampleRate\":${audioSampleRate ?: "null"},")
             append("\"audioBitrate\":${audioBitrate ?: "null"}")
+            append(",")
+            append("\"audioContainer\":${q(audioContainer)}")
+            append(",")
+            append("\"videoMaxHeight\":${videoMaxHeight ?: "null"}")
             append("}")
         }
     }
@@ -92,6 +97,8 @@ data class OutputPreferences(
                         .takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) },
                     audioSampleRate = if (o.isNull("audioSampleRate")) null else o.optInt("audioSampleRate"),
                     audioBitrate = if (o.isNull("audioBitrate")) null else o.optLong("audioBitrate"),
+                    audioContainer = o.optString("audioContainer")
+                        .takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) },
                     videoMaxHeight = if (o.isNull("videoMaxHeight")) null else o.optInt("videoMaxHeight")
                 )
             } catch (_: Exception) {

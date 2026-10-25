@@ -11,7 +11,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
@@ -42,6 +43,8 @@ class ProcessingService : Service() {
         const val EXTRA_LOCAL_SEGMENTS_JSON = "local_segments_json"
         const val EXTRA_SELECTED_SEGMENT_INDEXES = "selected_segment_indexes"
         const val EXTRA_STREAM_SELECTION = "stream_selection"
+        const val EXTRA_INPUT_SUMMARY = "input_summary"
+        const val EXTRA_SEGMENT_SOURCE_LABEL = "segment_source_label"
         const val EXTRA_OUTPUT_PREFERENCES_JSON = "output_preferences_json"
 
         const val BROADCAST_PROGRESS = "com.sponsorcut.PROGRESS"
@@ -115,10 +118,18 @@ class ProcessingService : Service() {
         val streamSelection = intent.getStringExtra(EXTRA_STREAM_SELECTION)
             ?.let { runCatching { StreamSelection.valueOf(it) }.getOrNull() }
             ?: StreamSelection.BOTH
+        val inputSummary = intent.getStringExtra(EXTRA_INPUT_SUMMARY) ?: "unknown"
+        val segmentSourceLabel = intent.getStringExtra(EXTRA_SEGMENT_SOURCE_LABEL)
+            ?.takeUnless { it.isBlank() }
+            ?: if (videoId.isNotBlank()) {
+                "YouTube: https://youtu.be/$videoId"
+            } else {
+                "ID: Manual"
+            }
         val outputPreferences = OutputPreferences.fromJson(
             intent.getStringExtra(EXTRA_OUTPUT_PREFERENCES_JSON)
         )
-        val uri = try { Uri.parse(uriString) } catch (e: Exception) {
+        val uri = try { uriString.toUri() } catch (e: Exception) {
             broadcast(text = "Bad URI: $uriString\n${e.message}", error = true)
             finish(startId)
             return START_NOT_STICKY
@@ -140,6 +151,7 @@ class ProcessingService : Service() {
                 .also { it.acquire(2 * 60 * 60 * 1000L) }  // max 2 hours
             try {
                 DiagLog.clear()
+                DiagLog.append("Input", "File: ${FileResolver.getDisplayName(this, uri)}\nMedia: $inputSummary")
                 DiagLog.append("Service", "Starting. frameAccurate=$frameAccurate uri=$uriString")
                 val power = collectPowerDiagnostics()
                 DiagLog.append(
@@ -182,11 +194,11 @@ class ProcessingService : Service() {
                 val sourceBase = sourceName.substringBeforeLast('.', sourceName)
                 val baseSourceName = "$sourceBase.$outputExt"
                 val outputFileName = FileResolver.outputFileNameFromSource(baseSourceName)
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                    .putString(KEY_LAST_OUTPUT_FILE_NAME, outputFileName)
-                    .apply()
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit {
+                    putString(KEY_LAST_OUTPUT_FILE_NAME, outputFileName)
+                }
                 outputTarget = if (!outputFolderUri.isNullOrBlank()) {
-                    FileResolver.createOutputTargetInTree(this, Uri.parse(outputFolderUri), outputFileName)
+                    FileResolver.createOutputTargetInTree(this, outputFolderUri.toUri(), outputFileName)
                 } else {
                     FileResolver.createOutputTarget(this, uri, outputFileName, inputFile)
                 }
@@ -246,10 +258,13 @@ class ProcessingService : Service() {
                         )
                     }
 
-                    val selected = parsed.filter { it.category in categories }
+                    // The local/manual JSON payload already contains exactly
+                    // the user's selected, edited visible segments. Do not apply
+                    // category filtering or checkbox indexes again.
+                    val selected = parsed
                     Log.i(
                         tag,
-                        "Local segments: loaded=${parsed.size}, selected=${selected.size}"
+                        "Local/manual segments: payload=${parsed.size}, selected=${selected.size}"
                     )
 
                     if (selected.isEmpty()) {
@@ -279,7 +294,11 @@ class ProcessingService : Service() {
                     fetched
                 }
 
-                val selectedSegments = if (selectedSegmentIndexes == null) {
+                // Local/manual payloads are already the final selected set.
+                // Apply checkbox indexes only to SponsorBlock results.
+                val selectedSegments = if (localSegmentsJson != null) {
+                    segments
+                } else if (selectedSegmentIndexes == null) {
                     segments
                 } else {
                     segments.filterIndexed { index, _ ->
@@ -399,7 +418,7 @@ class ProcessingService : Service() {
                 val timingLine = "Processing time: ${formatElapsedHms(encodeElapsedSec)}" +
                     (if (equationLine.isNotBlank()) "\n$equationLine" else "")
 
-                val result = "✓ Done — ID: $videoId\n\n" +
+                val result = "✓ Done — $segmentSourceLabel\n\n" +
                     "Removed ${segments.size} segment(s) (~%.1fs):\n".format(totalCut) +
                     "$segSummary\n\n" +
                     "Media: ${videoInfo.summaryLine}\n" +
@@ -409,6 +428,7 @@ class ProcessingService : Service() {
                     "Saved to:\n${outputTarget.label}" +
                     (sizeAdvisory?.let { "\n\n$it" } ?: "")
 
+                DiagLog.setRunSummary(result)
                 broadcast(text = result, done = true)
                 showDoneNotification("SponsorCut done ✓", "Saved: ${outputTarget.label}")
 
@@ -520,10 +540,10 @@ class ProcessingService : Service() {
         // paused and have unregistered its receiver, so it can otherwise miss
         // the completion broadcast and restore only the last progress message.
         if (done || error || cancelled) {
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                .putString("last_completed_status", text)
-                .putString("last_completed_log", DiagLog.get())
-                .apply()
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit {
+                putString("last_completed_status", text)
+                putString("last_completed_log", DiagLog.get())
+            }
         }
 
         sendBroadcast(Intent(BROADCAST_PROGRESS).apply {
@@ -672,4 +692,3 @@ class ProcessingService : Service() {
         return "${h}h${m}m${s}s"
     }
 }
-

@@ -104,11 +104,11 @@ startActivity(intent)
 
 ## Cut modes
 
-| Mode | Speed | Accuracy | Quality | Notes |
-|---|---|---|---|---|
-| Fast | Seconds | Nearest keyframe | Lossless | Best for most use cases |
-| HW-Accurate | Moderate | Exact frame boundary | Source-informed bitrate and safe pixel format | Uses MediaCodec hardware |
-| SW-Accurate | Moderate to slow | Exact frame boundary | Legacy resolution-based bitrate ladder | Uses CPU `mpeg4`; always available |
+| Mode        | Speed            | Accuracy             | Quality                                       | Notes                              |
+|-------------|------------------|----------------------|-----------------------------------------------|------------------------------------|
+| Fast        | Seconds          | Nearest keyframe     | Lossless                                      | Best for most use cases            |
+| HW-Accurate | Moderate         | Exact frame boundary | Source-informed bitrate and safe pixel format | Uses MediaCodec hardware           |
+| SW-Accurate | Moderate to slow | Exact frame boundary | Legacy resolution-based bitrate ladder        | Uses CPU `mpeg4`; always available |
 
 Both accurate modes use a single-pass `filter_complex` approach:
 

@@ -658,7 +658,39 @@ private fun processSinglePass(
             }
             val concatFilter = "${concatInputs}concat=n=$n:v=$concatV:a=$concatA$outLabels"
 
-            val allFilters = (if (!isAudioOnly) videoFilters else emptyList()) + audioFilters + listOf(concatFilter)
+            val allFilters = (
+                (if (!isAudioOnly) videoFilters else emptyList()) +
+                    audioFilters +
+                    listOf(concatFilter)
+            ).toMutableList()
+
+            // A stream fed by filter_complex cannot also receive -vf. Move any
+            // policy-generated downscale operation into the same graph, after
+            // concatenation, and map its output label instead.
+            val encoderArgs = (
+                if (useFallbackProfile) plan.fallbackVideoEncoderArgs
+                else plan.videoEncoderArgs
+            ).toMutableList()
+
+            var videoOutputLabel = "outv"
+            if (!isAudioOnly) {
+                val scaleIndex = encoderArgs.indexOfFirst { it == "-vf" }
+                if (scaleIndex >= 0 && scaleIndex + 1 < encoderArgs.size) {
+                    val videoFilter = encoderArgs[scaleIndex + 1]
+                    val scaleHeight = Regex("""scale=-2:(\d+)""")
+                        .find(videoFilter)
+                        ?.groupValues
+                        ?.get(1)
+
+                    if (scaleHeight != null) {
+                        encoderArgs.removeAt(scaleIndex + 1)
+                        encoderArgs.removeAt(scaleIndex)
+
+                        allFilters += "[outv]scale=-2:$scaleHeight[outv_scaled]"
+                        videoOutputLabel = "outv_scaled"
+                    }
+                }
+            }
 
             validateSinglePassGraph(
                 filters = allFilters,
@@ -669,10 +701,10 @@ private fun processSinglePass(
             )
 
             args += listOf("-filter_complex", allFilters.joinToString(";"))
-            if (!isAudioOnly) args += listOf("-map", "[outv]")
+            if (!isAudioOnly) args += listOf("-map", "[$videoOutputLabel]")
             if (keepAudio) args += listOf("-map", "[outa]")
             if (!isAudioOnly) {
-                args += if (useFallbackProfile) plan.fallbackVideoEncoderArgs else plan.videoEncoderArgs
+                args += encoderArgs
             }
             if (keepAudio) {
                 args += if (useFallbackProfile) plan.fallbackAudioEncoderArgs else plan.audioEncoderArgs

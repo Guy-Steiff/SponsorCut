@@ -190,13 +190,17 @@ object TranscodePolicy {
                 info, mode, preferences, catalog, inputFamily, null, reasons
             )
             val canCopy = mode == ExecutionMode.FAST && encoder == null
-            val container = if (preferences.audioSectionMode == SectionMode.CUSTOM &&
-                preferences.container != null
-            ) {
-                preferences.container!!
-            } else {
-                audioContainerFor(encoder ?: info.audioCodec)
-            }
+            // The Audio container dropdown's first entry means "retain the
+            // input-derived transcode policy"; it is serialized as null.
+            // Otherwise, use the user-selected audio-only container.
+            val container = preferences.audioContainer
+                ?: if (preferences.audioSectionMode == SectionMode.CUSTOM &&
+                    preferences.container != null
+                ) {
+                    preferences.container!!
+                } else {
+                    audioContainerFor(encoder ?: info.audioCodec)
+                }
 
             return ProcessingPlan(
                 canCopyVideo = false,
