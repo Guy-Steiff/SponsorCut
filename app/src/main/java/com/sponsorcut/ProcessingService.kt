@@ -229,10 +229,70 @@ class ProcessingService : Service() {
                     FileResolver.writeToOutputTarget(this, tempOutput, outputTarget)
 
                     val outputSizeMb = "%.2f".format(tempOutput.length() / 1_000_000.0)
+                    val inputSizeMb = "%.2f".format(inputFile.length() / 1_000_000.0)
+
+                    val executionMode = when {
+                        hwAccurate -> ExecutionMode.HW_ACCURATE
+                        frameAccurate -> ExecutionMode.SW_ACCURATE
+                        else -> ExecutionMode.FAST
+                    }
+
+                    val outputInfo = FFProbeInspector.inspect(tempOutput)
+
+                    val streamNote = when (streamSelection) {
+                        StreamSelection.AUDIO_ONLY -> "Audio only"
+                        StreamSelection.VIDEO_ONLY -> "Video only"
+                        StreamSelection.BOTH -> "Video and audio"
+                    }
+
+                    val copyNote = buildString {
+                        append(
+                            when {
+                                processingPlan.canCopyVideo && processingPlan.canCopyAudio ->
+                                    "Video and audio stream-copied"
+                                processingPlan.canCopyVideo -> "Video stream-copied; audio re-encoded"
+                                processingPlan.canCopyAudio -> "Audio stream-copied; video re-encoded"
+                                else -> "Video and audio re-encoded"
+                            }
+                        )
+                    }
+
+                    val audioBitrateNote = outputPreferences.audioBitrate?.let {
+                        val sourceBitrate = videoInfo.audioBitrate
+                        val fallback =
+                            sourceBitrate == null || sourceBitrate < 32000
+                        if (fallback && it == 128000L) {
+                            "${it / 1000}k (128k - fallback)"
+                        } else {
+                            "${it / 1000}k"
+                        }
+                    } ?: "input/inherited"
+
+                    val outputDurationNote = outputInfo?.durationSec?.let {
+                        "Output duration: ${formatElapsedHms(it)}"
+                    } ?: "Output duration: unavailable"
+
+                    val throughput = if (elapsedSeconds > 0.0) {
+                        videoInfo.durationSec?.let {
+                            "Throughput: x_realtime=${"%.3f".format(it / elapsedSeconds)}"
+                        }
+                    } else null
+
                     val result = "✓ $label complete\n\n" +
+                        "Media: ${videoInfo.summaryLine}\n" +
+                        "Mode: ${executionMode.name.replace('_', ' ')}\n" +
+                        "Streams: $streamNote\n" +
+                        "Processing: $copyNote\n" +
+                        "Plan: ${processingPlan.rationale}\n" +
+                        "Audio bitrate: $audioBitrateNote\n" +
                         "Output: ${outputTarget.label}\n" +
-                        "Size: ${outputSizeMb} MB\n" +
-                        "Processing time: ${formatElapsedHms(elapsedSeconds)}"
+                        "Output container: ${processingPlan.outputExtension.uppercase()}\n" +
+                        "$outputDurationNote\n" +
+                        "Size: ${inputSizeMb}MB → ${outputSizeMb}MB\n" +
+                        "Processing time: ${formatElapsedHms(elapsedSeconds)}" +
+                        (throughput?.let { "\n$it" } ?: "")
+
+                    DiagLog.setRunSummary(result)
 
                     broadcast(text = result, done = true)
                     showDoneNotification(

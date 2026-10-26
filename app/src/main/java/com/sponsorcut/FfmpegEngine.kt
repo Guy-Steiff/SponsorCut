@@ -2,6 +2,7 @@ package com.sponsorcut
 
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.sponsorcut.core.model.JobKind
+import com.sponsorcut.core.model.ExecutionMode
 import com.sponsorcut.core.model.StreamSelection
 import com.arthenica.ffmpegkit.ReturnCode
 import android.util.Log
@@ -329,6 +330,28 @@ object FfmpegEngine {
                else       "%d:%02d".format(m, s)
     }
 
+    /**
+     * FFmpegKit's native opus and vorbis encoders are experimental and require
+     * explicit experimental-codec permission. Apply this only to transcoding
+     * arguments, never to stream-copy arguments.
+     */
+    private fun audioEncoderArgsWithCompatibility(args: List<String>): List<String> {
+        val codecIndex = args.indexOf("-c:a")
+        val codec = codecIndex.takeIf { it >= 0 }
+            ?.let { args.getOrNull(it + 1) }
+            ?.lowercase()
+
+        return when (codec) {
+            "opus" -> args + listOf("-strict", "-2")
+
+            // FFmpeg's native Vorbis encoder supports stereo only. Upgrade mono
+            // sources to stereo rather than failing the job.
+            "vorbis" -> args + listOf("-strict", "-2", "-ac", "2")
+
+            else -> args
+        }
+    }
+
     private fun runExtraction(
         input: File,
         output: File,
@@ -343,7 +366,7 @@ object FfmpegEngine {
             args += if (plan.canCopyAudio) {
                 listOf("-c:a", "copy")
             } else {
-                plan.audioEncoderArgs
+                audioEncoderArgsWithCompatibility(plan.audioEncoderArgs)
             }
         } else {
             args += "-an"
@@ -434,7 +457,7 @@ object FfmpegEngine {
         if (plan.canCopyAudio) {
             args += listOf("-c:a", "copy")
         } else {
-            args += plan.audioEncoderArgs
+            args += audioEncoderArgsWithCompatibility(plan.audioEncoderArgs)
         }
 
         plan.outputMuxer?.let { args += listOf("-f", it) }
@@ -707,7 +730,13 @@ private fun processSinglePass(
                 args += encoderArgs
             }
             if (keepAudio) {
-                args += if (useFallbackProfile) plan.fallbackAudioEncoderArgs else plan.audioEncoderArgs
+                args += audioEncoderArgsWithCompatibility(
+                    if (useFallbackProfile) {
+                        plan.fallbackAudioEncoderArgs
+                    } else {
+                        plan.audioEncoderArgs
+                    }
+                )
             }
             plan.outputMuxer?.let { args += listOf("-f", it) }
             args += tempOut.absolutePath
@@ -723,10 +752,10 @@ private fun processSinglePass(
         onProgressNumeric?.invoke(0, 1)
 
         // Ticker: elapsed only — no ETA for a single opaque ffmpeg call
-        val modeLabel = when {
-            plan.videoEncoderArgs.any { it.contains("mediacodec") } -> "HW"
-            plan.videoEncoderArgs.any { it.contains("libx264") || it.contains("libx265") || it.contains("libvpx") || it.contains("libsvtav1") || it.contains("libaom") || it.contains("mpeg4") } -> "SW"
-            else -> "Fast"
+        val modeLabel = when (plan.executionMode) {
+            ExecutionMode.HW_ACCURATE -> "HW"
+            ExecutionMode.SW_ACCURATE -> "SW"
+            ExecutionMode.FAST -> "Fast"
         }
         val tickerActive = java.util.concurrent.atomic.AtomicBoolean(true)
         val tickerThread = Thread {
@@ -757,10 +786,10 @@ private fun processSinglePass(
             ReturnCode.isCancel(session.returnCode) -> { tempOut.delete(); error("CANCELLED") }
             !ReturnCode.isSuccess(session.returnCode) -> {
                 val rc = session.returnCode?.value ?: -1
-        val modeLabel2 = when {
-            plan.videoEncoderArgs.any { it.contains("mediacodec") } -> "HW-Accurate"
-            plan.videoEncoderArgs.any { it.contains("libx264") || it.contains("libx265") || it.contains("libvpx") || it.contains("libsvtav1") || it.contains("libaom") || it.contains("mpeg4") } -> "SW-Accurate"
-            else -> "Fast"
+        val modeLabel2 = when (plan.executionMode) {
+            ExecutionMode.HW_ACCURATE -> "HW-Accurate"
+            ExecutionMode.SW_ACCURATE -> "SW-Accurate"
+            ExecutionMode.FAST -> "Fast"
         }
 
         DiagLog.append("ffkit", "\n--- FFmpeg session failed (rc=$rc) ---")
@@ -849,7 +878,13 @@ private fun processSinglePass(
             } else if (plan.canCopyAudio) {
                 args += listOf("-c:a", "copy")
             } else {
-                args += if (useFallbackAudioArgs) plan.fallbackAudioEncoderArgs else plan.audioEncoderArgs
+                args += audioEncoderArgsWithCompatibility(
+                    if (useFallbackAudioArgs) {
+                        plan.fallbackAudioEncoderArgs
+                    } else {
+                        plan.audioEncoderArgs
+                    }
+                )
             }
 
             args += listOf("-avoid_negative_ts", "make_zero")

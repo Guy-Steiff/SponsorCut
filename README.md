@@ -192,6 +192,22 @@ SW-Accurate uses `mpeg4`, which is built into FFmpeg and does not require `libx2
 
 HW-Accurate uses Android MediaCodec hardware encoders. Compatibility and quality vary by vendor and device.
 
+### Audio encoding
+
+Custom audio encoding offers AAC, FLAC, Opus, MP3, and Vorbis when available in
+the installed FFmpegKit build. Opus and Vorbis use FFmpeg's native encoders
+named `opus` and `vorbis` (not `libopus` or `libvorbis`). This build marks both
+encoders experimental, so SponsorCut enables them with FFmpeg's `-strict -2`
+option when re-encoding. Stream-copy jobs are unchanged.
+
+The native Opus encoder accepts mono input. The native Vorbis encoder supports
+stereo only, so SponsorCut requests stereo output with `-ac 2`; if a segmented
+Vorbis job still fails, stereo conversion may need to be applied to each audio
+filter branch before concatenation. AAC remains the broadly compatible
+general-purpose choice, FLAC is lossless but can create much larger files, and
+Opus is a good compressed-audio option. The selected audio container determines
+the output muxer and extension.
+
 ## Repository layout
 
 This is a partial known-source map.
@@ -335,33 +351,18 @@ Runs background processing.
 
 ### Telegram JSON ffprobe
 
-Telegram audio issue is not yet solved.
-
-Reported output metadata:
+Telegram-related media may expose implausibly low audio metadata, such as:
 
 ```text
 AAC 44100Hz 5kbps
 ```
 
-Do not assume 44100 Hz or 5 kbps are reliable source facts.
-
-First determine why JSON ffprobe is not doing its job.
-
-Possible causes:
-
-- FFprobe not returning JSON.
-- App not capturing stdout.
-- App parsing JSON incorrectly.
-- App selecting wrong stream.
-- App failing to parse `bit_rate`.
-- App using legacy field or wrong JSON path.
-- App defaulting to 44100 Hz and 5 kbps on parse failure.
-- Telegram source audio genuinely low quality.
-- App copying or re-encoding audio using bad inherited bitrate.
-- App confusing `format.bit_rate` with audio stream `bit_rate`.
-- App assuming `streams[0]` is audio.
-
-Do not change audio sample rate or bitrate policy until raw JSON and parser behavior are understood.
+Do not assume the reported bitrate is reliable. When audio is re-encoded, a
+missing or below-32-kbps probed bitrate uses a 128-kbps fallback, shown as
+`128k - fallback`. The marker is based on the original inspected bitrate, and
+an explicit user-selected bitrate is preserved. This protects against
+inheriting implausibly low metadata; it does not diagnose why the probe reported
+it. Audio stream copy does not use this re-encoding fallback.
 
 ### H.264 CRF absence
 

@@ -83,6 +83,7 @@ class MainActivity : Activity() {
     private lateinit var resolutionSpinner: Spinner
     private lateinit var audioSampleRateSpinner: Spinner
     private lateinit var audioBitrateInput: EditText
+    private lateinit var audioBitratePresetSpinner: Spinner
     private lateinit var videoInputInfoView: TextView
     private lateinit var audioInputInfoView: TextView
     private lateinit var segmentCategoryContainer: LinearLayout
@@ -113,6 +114,7 @@ class MainActivity : Activity() {
     private var suppressCategoryCallbacks = false
     private lateinit var streamGroup: RadioGroup
     private var manualStreamSelection: StreamSelection = StreamSelection.BOTH
+    private var streamSelectionForced = false
     private var suppressStreamCallbacks = false
     private lateinit var streamOptionsLabel: TextView
 
@@ -155,6 +157,9 @@ class MainActivity : Activity() {
     private var selectedFrameRate: String? = null
     private var selectedResolutionHeight: Int? = null
     private var selectedAudioSampleRate: Int? = null
+    private var selectedAudioBitratePreset: String? = null
+    private var detectedAudioBitrate: Long? = null
+    private var audioBitrateFallbackActive = false
     private var suppressOutputCallbacks = false
     private lateinit var bitratePresetSpinner: Spinner
     private lateinit var outputConsequenceView: TextView
@@ -353,6 +358,10 @@ class MainActivity : Activity() {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 99)
             }
         }
+
+        // Initialize output-form availability after the complete UI exists.
+        // With no inspected media, both Video and Audio forms remain disabled.
+        updateStreamSelectionAvailability()
 
         handle(intent)
     }
@@ -660,9 +669,18 @@ class MainActivity : Activity() {
                 val uri = pendingUri
                 if (uri == null) { setStatus("No shared video is pending."); return@setOnClickListener }
 
+                // A local media file can be processed without YouTube metadata.
+                // A YouTube ID is required only when SponsorBlock segmentation
+                // is enabled and no self-contained local/manual segments exist.
+                val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
+
+                if (!segmentationEnabled) {
+                    startProcessing(uri, "", "local-file")
+                    return@setOnClickListener
+                }
+
                 // Local TXT/JSON segments and manually created segments are
                 // self-contained: neither requires or validates a YouTube ID.
-                val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
                 val hasManualSegments = segmentationEnabled &&
                     hasManualSegmentEdits &&
                     currentSegments.isNotEmpty()
@@ -1078,6 +1096,33 @@ class MainActivity : Activity() {
                 hint = "Audio bitrate, e.g. 163k"
             }
 
+            audioBitratePresetSpinner = Spinner(context).apply {
+                onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(
+                        parent: AdapterView<*>?,
+                        view: View?,
+                        position: Int,
+                        id: Long
+                    ) {
+                        if (suppressOutputCallbacks) return
+
+                        val choice = parent?.getItemAtPosition(position)?.toString().orEmpty()
+                        selectedAudioBitratePreset = choice
+
+                        when {
+                            choice == "Custom" -> Unit
+                            choice == "Input" -> detectedAudioBitrate?.let {
+                                audioBitrateInput.setText("${it / 1000}k")
+                            }
+                            choice.startsWith("128k") -> audioBitrateInput.setText("128k")
+                            choice.endsWith("k") -> audioBitrateInput.setText(choice)
+                        }
+                    }
+
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                }
+            }
+
             crfSpinner = Spinner(context)
             cqSpinner = Spinner(context)
             bitrateInput = EditText(context).apply {
@@ -1121,7 +1166,23 @@ class MainActivity : Activity() {
             addView(makeRow("Audio codec", audioCodecSpinner), lp)
             addView(makeRow("Audio container", audioContainerSpinner), lp)
             addView(makeRow("Sample rate", audioSampleRateSpinner), lp)
-            addView(makeRow("Audio bitrate", audioBitrateInput), lp)
+            val audioBitrateValueRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(p * 2, 0, 0, 0)
+            }
+
+            audioBitrateValueRow.addView(audioBitrateInput, LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            ))
+            audioBitrateValueRow.addView(audioBitratePresetSpinner, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+
+            addView(makeRow("Audio bitrate", audioBitrateValueRow), lp)
 
                 fun resolvedVideoChoiceLabel(mode: ExecutionMode): String {
                     val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.videoCodec)
@@ -1508,9 +1569,43 @@ class MainActivity : Activity() {
                 val inputAudioCodec = pendingVideoInfo?.audioCodec ?: "unknown"
                 val inputSampleRate = pendingVideoInfo?.sampleRate
                     ?.let { "${it} Hz" } ?: "unknown"
+                val inputAudioBitrate = pendingVideoInfo?.audioBitrate
+                    ?.let { "${it / 1000} kbps" } ?: "unknown"
 
                 videoInputInfoView.text = "input: $inputSummary"
-                audioInputInfoView.text = "input: $inputAudioCodec $inputSampleRate"
+                audioInputInfoView.text =
+                    "input: $inputAudioCodec $inputSampleRate $inputAudioBitrate"
+
+                // The fallback marker reflects the inspected source bitrate.
+                // Do not derive it from the text field: after applying the
+                // 128 kbps fallback, the text field is intentionally 128k.
+                val audioBitrateFallback = audioBitrateFallbackActive
+
+                if (audioBitrateFallback && selectedAudioBitratePreset == null) {
+                    selectedAudioBitratePreset = "128k - fallback"
+                }
+
+                val audioBitrateOptions = buildList {
+                    add("Input")
+                    add("40k")
+                    add("60k")
+                    add("80k")
+                    add("100k")
+                    add("128k")
+                    add("150k")
+                    add("Custom")
+                    if (audioBitrateFallback) add("128k - fallback")
+                }
+
+                val preferredAudioBitrate = selectedAudioBitratePreset
+                    ?.takeIf { it in audioBitrateOptions }
+                    ?: if (audioBitrateFallback) "128k - fallback" else "Input"
+
+                setAdapterKeepingSelection(
+                    audioBitratePresetSpinner,
+                    audioBitrateOptions,
+                    preferredAudioBitrate
+                )
 
                 outputConsequenceView.text = buildString {
                     append(
@@ -1557,9 +1652,20 @@ class MainActivity : Activity() {
                     ) {
                         if (suppressOutputCallbacks) return
                         audioSectionCustom = position == 1
+
                         if (!audioSectionCustom) {
                             selectedAudioEncoder = null
+                        } else if (selectedAudioEncoder == null) {
+                            // The Auto row may display a resolved fallback such as
+                            // "AAC - fallback". Make that effective choice real
+                            // when the user switches to Custom.
+                            selectedAudioEncoder = uiAudioCatalog.firstOrNull {
+                                it.codecFamily == EncoderCatalog.familyForInputCodec(
+                                    pendingVideoInfo?.audioCodec
+                                )
+                            }?.name ?: "aac"
                         }
+
                         refreshOutputOptions()
                     }
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2151,21 +2257,74 @@ class MainActivity : Activity() {
                 // Discover encoders now that we know an input is present.
                 encoderCatalog = EncoderCatalog.discover()
 
-                // Rebuild every output spinner using the real input and encoder catalog.
-                refreshOutputOptionsCallback?.invoke()
+                detectedAudioBitrate = info?.audioBitrate
+                selectedAudioBitratePreset = null
 
-                // Local TXT/JSON segments require the actual media duration for
-                // "end" resolution and duration clamping.
-                loadLocalSegmentsIfNeeded()
+                val audioBitrate = info?.audioBitrate
+                audioBitrateFallbackActive =
+                    audioBitrate == null || audioBitrate < 32000
 
-                updateStreamSelectionAvailability()
+                if (audioBitrateFallbackActive) {
+                    // Telegram-related files can expose implausibly low audio
+                    // bitrate metadata. Do not inherit it for re-encoding.
+                    audioBitrateInput.setText("128k")
+                    selectedAudioBitratePreset = "128k - fallback"
+                } else {
+                    audioBitrate?.let {
+                        audioBitrateInput.setText("${it / 1000}k")
+                    }
+                }
+
+                // Temporary post-inspection fault isolation:
+                // identify which UI rebuild stage crashes without losing the
+                // stack trace to an activity-level exception.
+                try {
+                    // Rebuild every output spinner using the real input and encoder
+                    // catalog. This must occur after the audio-bitrate fallback so
+                    // the dropdown immediately reflects "128k - fallback".
+                    refreshOutputOptionsCallback?.invoke()
+                } catch (e: Throwable) {
+                    DiagLog.append(
+                        "TaskUI",
+                        "POST-INSPECT FAILURE in refreshOutputOptions:\n" +
+                            e.stackTraceToString()
+                    )
+                    setStatus("Media loaded, but output options failed: ${e.message}")
+                }
+
+                try {
+                    // Local TXT/JSON segments require the actual media duration for
+                    // "end" resolution and duration clamping.
+                    loadLocalSegmentsIfNeeded()
+                } catch (e: Throwable) {
+                    DiagLog.append(
+                        "TaskUI",
+                        "POST-INSPECT FAILURE in loadLocalSegmentsIfNeeded:\n" +
+                            e.stackTraceToString()
+                    )
+                    setStatus("Media loaded, but segment reload failed: ${e.message}")
+                }
+
+                try {
+                    updateStreamSelectionAvailability()
+                } catch (e: Throwable) {
+                    DiagLog.append(
+                        "TaskUI",
+                        "POST-INSPECT FAILURE in updateStreamSelectionAvailability:\n" +
+                            e.stackTraceToString()
+                    )
+                    setStatus("Media loaded, but stream UI failed: ${e.message}")
+                }
 
                 val inputSummary = info?.summaryLine ?: "unknown"
                 val inputAudioCodec = info?.audioCodec ?: "unknown"
                 val inputSampleRate = info?.sampleRate?.let { "${it} Hz" } ?: "unknown"
+                val inputAudioBitrate = info?.audioBitrate
+                    ?.let { "${it / 1000} kbps" } ?: "unknown"
 
                 videoInputInfoView.text = "Input: $inputSummary"
-                audioInputInfoView.text = "Input: $inputAudioCodec $inputSampleRate"
+                audioInputInfoView.text =
+                    "Input: $inputAudioCodec $inputSampleRate $inputAudioBitrate"
 
                 // Show the input bitrate immediately when Quality is set to Input.
                 // Prefer the video stream's own bitrate. If ffprobe cannot provide
@@ -2183,8 +2342,9 @@ class MainActivity : Activity() {
 
                 detectedVideoBitrate?.let { bitrateInput.setText("${it / 1000}k") }
 
-                // Show the detected audio bitrate as the default audio-bitrate target.
-                info?.audioBitrate?.let { audioBitrateInput.setText("${it / 1000}k") }
+                // Audio-bitrate fallback was applied before the first
+                // output-options refresh, so the dropdown and text field already
+                // reflect the effective encoding target.
             }
         }.start()
     }
@@ -2706,15 +2866,20 @@ class MainActivity : Activity() {
         uri: Uri?,
         info: FFProbeInspector.VideoInfo?
     ): Boolean {
-        if (isAudioOnlyContainer(uri)) return true
-
-        if (info == null) return false
-
-        val videoCodec = info.videoCodec?.trim()?.lowercase()
-        val audioCodec = info.audioCodec?.trim()?.lowercase()
+        val videoCodec = info?.videoCodec?.trim()?.lowercase()
+        val audioCodec = info?.audioCodec?.trim()?.lowercase()
 
         val hasAudio = !audioCodec.isNullOrBlank() && audioCodec != "unknown"
         val hasVideo = !videoCodec.isNullOrBlank() && videoCodec != "unknown"
+
+        // FFprobe is authoritative when it finds both usable streams. Do not
+        // let a container/URI heuristic force a video+audio file into
+        // permanent Audio-only mode.
+        if (hasVideo && hasAudio) return false
+
+        if (isAudioOnlyContainer(uri)) return true
+
+        if (info == null) return false
 
         if (hasAudio && !hasVideo) return true
 
@@ -2769,6 +2934,10 @@ class MainActivity : Activity() {
         videoOnly: Boolean
     ) {
         val processingActive = ProcessingService.isProcessingActive
+        // A successful FFprobe inspection is the authoritative condition for
+        // enabling output controls. File-card state can be updated separately
+        // and must not prevent otherwise valid media from being configured.
+        val mediaLoaded = pendingVideoInfo != null
 
         fun setFormState(views: List<View>, enabled: Boolean) {
             fun apply(view: View) {
@@ -2786,6 +2955,10 @@ class MainActivity : Activity() {
         }
 
         fun row(view: View): View = view.parent as View
+
+        fun detachFromParent(view: View) {
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+        }
 
         fun commonAncestor(a: View, b: View): android.view.ViewGroup? {
             var left: View? = a
@@ -2836,6 +3009,22 @@ class MainActivity : Activity() {
         val streamControlsEnabled =
             !processingActive && !streamChoiceForced && !inspectionPending
 
+        // TEMPORARY DIAGNOSTIC: identify why output forms remain disabled.
+        val gateMessage = buildString {
+            append("Form gate: ")
+            append("mediaLoaded=$mediaLoaded, ")
+            append("hasVideo=$hasVideo, ")
+            append("hasAudio=$hasAudio, ")
+            append("processingActive=$processingActive, ")
+            append("audioOnly=$audioOnly, ")
+            append("videoOnly=$videoOnly, ")
+            append("manualStream=$manualStreamSelection, ")
+            append("videoCodec=${pendingVideoInfo?.videoCodec}, ")
+            append("audioCodec=${pendingVideoInfo?.audioCodec}")
+        }
+        DiagLog.append("FormGate", gateMessage)
+        setStatus(gateMessage)
+
         radioKeepBoth.isEnabled = streamControlsEnabled
         radioAudioOnly.isEnabled = streamControlsEnabled
         radioVideoOnly.isEnabled = streamControlsEnabled
@@ -2845,10 +3034,12 @@ class MainActivity : Activity() {
         if (audioOnly) {
             streamOptionsLabel.text = "Output streams: Audio only — no usable video stream"
             manualStreamSelection = StreamSelection.AUDIO_ONLY
+            streamSelectionForced = true
             streamGroup.check(radioAudioOnly.id)
         } else if (videoOnly) {
             streamOptionsLabel.text = "Output streams: Video only — no usable audio stream"
             manualStreamSelection = StreamSelection.VIDEO_ONLY
+            streamSelectionForced = true
             streamGroup.check(radioVideoOnly.id)
         } else if (inspectionPending) {
             streamOptionsLabel.text = "Output streams: detecting…"
@@ -2861,6 +3052,14 @@ class MainActivity : Activity() {
         } else {
             streamOptionsLabel.text = "Output streams: Video and audio"
 
+            // A prior audio-only or video-only file may have forced the stream
+            // selection. Restore the normal default when the newly loaded file
+            // supports both streams; afterward, preserve explicit user choice.
+            if (streamSelectionForced) {
+                manualStreamSelection = StreamSelection.BOTH
+                streamSelectionForced = false
+            }
+
             when (manualStreamSelection) {
                 StreamSelection.AUDIO_ONLY -> streamGroup.check(radioAudioOnly.id)
                 StreamSelection.VIDEO_ONLY -> streamGroup.check(radioVideoOnly.id)
@@ -2870,55 +3069,39 @@ class MainActivity : Activity() {
 
         suppressStreamCallbacks = false
 
-        videoViews.forEach { it.visibility = View.VISIBLE }
-
         val selectedAudioOnly = audioOnly ||
             (!videoOnly && manualStreamSelection == StreamSelection.AUDIO_ONLY)
 
         val selectedVideoOnly = videoOnly ||
             (!audioOnly && manualStreamSelection == StreamSelection.VIDEO_ONLY)
 
+        // Do not reparent or reorder forms. The original layout already places
+        // Video before Audio. Hiding the irrelevant Video form for a strict
+        // audio file removes the buffer naturally and avoids orphaned rows.
         if (selectedAudioOnly) {
-            audioViews.forEach { videoParent.removeView(it) }
+            videoViews.forEach { it.visibility = View.GONE }
+            audioViews.forEach { it.visibility = View.VISIBLE }
 
-            var audioInsertIndex = videoParent.indexOfChild(row(videoSectionSpinner))
-            audioViews.forEach { view ->
-                videoParent.addView(view, audioInsertIndex, view.layoutParams)
-                audioInsertIndex++
-            }
-
-            setFormState(audioViews, hasAudio && !processingActive)
+            setFormState(audioViews, mediaLoaded && hasAudio && !processingActive)
             setFormState(videoViews, false)
         } else {
-            val currentVideoIndex = videoParent.indexOfChild(row(videoSectionSpinner))
-            val currentAudioIndex = videoParent.indexOfChild(row(audioSectionSpinner))
-
-            if (currentAudioIndex < currentVideoIndex) {
-                audioViews.forEach { videoParent.removeView(it) }
-
-                val audioInsertIndex =
-                    videoParent.indexOfChild(outputConsequenceView).takeIf { it >= 0 }
-                        ?: videoParent.childCount
-
-                audioViews.forEach { view ->
-                    videoParent.addView(view, audioInsertIndex, view.layoutParams)
-                }
-            }
+            videoViews.forEach { it.visibility = View.VISIBLE }
+            audioViews.forEach { it.visibility = View.VISIBLE }
 
             if (selectedVideoOnly) {
-                setFormState(videoViews, hasVideo && !processingActive)
+                setFormState(videoViews, mediaLoaded && hasVideo && !processingActive)
                 setFormState(audioViews, false)
             } else {
-                setFormState(videoViews, hasVideo && !processingActive)
-                setFormState(audioViews, hasAudio && !processingActive)
+                setFormState(videoViews, mediaLoaded && hasVideo && !processingActive)
+                setFormState(audioViews, mediaLoaded && hasAudio && !processingActive)
             }
-
-            // The Audio container is meaningful only when the output is audio-only.
-            // It must remain disabled for Keep-both and Video-only jobs.
-            val audioContainerEnabled = selectedAudioOnly && !processingActive
-            audioContainerSpinner.isEnabled = audioContainerEnabled
-            audioContainerSpinner.alpha = if (audioContainerEnabled) 1f else 0.35f
         }
+
+        // The Audio container is meaningful only when the output is audio-only.
+        // It must remain disabled for Keep-both and Video-only jobs.
+        val audioContainerEnabled = selectedAudioOnly && !processingActive
+        audioContainerSpinner.isEnabled = audioContainerEnabled
+        audioContainerSpinner.alpha = if (audioContainerEnabled) 1f else 0.35f
     }
 
     private fun startProcessing(uri: Uri, videoId: String, idSource: String) {

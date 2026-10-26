@@ -786,6 +786,11 @@ Audio:
     vorbis
     flac
 
+The custom Opus and Vorbis entries are FFmpeg's native `opus` and `vorbis`
+encoders in the FFmpegKit build; they are not `libopus` or `libvorbis`. FFmpeg's
+encoder listing marks both native encoders experimental (`X`). The
+classification comes from FFmpeg's encoder registration, not from FFmpegKit.
+
 ### 7.2 Codec Family Mapping
 
 Input codecs are mapped to families:
@@ -847,6 +852,7 @@ FfmpegEngine must not make codec, container, quality, or fallback policy decisio
         val outputMuxer: String?,
         val complexity: ComplexityTier,
         val rationale: String,
+        val executionMode: ExecutionMode,
         val useSlowSeek: Boolean = false,
         val singlePassFilter: Boolean = false,
         val dropVideo: Boolean = false,
@@ -856,11 +862,20 @@ FfmpegEngine must not make codec, container, quality, or fallback policy decisio
         val streamSelection: StreamSelection = StreamSelection.BOTH
     )
 
+`executionMode` carries the user-selected mode into execution and progress
+reporting. Audio-only jobs must not infer the mode from video encoder arguments,
+which are empty for those jobs.
+
 ### 8.2 Execution Modes
 
     FAST
     SW_ACCURATE
     HW_ACCURATE
+
+Progress and error labels are derived from this selected mode (`Fast`, `SW`, or
+`HW`), not inferred from whether a video encoder happens to be present. The
+label reports the selected processing mode; it does not independently change
+FFmpeg arguments.
 
 Mode selection:
 
@@ -1060,6 +1075,12 @@ Audio Auto:
     3. If that fallback is unavailable:
         Error.
 
+The current custom encoder catalog contains native `opus` and `vorbis`, not
+`libopus` or `libvorbis`. Consequently, the input-family matching entries above
+do not match those native encoders in this build; Audio Auto proceeds to its
+video-family default instead. Custom selection can choose the native encoders
+directly.
+
 ### 9.7 Container Resolution
 
 Custom container:
@@ -1174,6 +1195,12 @@ Audio bitrate:
 
     Plausible audio bitrate threshold:
         32,000 bps
+
+The 128-kbps fallback is used when the inspected source bitrate is missing or
+below 32 kbps and audio is being re-encoded. UI state records this decision from
+the original inspected bitrate so Auto mode can display `128k - fallback`;
+choosing another bitrate explicitly is respected. Stream-copy audio does not
+apply this fallback.
 
 ### 9.9 Frame Rate and Scaling
 
@@ -1569,6 +1596,27 @@ runExtraction():
         [-f muxer]
         output
 
+### 10.12 Opus and Vorbis Encoder Compatibility
+
+`audioEncoderArgsWithCompatibility()` adjusts only audio-transcoding arguments:
+
+    -c:a opus   -> append -strict -2
+    -c:a vorbis -> append -strict -2 -ac 2
+
+FFmpeg requires `-strict -2` for these experimental native encoders in the
+current build. The native Vorbis encoder accepts stereo only; `-ac 2` requests
+stereo output, including for mono sources. These compatibility options are not
+added to `-c:a copy`, AAC, or FLAC.
+
+For segmented jobs, audio branches are trimmed and concatenated through
+`filter_complex`. If output-level `-ac 2` does not convert the concatenated
+signal before Vorbis initializes, make the conversion explicit on each branch
+before concat:
+
+    [i:a]atrim=...,asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[ai]
+
+Opus accepts mono input, so it does not need this channel conversion.
+
 ## 11. CQ and Hardware Quality Control
 
 ### 11.1 Current Status
@@ -1779,7 +1827,11 @@ Example:
     ->
     video_clean_1760000000.mp4
 
-The extension is normally determined by TranscodePolicy, not blindly inherited from the input.
+The extension is normally determined by TranscodePolicy, not blindly inherited
+from the input. Complete audio extensions such as `.ogg`, `.opus`, `.oga`,
+`.flac`, `.m4a`, `.mp3`, `.aac`, and `.wav` are preserved as the final
+extension; an audio output must not acquire an extra video suffix such as
+`.ogg.mp4`.
 
 ## 14. Diagnostics
 

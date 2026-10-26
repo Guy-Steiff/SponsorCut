@@ -65,6 +65,10 @@ object FileResolver {
         fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
         fileName.endsWith(".aac", ignoreCase = true) -> "audio/aac"
         fileName.endsWith(".opus", ignoreCase = true) -> "audio/ogg"
+        fileName.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
+        fileName.endsWith(".oga", ignoreCase = true) -> "audio/ogg"
+        fileName.endsWith(".flac", ignoreCase = true) -> "audio/flac"
+        fileName.endsWith(".wav", ignoreCase = true) -> "audio/x-wav"
         else -> "video/mp4"
     }
 
