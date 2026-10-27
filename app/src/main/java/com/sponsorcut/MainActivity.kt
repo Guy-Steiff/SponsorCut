@@ -5,6 +5,8 @@ package com.sponsorcut
 import android.app.Activity
 import androidx.core.content.ContextCompat
 import android.content.BroadcastReceiver
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -44,17 +46,7 @@ import android.text.method.LinkMovementMethod
 import android.text.style.URLSpan
 import com.sponsorcut.core.model.ExecutionMode
 import com.sponsorcut.core.model.StreamSelection
-
-enum class SegmentSource { SPONSORBLOCK, LOCAL_FILE, MANUAL }
-
-data class EditableSegment(
-    val id: String,
-    val category: String,
-    val startSeconds: Double,
-    val endSeconds: Double,
-    val endIsOpen: Boolean = false,
-    val enabled: Boolean = true
-)
+import java.util.Locale
 
 class MainActivity : Activity() {
 
@@ -88,7 +80,6 @@ class MainActivity : Activity() {
     private lateinit var audioInputInfoView: TextView
     private lateinit var segmentCategoryContainer: LinearLayout
     private lateinit var segmentListContainer: LinearLayout
-    private lateinit var mergeCard: LinearLayout
 
     private var encoderCatalog: List<EncoderOption> = emptyList()
     private var uiVideoCatalog: List<EncoderOption> = emptyList()
@@ -104,7 +95,6 @@ class MainActivity : Activity() {
     private val segmentCheckboxes = mutableMapOf<Int, CheckBox>()
     private var currentSegments: List<SponsorSegmentInfo> = emptyList()
     private val invalidSegmentIndexes = mutableSetOf<Int>()
-    private val editableSegments = mutableListOf<EditableSegment>()
     private var hasManualSegmentEdits = false
     private var pendingSegmentSaveFormat: String? = null
     private lateinit var addSegmentButton: Button
@@ -180,9 +170,9 @@ class MainActivity : Activity() {
     private lateinit var fileCardIcon: TextView
     private lateinit var fileCardLabel: TextView
     private lateinit var processWithoutSegmentsCheckBox: CheckBox
-    private lateinit var fileCardNote: TextView
 
     private enum class CardState { PENDING, CHECKING, OK, ERROR }
+
     private var idCardState = CardState.PENDING
     private var fileCardState = CardState.PENDING
     private val dotHandler = Handler(Looper.getMainLooper())
@@ -195,6 +185,7 @@ class MainActivity : Activity() {
     private var lastFetchedId: String = ""
     private var cachedTitle: String? = null
     private var cachedAuthor: String? = null
+    private var cachedFileName: String? = null
     private val prefsName = "sponsorcut_prefs"
     private val keyLastVideoId = "last_video_id"
     private val keyLastVideoIdTs = "last_video_id_ts"
@@ -233,20 +224,6 @@ class MainActivity : Activity() {
     private var localSegmentsResolvedDurationSec: Double? = null
     private var suppressLocalSegmentReloadOnce = false
 
-    // All SponsorBlock categories; only "sponsor" is checked by default
-    private val allCategories = listOf(
-        "sponsor"          to "Sponsor segments",
-        "selfpromo"        to "Self-promotion (unpaid)",
-        "interaction"      to "Interaction reminder (subscribe, etc.)",
-        "intro"            to "Intro / intermission",
-        "outro"            to "Outro / end cards",
-        "preview"          to "Preview / recap",
-        "filler"           to "Filler / tangent / joke",
-        "music_offtopic"   to "Non-music section (music videos)",
-        "poi_highlight"    to "Highlight / point of interest",
-        "exclusive_access" to "Exclusive access (members-only content)",
-        "chapter"          to "Chapter markers"
-    )
     private val categoryCheckboxes = mutableMapOf<String, CheckBox>()
 
     private val progressReceiver = object : BroadcastReceiver() {
@@ -273,8 +250,8 @@ class MainActivity : Activity() {
                     pendingUri = null
                     fileCardState = CardState.PENDING
                     runOnUiThread {
-                        fileCardLabel.text = "No file selected"
-                        browseFileButton.text = "📁 Browse for video file…"
+                        fileCardLabel.text = getString(R.string.no_file_selected)
+                        browseFileButton.text = getString(R.string.browse_video_file)
                     }
                 }
                 setStatus(finalStatus)
@@ -298,13 +275,14 @@ class MainActivity : Activity() {
         // Show launch crashes even when statusView does not yet exist.
         val previousExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            android.util.Log.e("SponsorCutCRASH", "UNCAUGHT", throwable)
+            Log.e("SponsorCutCRASH", "UNCAUGHT", throwable)
 
             val message = buildString {
-                append("LAUNCH CRASH\n\n")
+                append(getString(R.string.launch_crash_heading))
+                append("\n\n")
                 append(throwable.javaClass.name)
                 append("\n\n")
-                append(throwable.message ?: "(no message)")
+                append(throwable.message ?: getString(R.string.launch_crash_no_message))
                 append("\n\n")
                 append(throwable.stackTraceToString().take(4000))
             }
@@ -354,7 +332,8 @@ class MainActivity : Activity() {
         // Request notification permission on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 99)
             }
         }
@@ -397,8 +376,8 @@ class MainActivity : Activity() {
                 if (!canReadUri(savedInputUri)) {
                     pendingUri = null
                     fileCardState = CardState.PENDING
-                    fileCardLabel.text = "No file selected"
-                    browseFileButton.text = "📁 Browse for video file…"
+                    fileCardLabel.text = getString(R.string.no_file_selected)
+                    browseFileButton.text = getString(R.string.browse_video_file)
 
                     getSharedPreferences(prefsName, MODE_PRIVATE).edit {
                         remove("sponsorcut_last_input_uri")
@@ -418,8 +397,8 @@ class MainActivity : Activity() {
                             savedInputUri.lastPathSegment ?: "previous file"
                         }
 
-                    fileCardLabel.text = "📄 $savedFileName"
-                    browseFileButton.text = "📁 Change file…"
+                    fileCardLabel.text = getString(R.string.file_name_with_icon, savedFileName)
+                    browseFileButton.text = getString(R.string.change_file)
                     inspectSelectedUri(savedInputUri)
                 }
             }
@@ -428,7 +407,10 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        try { unregisterReceiver(progressReceiver) } catch (_: Exception) {}
+        try {
+            unregisterReceiver(progressReceiver)
+        } catch (_: Exception) {
+        }
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -449,12 +431,12 @@ class MainActivity : Activity() {
                 putString(keyOutputFolderUri, treeUri.toString())
             }
             val path = treeUri.lastPathSegment ?: treeUri.toString()
-            setStatus("Output folder set to: $path")
-            pickFolderButton.text = "Output: $path"
+            setStatus(getString(R.string.output_folder_set, path))
+            pickFolderButton.text = getString(R.string.output_folder_button, path)
         }
         if (
             (requestCode == saveSegmentsTxtRequestCode ||
-                requestCode == saveSegmentsJsonRequestCode) &&
+                    requestCode == saveSegmentsJsonRequestCode) &&
             resultCode == RESULT_OK
         ) {
             val uri = data?.data ?: return
@@ -469,9 +451,9 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(uri)?.use { stream ->
                     stream.write(content.toByteArray())
                 }
-                setStatus("Segments saved:\n$uri")
+                setStatus(getString(R.string.segments_saved, uri))
             } catch (e: Exception) {
-                setStatus("Failed to save segments: ${e.message}")
+                setStatus(getString(R.string.segments_save_failed, e.message))
             }
 
             pendingSegmentSaveFormat = null
@@ -484,7 +466,8 @@ class MainActivity : Activity() {
                     segmentUri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
 
             clearLocalSegmentSource()
 
@@ -499,8 +482,11 @@ class MainActivity : Activity() {
             cachedAuthor = null
             lastFetchedId = ""
 
-            loadSegmentsButton.text = "📄 ${localSegmentFileName}"
-            setStatus("Segment file selected. Parsing segments…")
+            loadSegmentsButton.text = getString(
+                R.string.file_name_with_icon,
+                localSegmentFileName
+            )
+            setStatus(getString(R.string.segment_file_selected_parsing))
             loadLocalSegments(segmentUri, pendingVideoInfo?.durationSec)
         }
 
@@ -510,13 +496,15 @@ class MainActivity : Activity() {
                 contentResolver.takePersistableUriPermission(
                     fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
             pendingUri = fileUri
             fileCardState = CardState.OK
             clearCompletedRunState()
-            val fileName = FileResolver.getDisplayName(this, fileUri).ifBlank { fileUri.lastPathSegment ?: "file" }
-            fileCardLabel.text = "📄 $fileName"
-            browseFileButton.text = "📁 Change file…"
+            val fileName = FileResolver.getDisplayName(this, fileUri)
+                .ifBlank { fileUri.lastPathSegment ?: "file" }
+            fileCardLabel.text = getString(R.string.file_name_with_icon, fileName)
+            browseFileButton.text = getString(R.string.change_file)
             saveFileUri(fileUri, fileName)
             updateCards()
             inspectSelectedUri(fileUri)
@@ -524,7 +512,8 @@ class MainActivity : Activity() {
             // Priority 1: whatever is already typed/shown in idInput (covers the URL-share→browse flow)
             val currentInput = idInput.text?.toString().orEmpty()
             val videoId = if (currentInput.length == 11 &&
-                    currentInput.all { c -> c.isLetterOrDigit() || c == '_' || c == '-' }) {
+                currentInput.all { c -> c.isLetterOrDigit() || c == '_' || c == '-' }
+            ) {
                 currentInput
             } else {
                 extractId(currentInput)
@@ -537,9 +526,9 @@ class MainActivity : Activity() {
             retryButton.visibility = View.VISIBLE
             browseFileButton.visibility = View.VISIBLE
             if (videoId.isBlank())
-                setStatus("File selected ✓\nNo YouTube ID — paste URL or 11-char ID below, then tap Process.")
+                setStatus(getString(R.string.file_selected_no_youtube_id))
             else {
-                setStatus("File selected ✓\nID: $videoId\nFetching title and segments…")
+                setStatus(getString(R.string.file_selected_fetching_segments, videoId))
                 fetchSegmentsForId(videoId, force = true)
             }
             applyModeRecommendation()
@@ -605,23 +594,31 @@ class MainActivity : Activity() {
         val p = (16 * resources.displayMetrics.density).toInt()
 
         statusView = TextView(this).apply {
-            text = "Share a downloaded YouTube video here from PipePipe/NewPipe."
+            text = getString(R.string.share_downloaded_video)
             textSize = 15f
             setPadding(p, p, p, p)
             setTextIsSelectable(true)
         }
 
         idInput = EditText(this).apply {
-            hint = "Paste YouTube URL or 11-char video ID"
+            hint = getString(R.string.youtube_url_or_id_hint)
             addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun beforeTextChanged(
+                    s: CharSequence?,
+                    start: Int,
+                    count: Int,
+                    after: Int
+                ) {
+                }
+
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: Editable?) {
                     if (suppressIdTextWatcher) return
 
                     val raw = s?.toString().orEmpty()
-                    val id = if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' })
-                        raw else extractId(raw)
+                    val id =
+                        if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' })
+                            raw else extractId(raw)
 
                     segmentFetchHandler.removeCallbacksAndMessages(null)
 
@@ -632,8 +629,7 @@ class MainActivity : Activity() {
 
                     clearLocalSegmentSource()
                     updateCards()
-                    statusView.text =
-                        "YouTube ID entered — previous TXT/JSON segment source discarded.\nChecking SponsorBlock…"
+                    statusView.text = getString(R.string.youtube_id_entered_source_discarded)
 
                     pendingSegmentFetchId = id
                     segmentFetchHandler.postDelayed({
@@ -660,14 +656,17 @@ class MainActivity : Activity() {
         }
 
         retryButton = Button(this).apply {
-            text = "Process with this ID"
+            text = getString(R.string.process_with_id)
             isEnabled = false
             alpha = 0.5f
             setBackgroundColor(0xFF2E7D32.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             setOnClickListener {
                 val uri = pendingUri
-                if (uri == null) { setStatus("No shared video is pending."); return@setOnClickListener }
+                if (uri == null) {
+                    setStatus(getString(R.string.no_shared_video_pending))
+                    return@setOnClickListener
+                }
 
                 // A local media file can be processed without YouTube metadata.
                 // A YouTube ID is required only when SponsorBlock segmentation
@@ -675,48 +674,53 @@ class MainActivity : Activity() {
                 val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
 
                 if (!segmentationEnabled) {
-                    startProcessing(uri, "", "local-file")
+                    startProcessing(uri, "")
                     return@setOnClickListener
                 }
 
                 // Local TXT/JSON segments and manually created segments are
-                // self-contained: neither requires or validates a YouTube ID.
-                val hasManualSegments = segmentationEnabled &&
-                    hasManualSegmentEdits &&
-                    currentSegments.isNotEmpty()
+                // self-contained: neither requires nor validates a YouTube ID.
+                val hasManualSegments = hasManualSegmentEdits && currentSegments.isNotEmpty()
 
                 if (localSegments != null || hasManualSegments) {
                     if (currentSegments.any { !isSegmentRowValid(it) }) {
-                        setStatus("Fix the invalid segment timestamps before processing.")
+                        setStatus(getString(R.string.invalid_segment_timestamps))
                         return@setOnClickListener
                     }
 
                     if (currentSegments.any { it.endIsOpen }) {
                         setStatus(
-                            "Load a media file to resolve the \"end\" segment timing."
+                            getString(R.string.resolve_open_ended_segment)
                         )
                         return@setOnClickListener
                     }
 
-                    val idSource = if (localSegments != null) "local" else "manual"
-                    startProcessing(uri, "", idSource)
+                    startProcessing(uri, "")
                     return@setOnClickListener
                 }
 
                 val raw = idInput.text?.toString().orEmpty()
-                val videoId = if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' }) raw
-                              else extractId(raw)
-                if (videoId.isBlank()) { setStatus("Not a valid YouTube URL or 11-char ID."); return@setOnClickListener }
+                val videoId =
+                    if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' }) raw
+                    else extractId(raw)
+                if (videoId.isBlank()) {
+                    setStatus(getString(R.string.invalid_youtube_url_or_id))
+                    return@setOnClickListener
+                }
                 saveId(videoId)
-                startProcessing(uri, videoId, "manual")
+                startProcessing(uri, videoId)
             }
         }
 
-        val savedFolder = getSharedPreferences(prefsName, MODE_PRIVATE).getString(keyOutputFolderUri, null)
+        val savedFolder =
+            getSharedPreferences(prefsName, MODE_PRIVATE).getString(keyOutputFolderUri, null)
         val folderLabel = if (savedFolder != null)
-            "Output: ${savedFolder.toUri().lastPathSegment ?: savedFolder}"
+            getString(
+                R.string.output_folder_button,
+                savedFolder.toUri().lastPathSegment ?: savedFolder
+            )
         else
-            "Pick output folder (optional)"
+            getString(R.string.pick_output_folder_optional)
         pickFolderButton = Button(this).apply {
             text = folderLabel
             setOnClickListener {
@@ -731,7 +735,7 @@ class MainActivity : Activity() {
         }
 
         cancelButton = Button(this).apply {
-            text = "⏹ Cancel job"
+            text = getString(R.string.cancel_job)
             visibility = View.GONE
             setBackgroundColor(0xFFCC3333.toInt())
             setTextColor(0xFFFFFFFF.toInt())
@@ -744,7 +748,7 @@ class MainActivity : Activity() {
 
                 isEnabled = false
                 alpha = 0.5f
-                text = "Cancelling…"
+                text = getString(R.string.cancelling)
                 val cancelIntent = Intent(this@MainActivity, ProcessingService::class.java).apply {
                     action = ProcessingService.ACTION_CANCEL
                 }
@@ -753,12 +757,15 @@ class MainActivity : Activity() {
         }
 
         browseFileButton = Button(this).apply {
-            text = "📁 Browse for video file…"
+            text = getString(R.string.browse_video_file)
             setOnClickListener {
                 val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "*/*"
-                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/*", "audio/*", "application/octet-stream"))
+                    putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        arrayOf("video/*", "audio/*", "application/octet-stream")
+                    )
                 }
                 startActivityForResult(i, browseFileRequestCode)
             }
@@ -768,14 +775,14 @@ class MainActivity : Activity() {
         // because launching PipePipe/NewPipe via getLaunchIntentForPackage plays the video
         // rather than showing the URL to copy.
         openPlayerButton = Button(this).apply {
-            text = "💡 How to get the YouTube ID"
+            text = getString(R.string.how_to_get_youtube_id)
             setOnClickListener {
-                toast("In PipePipe/NewPipe/YouTube website: long-press the video → Share → copy the YouTube URL. Then paste it in the field above.")
+                toast(getString(R.string.how_to_get_youtube_id_instructions))
             }
         }
 
         loadSegmentsButton = Button(this).apply {
-            text = "📄 Load TXT/JSON segments…"
+            text = getString(R.string.load_txt_json_segments)
             setOnClickListener {
                 val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
@@ -791,11 +798,14 @@ class MainActivity : Activity() {
 
         val scrollContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             addView(statusView, lp)
 
             clearSummaryButton = Button(context).apply {
-                text = "Clear summary"
+                text = getString(R.string.clear_summary)
                 isEnabled = false
                 alpha = 0.5f
                 visibility = View.GONE
@@ -830,11 +840,12 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 visibility = View.GONE
             }
+
             fun toolbarButton(label: String, onClick: () -> Unit): Button {
                 return Button(context).apply {
                     text = label
                     gravity = android.view.Gravity.CENTER
-                    setSingleLine(true)
+                    isSingleLine = true
                     setPadding(0, 0, 0, 0)
                     setOnClickListener { onClick() }
                 }
@@ -849,12 +860,21 @@ class MainActivity : Activity() {
             saveSegmentsJsonButton = toolbarButton("Save JSON") {
                 beginSaveSegments("json")
             }
-            segmentToolbar.addView(addSegmentButton, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            segmentToolbar.addView(saveSegmentsTxtButton, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            segmentToolbar.addView(saveSegmentsJsonButton, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            segmentToolbar.addView(
+                addSegmentButton, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+            )
+            segmentToolbar.addView(
+                saveSegmentsTxtButton, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+            )
+            segmentToolbar.addView(
+                saveSegmentsJsonButton, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+            )
             addView(segmentToolbar, lp)
             segmentListContainer.tag = segmentToolbar
 
@@ -863,7 +883,7 @@ class MainActivity : Activity() {
             // ── Card 1: YouTube ID ────────────────────────────────────────────
             idCardView = makeCard(p, cardColor(CardState.PENDING)).also { card ->
                 processWithoutSegmentsCheckBox = CheckBox(context).apply {
-                    text = "Use segmentation"
+                    text = getString(R.string.use_segmentation)
                     isChecked = getSharedPreferences(prefsName, MODE_PRIVATE)
                         .getBoolean(keyUseSegmentation, true)
                     setOnCheckedChangeListener { _, checked ->
@@ -886,26 +906,50 @@ class MainActivity : Activity() {
                 val idTopRow = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    addView(processWithoutSegmentsCheckBox, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                    addView(idCardIcon, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(
+                        processWithoutSegmentsCheckBox, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        idCardIcon, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
                 }
                 val col = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    addView(idTopRow, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                    addView(idInput, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                    addView(openPlayerButton, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                    addView(loadSegmentsButton, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                    addView(idCardNote, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(
+                        idTopRow, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        idInput, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        openPlayerButton, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        loadSegmentsButton, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        idCardNote, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
                 }
-                card.addView(col, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                card.addView(
+                    col, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
             }
             addView(idCardView, lp)
 
@@ -917,21 +961,33 @@ class MainActivity : Activity() {
                     setPadding(0, 0, p / 2, 0)
                 }
                 fileCardLabel = TextView(context).apply {
-                    text = "No file selected"
+                    text = getString(R.string.no_file_selected)
                     textSize = 14f
                 }
                 val row = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    addView(fileCardIcon, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                    addView(fileCardLabel, LinearLayout.LayoutParams(
-                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(
+                        fileCardIcon, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        fileCardLabel, LinearLayout.LayoutParams(
+                            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                        )
+                    )
                 }
-                card.addView(row, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                card.addView(browseFileButton, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                card.addView(
+                    row, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+                card.addView(
+                    browseFileButton, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
             }
             addView(fileCardView, lp)
 
@@ -940,7 +996,7 @@ class MainActivity : Activity() {
 
             // Cut mode selector
             val modeLabel = TextView(context).apply {
-                text = "Cut mode:"
+                text = getString(R.string.cut_mode)
                 setPadding(p, p / 2, p, 0)
             }
             addView(modeLabel, lp)
@@ -951,20 +1007,20 @@ class MainActivity : Activity() {
             }
             val modePrefs = getSharedPreferences(prefsName, MODE_PRIVATE)
             val savedFrameAccurate = modePrefs.getBoolean(keyFrameAccurate, false)
-            val savedHwAccurate    = modePrefs.getBoolean(keyHwAccurate, false)
+            val savedHwAccurate = modePrefs.getBoolean(keyHwAccurate, false)
             radioFast = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Fast (stream copy — best tradeoff, accurate for audio-only - done in seconds)"
+                text = getString(R.string.fast_mode_description)
                 isChecked = !savedFrameAccurate && !savedHwAccurate
             }
             radioHwAccurate = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "HW-Accurate (single-pass, one-shot HW CODEC init — lengthy)"
+                text = getString(R.string.hw_accurate_mode_description)
                 isChecked = savedHwAccurate
             }
             radioSwAccurate = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "SW-Accurate (single-pass, one-shot CPU encode - lengthy)"
+                text = getString(R.string.sw_accurate_mode_description)
                 isChecked = savedFrameAccurate
             }
             radioGroup.addView(radioFast)
@@ -972,9 +1028,9 @@ class MainActivity : Activity() {
             radioGroup.addView(radioSwAccurate)
 
             val initialId = when {
-                savedHwAccurate    -> radioHwAccurate.id
+                savedHwAccurate -> radioHwAccurate.id
                 savedFrameAccurate -> radioSwAccurate.id
-                else               -> radioFast.id
+                else -> radioFast.id
             }
             radioGroup.check(initialId)
             radioGroup.setOnCheckedChangeListener { _, _ ->
@@ -994,7 +1050,7 @@ class MainActivity : Activity() {
 
             // ── Processing options ─────────────────────────────────────────
             val streamLabel = TextView(context).apply {
-                text = "Output streams:"
+                text = getString(R.string.output_streams)
                 setPadding(p, p, p, 0)
                 textSize = 14f
             }
@@ -1008,16 +1064,16 @@ class MainActivity : Activity() {
 
             radioKeepBoth = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Keep both audio and video"
+                text = getString(R.string.keep_audio_and_video)
                 isChecked = true
             }
             radioAudioOnly = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Audio only"
+                text = getString(R.string.audio_only)
             }
             radioVideoOnly = RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Video only"
+                text = getString(R.string.video_only)
             }
 
             streamGroup.addView(radioKeepBoth)
@@ -1046,7 +1102,7 @@ class MainActivity : Activity() {
             }
 
             // ── Output format controls ─────────────────────────────────────
-            fun makeRow(label: String, control: android.view.View, annotation: TextView? = null): LinearLayout {
+            fun makeRow(label: String, control: View, annotation: TextView? = null): LinearLayout {
                 val row = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
@@ -1058,23 +1114,29 @@ class MainActivity : Activity() {
                     textSize = 13f
                     setPadding(0, 0, p / 2, 0)
                 }
-                row.addView(title, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ))
+                row.addView(
+                    title, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
 
-                row.addView(control, LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-                ))
+                row.addView(
+                    control, LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                    )
+                )
 
                 annotation?.let {
                     it.textSize = 11f
                     it.alpha = 0.65f
                     it.setPadding(p / 2, 0, 0, 0)
-                    row.addView(it, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ))
+                    row.addView(
+                        it, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
                 }
 
                 return row
@@ -1093,7 +1155,7 @@ class MainActivity : Activity() {
             resolutionSpinner = Spinner(context)
             audioSampleRateSpinner = Spinner(context)
             audioBitrateInput = EditText(context).apply {
-                hint = "Audio bitrate, e.g. 163k"
+                hint = getString(R.string.audio_bitrate_hint)
             }
 
             audioBitratePresetSpinner = Spinner(context).apply {
@@ -1110,11 +1172,20 @@ class MainActivity : Activity() {
                         selectedAudioBitratePreset = choice
 
                         when {
-                            choice == "Custom" -> Unit
-                            choice == "Input" -> detectedAudioBitrate?.let {
-                                audioBitrateInput.setText("${it / 1000}k")
+                            choice == getString(R.string.custom) -> Unit
+                            choice == getString(R.string.input_bitrate) -> detectedAudioBitrate?.let {
+                                audioBitrateInput.setText(
+                                    getString(
+                                        R.string.audio_bitrate_with_unit,
+                                        it / 1000
+                                    )
+                                )
                             }
-                            choice.startsWith("128k") -> audioBitrateInput.setText("128k")
+
+                            choice == getString(R.string.audio_bitrate_128k) ||
+                                    choice == getString(R.string.audio_bitrate_fallback) ->
+                                audioBitrateInput.setText(getString(R.string.audio_bitrate_128k))
+
                             choice.endsWith("k") -> audioBitrateInput.setText(choice)
                         }
                     }
@@ -1126,111 +1197,137 @@ class MainActivity : Activity() {
             crfSpinner = Spinner(context)
             cqSpinner = Spinner(context)
             bitrateInput = EditText(context).apply {
-                hint = "Bitrate, e.g. 4M or 4000k"
+                hint = getString(R.string.video_bitrate_hint)
             }
             videoInputInfoView = TextView(context)
             audioInputInfoView = TextView(context)
 
-            addView(makeRow("Video", videoSectionSpinner), lp)
+            addView(makeRow(getString(R.string.video_label), videoSectionSpinner), lp)
             addView(videoInputInfoView, lp)
-            addView(makeRow("Video codec", videoCodecSpinner), lp)
-            addView(makeRow("Container", containerSpinner), lp)
-            addView(makeRow("Quality", qualityModeSpinner, TextView(context)), lp)
+            addView(makeRow(getString(R.string.video_codec_label), videoCodecSpinner), lp)
+            addView(makeRow(getString(R.string.container_label), containerSpinner), lp)
+            addView(
+                makeRow(
+                    getString(R.string.quality_label),
+                    qualityModeSpinner,
+                    TextView(context)
+                ), lp
+            )
 
             val qualityValueRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = android.view.Gravity.CENTER_VERTICAL
                 setPadding(p * 2, 0, 0, 0)
             }
-            qualityValueRow.addView(crfSpinner, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-            ))
-            qualityValueRow.addView(cqSpinner, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-            ))
-            qualityValueRow.addView(bitrateInput, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-            ))
-            qualityValueRow.addView(bitratePresetSpinner, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
+            qualityValueRow.addView(
+                crfSpinner, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+            )
+            qualityValueRow.addView(
+                cqSpinner, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+            )
+            qualityValueRow.addView(
+                bitrateInput, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                )
+            )
+            qualityValueRow.addView(
+                bitratePresetSpinner, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
             addView(qualityValueRow, lp)
 
-            addView(makeRow("Preset", presetSpinner), lp)
-            addView(makeRow("Frame rate", frameRateSpinner, TextView(context)), lp)
-            addView(makeRow("Resolution", resolutionSpinner), lp)
+            addView(makeRow(getString(R.string.preset_label), presetSpinner), lp)
+            addView(
+                makeRow(
+                    getString(R.string.frame_rate_label),
+                    frameRateSpinner,
+                    TextView(context)
+                ), lp
+            )
+            addView(makeRow(getString(R.string.resolution_label), resolutionSpinner), lp)
 
-            addView(makeRow("Audio", audioSectionSpinner), lp)
+            addView(makeRow(getString(R.string.audio_label), audioSectionSpinner), lp)
             addView(audioInputInfoView, lp)
-            addView(makeRow("Audio codec", audioCodecSpinner), lp)
-            addView(makeRow("Audio container", audioContainerSpinner), lp)
-            addView(makeRow("Sample rate", audioSampleRateSpinner), lp)
+            addView(makeRow(getString(R.string.audio_codec_label), audioCodecSpinner), lp)
+            addView(makeRow(getString(R.string.audio_container_label), audioContainerSpinner), lp)
+            addView(makeRow(getString(R.string.sample_rate_label), audioSampleRateSpinner), lp)
             val audioBitrateValueRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = android.view.Gravity.CENTER_VERTICAL
                 setPadding(p * 2, 0, 0, 0)
             }
 
-            audioBitrateValueRow.addView(audioBitrateInput, LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f
-            ))
-            audioBitrateValueRow.addView(audioBitratePresetSpinner, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
+            audioBitrateValueRow.addView(
+                audioBitrateInput, LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+            audioBitrateValueRow.addView(
+                audioBitratePresetSpinner, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
 
-            addView(makeRow("Audio bitrate", audioBitrateValueRow), lp)
+            addView(makeRow(getString(R.string.audio_bitrate_label), audioBitrateValueRow), lp)
 
-                fun resolvedVideoChoiceLabel(mode: ExecutionMode): String {
-                    val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.videoCodec)
-                    val matching = uiVideoCatalog.firstOrNull { it.codecFamily == inputFamily }
+            fun resolvedVideoChoiceLabel(mode: ExecutionMode): String {
+                val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.videoCodec)
+                val matching = uiVideoCatalog.firstOrNull { it.codecFamily == inputFamily }
 
-                    if (matching != null) {
-                        return "${matching.label} - input"
-                    }
-
-                    val fallback = when (mode) {
-                        ExecutionMode.HW_ACCURATE ->
-                            uiVideoCatalog.firstOrNull { it.name == "h264_mediacodec" }
-                                ?: uiVideoCatalog.firstOrNull()
-                        ExecutionMode.SW_ACCURATE ->
-                            uiVideoCatalog.firstOrNull { it.name == "mpeg4" }
-                                ?: uiVideoCatalog.firstOrNull()
-                        else -> null
-                    }
-
-                    return fallback?.let { "${it.label} - fallback" }
-                        ?: "No compatible video encoder"
+                if (matching != null) {
+                    return "${matching.label} - input"
                 }
 
-                fun resolvedAudioChoiceLabel(): String {
-                    val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
-                    val matching = uiAudioCatalog.firstOrNull { it.codecFamily == inputFamily }
+                val fallback = when (mode) {
+                    ExecutionMode.HW_ACCURATE ->
+                        uiVideoCatalog.firstOrNull { it.name == "h264_mediacodec" }
+                            ?: uiVideoCatalog.firstOrNull()
 
-                    return if (matching != null) {
-                        "${matching.label} - input"
-                    } else {
-                        "AAC - fallback"
-                    }
+                    ExecutionMode.SW_ACCURATE ->
+                        uiVideoCatalog.firstOrNull { it.name == "mpeg4" }
+                            ?: uiVideoCatalog.firstOrNull()
+
+                    else -> null
                 }
 
-                fun resolvedContainerChoiceLabel(): String {
-                    val summary = pendingVideoInfo?.summaryLine ?: ""
+                return fallback?.let { "${it.label} - fallback" }
+                    ?: "No compatible video encoder"
+            }
 
-                    return when {
-                        // MPEG-TS output is unsupported for transcoding.
-                        // TS input is automatically planned as MP4 output.
-                        summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
-                        summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
-                        summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
-                        summary.contains("WebM", ignoreCase = true) -> "WebM - input"
-                        summary.contains("AVI", ignoreCase = true) -> "AVI - input"
-                        else -> "MP4 - fallback"
-                    }
+            fun resolvedAudioChoiceLabel(): String {
+                val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
+                val matching = uiAudioCatalog.firstOrNull { it.codecFamily == inputFamily }
+
+                return if (matching != null) {
+                    "${matching.label} - input"
+                } else {
+                    "AAC - fallback"
                 }
+            }
+
+            fun resolvedContainerChoiceLabel(): String {
+                val summary = pendingVideoInfo?.summaryLine ?: ""
+
+                return when {
+                    // MPEG-TS output is unsupported for transcoding.
+                    // TS input is automatically planned as MP4 output.
+                    summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
+                    summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
+                    summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
+                    summary.contains("WebM", ignoreCase = true) -> "WebM - input"
+                    summary.contains("AVI", ignoreCase = true) -> "AVI - input"
+                    else -> "MP4 - fallback"
+                }
+            }
 
             fun refreshOutputOptions() {
                 if (suppressOutputCallbacks) return
@@ -1295,8 +1392,14 @@ class MainActivity : Activity() {
                 val preferredVideo = if (videoSectionCustom && selectedVideoEncoder != null) {
                     videoCatalog.firstOrNull { it.name == selectedVideoEncoder }
                         ?.let { "${it.label}${if (it.available) "" else " — unavailable"}" }
-                } else null
-                setAdapterKeepingSelection(videoCodecSpinner, videoValues, preferredVideo)
+                } else {
+                    videoValues.firstOrNull()
+                }
+                setAdapterKeepingSelection(
+                    videoCodecSpinner,
+                    videoValues,
+                    preferredVideo
+                )
 
                 val resolvedAudioLabel = resolvedAudioChoiceLabel()
                 val resolvedAudioBase = resolvedAudioLabel.substringBefore(" - ")
@@ -1454,7 +1557,7 @@ class MainActivity : Activity() {
                 )
 
                 presetSpinner.isEnabled = isSoftwareX264X265 &&
-                    mode == ExecutionMode.SW_ACCURATE
+                        mode == ExecutionMode.SW_ACCURATE
                 presetSpinner.alpha = if (presetSpinner.isEnabled) 1f else 0.4f
 
                 val probeFps = pendingVideoInfo?.fps
@@ -1467,7 +1570,7 @@ class MainActivity : Activity() {
                 }
 
                 inputFrameRate = frameRateInputValue
-                selectedFrameRate = null
+//                selectedFrameRate = null
                 refreshFrameRateDropdown()
 
                 val inputHeight = pendingVideoInfo?.height
@@ -1547,12 +1650,16 @@ class MainActivity : Activity() {
                     mode == ExecutionMode.FAST -> listOf(resolvedContainerLabel)
                     effectiveVideoFamily == "H.264" ->
                         containerChoices(mp4Label, "MKV", "MOV", "AVI")
+
                     effectiveVideoFamily == "H.265/HEVC" ->
                         containerChoices(mp4Label, "MKV", "MOV")
+
                     effectiveVideoFamily == "VP9" ->
                         containerChoices("WebM", "MKV")
+
                     effectiveVideoFamily == "AV1" ->
                         containerChoices(mp4Label, "MKV", "WebM")
+
                     else -> containerChoices(mp4Label, "MKV", "AVI")
                 }
                 setAdapterKeepingSelection(
@@ -1562,19 +1669,19 @@ class MainActivity : Activity() {
                 )
 
                 val inputSummary = pendingVideoInfo?.summaryLine ?: "unknown"
-                val inputVideoCodec = pendingVideoInfo?.videoCodec ?: "unknown"
-                val inputFps = pendingVideoInfo?.fps?.let { "${"%.2f".format(it)} fps" } ?: "unknown"
-                val inputVideoBitrate = pendingVideoInfo?.videoBitrate
-                    ?.let { "${it / 1000} kbps" } ?: "unknown"
                 val inputAudioCodec = pendingVideoInfo?.audioCodec ?: "unknown"
                 val inputSampleRate = pendingVideoInfo?.sampleRate
-                    ?.let { "${it} Hz" } ?: "unknown"
+                    ?.let { "$it Hz" } ?: "unknown"
                 val inputAudioBitrate = pendingVideoInfo?.audioBitrate
                     ?.let { "${it / 1000} kbps" } ?: "unknown"
 
-                videoInputInfoView.text = "input: $inputSummary"
-                audioInputInfoView.text =
-                    "input: $inputAudioCodec $inputSampleRate $inputAudioBitrate"
+                videoInputInfoView.text = getString(R.string.input_summary, inputSummary)
+                audioInputInfoView.text = getString(
+                    R.string.audio_input_summary,
+                    inputAudioCodec,
+                    inputSampleRate,
+                    inputAudioBitrate
+                )
 
                 // The fallback marker reflects the inspected source bitrate.
                 // Do not derive it from the text field: after applying the
@@ -1582,24 +1689,30 @@ class MainActivity : Activity() {
                 val audioBitrateFallback = audioBitrateFallbackActive
 
                 if (audioBitrateFallback && selectedAudioBitratePreset == null) {
-                    selectedAudioBitratePreset = "128k - fallback"
+                    selectedAudioBitratePreset = getString(R.string.audio_bitrate_fallback)
                 }
 
                 val audioBitrateOptions = buildList {
-                    add("Input")
+                    add(getString(R.string.input_bitrate))
                     add("40k")
                     add("60k")
                     add("80k")
                     add("100k")
                     add("128k")
                     add("150k")
-                    add("Custom")
-                    if (audioBitrateFallback) add("128k - fallback")
+                    add(getString(R.string.custom))
+                    if (audioBitrateFallback) {
+                        add(getString(R.string.audio_bitrate_fallback))
+                    }
                 }
 
                 val preferredAudioBitrate = selectedAudioBitratePreset
                     ?.takeIf { it in audioBitrateOptions }
-                    ?: if (audioBitrateFallback) "128k - fallback" else "Input"
+                    ?: if (audioBitrateFallback) {
+                        getString(R.string.audio_bitrate_fallback)
+                    } else {
+                        getString(R.string.input_bitrate)
+                    }
 
                 setAdapterKeepingSelection(
                     audioBitratePresetSpinner,
@@ -1607,26 +1720,24 @@ class MainActivity : Activity() {
                     preferredAudioBitrate
                 )
 
-                outputConsequenceView.text = buildString {
-                    append(
+                outputConsequenceView.text = getString(
+                    R.string.output_consequence,
+                    getString(
                         when (mode) {
-                            ExecutionMode.FAST -> "Fast stream copy"
-                            ExecutionMode.SW_ACCURATE -> "SW accurate processing"
-                            ExecutionMode.HW_ACCURATE -> "HW accurate processing"
+                            ExecutionMode.FAST -> R.string.fast_stream_copy
+                            ExecutionMode.SW_ACCURATE -> R.string.sw_accurate_processing
+                            ExecutionMode.HW_ACCURATE -> R.string.hw_accurate_processing
                         }
-                    )
-                    append("; ")
-                    append(
+                    ),
+                    getString(
                         when {
-                            radioAudioOnly.isChecked -> "audio-only output"
-                            radioVideoOnly.isChecked -> "video-only output"
-                            else -> "both streams"
+                            radioAudioOnly.isChecked -> R.string.audio_only_output
+                            radioVideoOnly.isChecked -> R.string.video_only_output
+                            else -> R.string.both_streams
                         }
-                    )
-                    append("; ")
-                    append("remove selected provided segments")
-                    append(".")
-                }
+                    ),
+                    getString(R.string.remove_selected_provided_segments)
+                )
             }
 
             videoSectionSpinner.onItemSelectedListener =
@@ -1642,6 +1753,7 @@ class MainActivity : Activity() {
                         }
                         refreshOutputOptions()
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1668,6 +1780,7 @@ class MainActivity : Activity() {
 
                         refreshOutputOptions()
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1677,12 +1790,6 @@ class MainActivity : Activity() {
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
                         if (suppressOutputCallbacks || position <= 0) return
-
-                        val mode = when {
-                            radioHwAccurate.isChecked -> ExecutionMode.HW_ACCURATE
-                            radioSwAccurate.isChecked -> ExecutionMode.SW_ACCURATE
-                            else -> ExecutionMode.FAST
-                        }
 
                         val option = uiVideoChoices
                             .getOrNull(position)
@@ -1769,6 +1876,7 @@ class MainActivity : Activity() {
                         }
                         refreshOutputOptions()
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1783,6 +1891,7 @@ class MainActivity : Activity() {
                             ?.groupValues?.get(1)?.toInt()
                         refreshOutputOptions()
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1796,6 +1905,7 @@ class MainActivity : Activity() {
                         refreshOutputOptionsCallback = { refreshOutputOptions() }
                         refreshOutputOptions()
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1815,6 +1925,7 @@ class MainActivity : Activity() {
                             refreshOutputOptions()
                         }
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1836,6 +1947,7 @@ class MainActivity : Activity() {
                             bitrateInput.setText(selected.lowercase())
                         }
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1847,6 +1959,7 @@ class MainActivity : Activity() {
                         if (suppressOutputCallbacks) return
                         selectedPreset = presetSpinner.selectedItem?.toString() ?: "medium"
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1861,6 +1974,7 @@ class MainActivity : Activity() {
                             displayValue = frameRateSpinner.selectedItem as? String
                         )
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1875,6 +1989,7 @@ class MainActivity : Activity() {
                             ?.substringBefore(" (")
                             ?.toIntOrNull()
                     }
+
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
@@ -1947,19 +2062,22 @@ class MainActivity : Activity() {
 
             // Diagnostic log — hidden until a run completes
             logButton = Button(context).apply {
-                text = "📋 Show diagnostic log"
+                text = getString(R.string.show_diagnostic_log)
                 visibility = View.GONE
                 setOnClickListener {
                     val showing = logView.isVisible
                     logView.isVisible = !showing
-                    text = if (showing) "📋 Show diagnostic log" else "📋 Hide diagnostic log"
+                    text = getString(
+                        if (showing) R.string.show_diagnostic_log
+                        else R.string.hide_diagnostic_log
+                    )
                     if (!showing) logView.text = DiagLog.get().ifBlank { "(log is empty)" }
                 }
             }
             addView(logButton, lp)
 
             saveLogButton = Button(context).apply {
-                text = "💾 Save diagnostic log"
+                text = getString(R.string.save_diagnostic_log)
                 visibility = View.GONE
                 setOnClickListener {
                     if (ProcessingService.isProcessingActive) {
@@ -1989,56 +2107,94 @@ class MainActivity : Activity() {
                 setBackgroundColor(0xFF1A1A2E.toInt())
 
                 val title = TextView(context).apply {
-                    text = "☕ SponsorCut is free & open-source"
+                    text = getString(R.string.donation_title)
                     textSize = 14f
                     setTextColor(0xFFFFFFFF.toInt())
                     setPadding(0, 0, 0, p / 2)
                 }
-                addView(title, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(
+                    title, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
 
                 val subtitle = TextView(context).apply {
-                    text = "If it saved you time, consider supporting development:"
+                    text = getString(R.string.donation_subtitle)
                     textSize = 12f
                     setTextColor(0xFFCCCCCC.toInt())
                     setPadding(0, 0, 0, p)
                 }
-                addView(subtitle, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(
+                    subtitle, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
 
                 val coffeeBtn = Button(context).apply {
-                    text = "☕ Buy Me a Coffee"
+                    text = getString(R.string.buy_me_a_coffee)
                     setOnClickListener {
-                        val i = android.content.Intent(android.content.Intent.ACTION_VIEW,
-                            "https://buymeacoffee.com/steiff".toUri())
+                        val i = Intent(
+                            Intent.ACTION_VIEW,
+                            "https://buymeacoffee.com/steiff".toUri()
+                        )
                         startActivity(i)
                     }
                 }
-                addView(coffeeBtn, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(
+                    coffeeBtn, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
 
                 val btcAddress = "bc1qqz6dxwc38lrhmp6u9880alkvretwv2d6ds5had"
+                val btcUri = "bitcoin:$btcAddress?label=SponsorCut%20Donation"
+
                 val btcLabel = TextView(context).apply {
-                    text = "₿ Bitcoin: $btcAddress"
+                    text = getString(R.string.bitcoin_address, btcAddress)
                     textSize = 11f
                     setTextColor(0xFFAAAAAA.toInt())
                     setTextIsSelectable(true)
                     setPadding(0, p, 0, p / 4)
                     typeface = android.graphics.Typeface.MONOSPACE
                 }
-                addView(btcLabel, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(
+                    btcLabel, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
 
-                val btcCopyBtn = Button(context).apply {
-                    text = "📋 Copy Bitcoin address"
+                val btcPayBtn = Button(context).apply {
+                    text = getString(R.string.donate_with_bitcoin)
                     setOnClickListener {
-                        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        cm.setPrimaryClip(android.content.ClipData.newPlainText("Bitcoin address", btcAddress))
-                        android.widget.Toast.makeText(context, "Bitcoin address copied ✓", android.widget.Toast.LENGTH_SHORT).show()
+                        val intent = Intent(
+                            Intent.ACTION_VIEW,
+                            btcUri.toUri()
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+                        try {
+                            startActivity(intent)
+                        } catch (_: ActivityNotFoundException) {
+                            val clipboard = getSystemService(CLIPBOARD_SERVICE)
+                                    as ClipboardManager
+                            clipboard.setPrimaryClip(
+                                ClipData.newPlainText(
+                                    getString(R.string.bitcoin_address_copied),
+                                    btcAddress
+                                )
+                            )
+                            Toast.makeText(
+                                context,
+                                getString(R.string.bitcoin_wallet_missing_copied),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
                 }
-                addView(btcCopyBtn, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(
+                    btcPayBtn, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
             }
             addView(donationView, lp)
         }
@@ -2058,7 +2214,7 @@ class MainActivity : Activity() {
 
         if (detectedCategories.isEmpty()) {
             val empty = TextView(this).apply {
-                text = "No segment categories detected."
+                text = getString(R.string.no_segment_categories_detected)
                 textSize = 12f
                 alpha = 0.7f
             }
@@ -2067,7 +2223,7 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Detected categories:"
+            text = getString(R.string.detected_categories)
             textSize = 13f
             setPadding(0, 0, 0, 8)
         }
@@ -2079,7 +2235,11 @@ class MainActivity : Activity() {
 
         for (category in detectedCategories) {
             val checkbox = CheckBox(this).apply {
-                text = "${categoryLabel(category)} (${counts[category] ?: 0})"
+                text = getString(
+                    R.string.category_count,
+                    categoryLabel(category),
+                    counts[category] ?: 0
+                )
                 isChecked = true
                 setOnCheckedChangeListener { _, isChecked ->
                     if (suppressCategoryCallbacks) return@setOnCheckedChangeListener
@@ -2147,7 +2307,7 @@ class MainActivity : Activity() {
                     // EncoderCapabilities.getQualityRange() requires API 28.
                     // Older Android versions do not expose a quality range, so
                     // CQ cannot be safely offered there.
-                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
                         return MediaCodecCqCapability(false, 0, 0)
                     }
 
@@ -2267,11 +2427,13 @@ class MainActivity : Activity() {
                 if (audioBitrateFallbackActive) {
                     // Telegram-related files can expose implausibly low audio
                     // bitrate metadata. Do not inherit it for re-encoding.
-                    audioBitrateInput.setText("128k")
-                    selectedAudioBitratePreset = "128k - fallback"
+                    audioBitrateInput.setText(getString(R.string.audio_bitrate_128k))
+                    selectedAudioBitratePreset = getString(R.string.audio_bitrate_fallback)
                 } else {
                     audioBitrate?.let {
-                        audioBitrateInput.setText("${it / 1000}k")
+                        audioBitrateInput.setText(
+                            getString(R.string.audio_bitrate_with_unit, it / 1000)
+                        )
                     }
                 }
 
@@ -2287,9 +2449,11 @@ class MainActivity : Activity() {
                     DiagLog.append(
                         "TaskUI",
                         "POST-INSPECT FAILURE in refreshOutputOptions:\n" +
-                            e.stackTraceToString()
+                                e.stackTraceToString()
                     )
-                    setStatus("Media loaded, but output options failed: ${e.message}")
+                    setStatus(
+                        getString(R.string.media_loaded_output_options_failed, e.message)
+                    )
                 }
 
                 try {
@@ -2300,9 +2464,11 @@ class MainActivity : Activity() {
                     DiagLog.append(
                         "TaskUI",
                         "POST-INSPECT FAILURE in loadLocalSegmentsIfNeeded:\n" +
-                            e.stackTraceToString()
+                                e.stackTraceToString()
                     )
-                    setStatus("Media loaded, but segment reload failed: ${e.message}")
+                    setStatus(
+                        getString(R.string.media_loaded_segment_reload_failed, e.message)
+                    )
                 }
 
                 try {
@@ -2311,20 +2477,26 @@ class MainActivity : Activity() {
                     DiagLog.append(
                         "TaskUI",
                         "POST-INSPECT FAILURE in updateStreamSelectionAvailability:\n" +
-                            e.stackTraceToString()
+                                e.stackTraceToString()
                     )
-                    setStatus("Media loaded, but stream UI failed: ${e.message}")
+                    setStatus(
+                        getString(R.string.media_loaded_stream_ui_failed, e.message)
+                    )
                 }
 
                 val inputSummary = info?.summaryLine ?: "unknown"
                 val inputAudioCodec = info?.audioCodec ?: "unknown"
-                val inputSampleRate = info?.sampleRate?.let { "${it} Hz" } ?: "unknown"
+                val inputSampleRate = info?.sampleRate?.let { "$it Hz" } ?: "unknown"
                 val inputAudioBitrate = info?.audioBitrate
                     ?.let { "${it / 1000} kbps" } ?: "unknown"
 
-                videoInputInfoView.text = "Input: $inputSummary"
-                audioInputInfoView.text =
-                    "Input: $inputAudioCodec $inputSampleRate $inputAudioBitrate"
+                videoInputInfoView.text = getString(R.string.input_summary, inputSummary)
+                audioInputInfoView.text = getString(
+                    R.string.audio_input_summary,
+                    inputAudioCodec,
+                    inputSampleRate,
+                    inputAudioBitrate
+                )
 
                 // Show the input bitrate immediately when Quality is set to Input.
                 // Prefer the video stream's own bitrate. If ffprobe cannot provide
@@ -2340,7 +2512,11 @@ class MainActivity : Activity() {
                         }
                     }
 
-                detectedVideoBitrate?.let { bitrateInput.setText("${it / 1000}k") }
+                detectedVideoBitrate?.let {
+                    bitrateInput.setText(
+                        getString(R.string.audio_bitrate_with_unit, it / 1000)
+                    )
+                }
 
                 // Audio-bitrate fallback was applied before the first
                 // output-options refresh, so the dropdown and text field already
@@ -2454,19 +2630,19 @@ class MainActivity : Activity() {
                         } else {
                             "Local segments loaded ✓\n"
                         }) +
-                            "File: $fileName\n" +
-                            "${result.segments.size} segment(s)" +
-                            (if (!durationPending) {
-                                ", removing ~${formatSegmentTimestamp(totalCut)}."
-                            } else {
-                                "."
-                            }) + "\n" +
-                            (if (unresolvedEndCount > 0) {
-                                "$unresolvedEndCount unresolved \"end\" segment(s) — load media to resolve timing.\n"
-                            } else {
-                                ""
-                            }) +
-                            (if (warningCount > 0) "$warningCount warning(s)." else "No warnings.")
+                                "File: $fileName\n" +
+                                "${result.segments.size} segment(s)" +
+                                (if (!durationPending) {
+                                    ", removing ~${formatSegmentTimestamp(totalCut)}."
+                                } else {
+                                    "."
+                                }) + "\n" +
+                                (if (unresolvedEndCount > 0) {
+                                    "$unresolvedEndCount unresolved \"end\" segment(s) — load media to resolve timing.\n"
+                                } else {
+                                    ""
+                                }) +
+                                (if (warningCount > 0) "$warningCount warning(s)." else "No warnings.")
                     )
                 }
             } catch (e: Exception) {
@@ -2486,10 +2662,10 @@ class MainActivity : Activity() {
 
                     setStatus(
                         "❌ Segment file failed\n" +
-                            "$fileName\n\n" +
-                            (e.message ?: e.toString()) +
-                            (if (details.isNotBlank()) "\n\n$details" else "") +
-                            "\n\nPlease correct the segment file and try again."
+                                "$fileName\n\n" +
+                                (e.message ?: e.toString()) +
+                                (if (details.isNotBlank()) "\n\n$details" else "") +
+                                "\n\nPlease correct the segment file and try again."
                     )
                 }
             }
@@ -2504,6 +2680,7 @@ class MainActivity : Activity() {
                 val name = localSegmentFileName ?: "segment file"
                 "Segmentation file TXT/JSON: $name (${localSegmentFileUri})"
             }
+
             videoId.isNotBlank() -> "YouTube: https://youtu.be/$videoId"
             else -> "ID: Manual"
         }
@@ -2521,11 +2698,11 @@ class MainActivity : Activity() {
         if (effectiveSegments.isEmpty()) return null
 
         val array = org.json.JSONArray()
-        for (segment in effectiveSegments) {
+        for ((category, start, end) in effectiveSegments) {
             val obj = org.json.JSONObject()
-            obj.put("category", segment.category)
-            obj.put("start", segment.start)
-            obj.put("end", segment.end)
+            obj.put("category", category)
+            obj.put("start", start)
+            obj.put("end", end)
             array.put(obj)
         }
 
@@ -2563,7 +2740,7 @@ class MainActivity : Activity() {
                 // do not invite the user to add another media file.
                 val sessionAlreadyReady =
                     pendingUri != null &&
-                        (localSegments != null || idCardState == CardState.OK)
+                            (localSegments != null || idCardState == CardState.OK)
 
                 if (sessionAlreadyReady) {
                     return
@@ -2596,7 +2773,7 @@ class MainActivity : Activity() {
         val videoId = intent.getStringExtra("video_id").orEmpty()
 
         if (uriString.isNullOrBlank()) {
-            setStatus("Direct intent missing 'uri' extra.")
+            setStatus(getString(R.string.direct_intent_missing_uri))
             return
         }
         val uri = uriString.toUri()
@@ -2604,8 +2781,11 @@ class MainActivity : Activity() {
         fileCardState = CardState.OK
         clearCompletedRunState()
         runOnUiThread {
-            fileCardLabel.text = "📄 ${uri.lastPathSegment ?: uriString}"
-            browseFileButton.text = "📁 Change file…"
+            fileCardLabel.text = getString(
+                R.string.file_name_with_icon,
+                uri.lastPathSegment ?: uriString
+            )
+            browseFileButton.text = getString(R.string.change_file)
         }
         inspectSelectedUri(uri)
 
@@ -2631,9 +2811,11 @@ class MainActivity : Activity() {
 
     private fun handleShareIntent(intent: Intent) {
         if (rejectIfBusy()) return
-        Log.d(tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
-            "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
-            "EXTRA_STREAM=${intent.getUriExtra(Intent.EXTRA_STREAM)}")
+        Log.d(
+            tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
+                    "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
+                    "EXTRA_STREAM=${intent.getUriExtra(Intent.EXTRA_STREAM)}"
+        )
         val rawUri = intent.getUriExtra(Intent.EXTRA_STREAM)
             ?: intent.clipData?.getItemAt(0)?.uri
 
@@ -2648,9 +2830,9 @@ class MainActivity : Activity() {
 
             val isSegmentFile =
                 sharedExtension == "txt" ||
-                    sharedExtension == "json" ||
-                    sharedMimeType == "text/plain" ||
-                    sharedMimeType == "application/json"
+                        sharedExtension == "json" ||
+                        sharedMimeType == "text/plain" ||
+                        sharedMimeType == "application/json"
 
             if (isSegmentFile) {
                 handleSharedSegmentFile(uri, sharedFileName)
@@ -2687,10 +2869,11 @@ class MainActivity : Activity() {
         fileCardState = CardState.OK
         clearCompletedRunState()
         inspectSelectedUri(uri)
-        val sharedFileName = FileResolver.getDisplayName(this, uri).ifBlank { uri.lastPathSegment ?: "file" }
+        val sharedFileName =
+            FileResolver.getDisplayName(this, uri).ifBlank { uri.lastPathSegment ?: "file" }
         runOnUiThread {
-            fileCardLabel.text = "📄 $sharedFileName"
-            browseFileButton.text = "📁 Change file…"
+            fileCardLabel.text = getString(R.string.file_name_with_icon, sharedFileName)
+            browseFileButton.text = getString(R.string.change_file)
         }
         saveFileUri(uri, sharedFileName)
         var idSource = "intent"
@@ -2709,7 +2892,10 @@ class MainActivity : Activity() {
             val savedId = prefs.getString(keyLastVideoId, "").orEmpty()
             val savedTs = prefs.getLong(keyLastVideoIdTs, 0L)
             val ageMs = System.currentTimeMillis() - savedTs
-            Log.i(tag, "Cache lookup: savedId='$savedId' savedTs=$savedTs ageMs=$ageMs maxAgeMs=$recentIdMaxAgeMs")
+            Log.i(
+                tag,
+                "Cache lookup: savedId='$savedId' savedTs=$savedTs ageMs=$ageMs maxAgeMs=$recentIdMaxAgeMs"
+            )
             if (savedId.isNotBlank() && ageMs <= recentIdMaxAgeMs) {
                 videoId = savedId
                 idSource = "memory"
@@ -2725,7 +2911,8 @@ class MainActivity : Activity() {
         if (videoId.isBlank()) {
             setStatus("No YouTube ID detected.\nPaste a URL/ID in the field above.")
         } else {
-            val sourceLabel = if (idSource == "memory") "⚠️ from memory — verify!" else "source: $idSource"
+            val sourceLabel =
+                if (idSource == "memory") "⚠️ from memory — verify!" else "source: $idSource"
             setStatus("ID: $videoId ($sourceLabel)\nFetching title and segments…")
             idCardState = CardState.CHECKING
             updateCards()
@@ -2748,8 +2935,8 @@ class MainActivity : Activity() {
         cachedAuthor = null
         idCardState = CardState.PENDING
 
-        loadSegmentsButton.text = "📄 $fileName"
-        setStatus("Segment file shared ✓\n$fileName\n\nParsing segments…")
+        loadSegmentsButton.text = getString(R.string.file_name_with_icon, fileName)
+        setStatus(getString(R.string.segments_shared_parsing, fileName))
         updateCards()
         loadLocalSegments(uri, pendingVideoInfo?.durationSec)
     }
@@ -2779,7 +2966,7 @@ class MainActivity : Activity() {
         localSegmentText = null
         localSegmentsAwaitingDuration = false
         localSegmentsResolvedDurationSec = null
-        loadSegmentsButton.text = "📄 Load TXT/JSON segments…"
+        loadSegmentsButton.text = getString(R.string.load_txt_json_segments)
 
         cachedSegments = null
         currentSegments = emptyList()
@@ -2881,18 +3068,16 @@ class MainActivity : Activity() {
 
         if (info == null) return false
 
-        if (hasAudio && !hasVideo) return true
+        if (hasAudio) return true
 
         val extension = uri?.lastPathSegment
             ?.substringAfterLast('.', "")
             ?.lowercase()
 
         val isMp3 = extension == "mp3" ||
-            info.summaryLine.contains("mp3", ignoreCase = true)
+                info.summaryLine.contains("mp3", ignoreCase = true)
 
-        if (isMp3 && videoCodec == "mjpeg") return true
-
-        return false
+        return isMp3 && videoCodec == "mjpeg"
     }
 
     private fun updateStreamSelectionAvailability() {
@@ -2905,17 +3090,16 @@ class MainActivity : Activity() {
 
         val hasAudio = !audioCodec.isNullOrBlank() && audioCodec != "unknown"
         val hasVideo = !audioOnly &&
-            !videoCodec.isNullOrBlank() &&
-            videoCodec != "unknown"
+                !videoCodec.isNullOrBlank() &&
+                videoCodec != "unknown"
 
-        val bothAvailable = hasVideo && hasAudio
         val videoOnly = hasVideo && !hasAudio
 
         DiagLog.append(
             "StreamUI",
             "videoCodec=$videoCodec audioCodec=$audioCodec " +
-                "hasVideo=$hasVideo hasAudio=$hasAudio " +
-                "audioOnly=$audioOnly videoOnly=$videoOnly"
+                    "hasVideo=$hasVideo hasAudio=$hasAudio " +
+                    "audioOnly=$audioOnly videoOnly=$videoOnly"
         )
 
         applyStreamAwareUiState(
@@ -2944,7 +3128,7 @@ class MainActivity : Activity() {
                 view.isEnabled = enabled
                 view.alpha = if (enabled) 1f else 0.35f
 
-                if (view is android.view.ViewGroup) {
+                if (view is ViewGroup) {
                     for (index in 0 until view.childCount) {
                         apply(view.getChildAt(index))
                     }
@@ -2956,16 +3140,12 @@ class MainActivity : Activity() {
 
         fun row(view: View): View = view.parent as View
 
-        fun detachFromParent(view: View) {
-            (view.parent as? android.view.ViewGroup)?.removeView(view)
-        }
-
-        fun commonAncestor(a: View, b: View): android.view.ViewGroup? {
+        fun commonAncestor(a: View, b: View): ViewGroup? {
             var left: View? = a
             while (left != null) {
                 var right: View? = b
                 while (right != null) {
-                    if (left === right) return left as? android.view.ViewGroup
+                    if (left === right) return left as? ViewGroup
                     right = right.parent as? View
                 }
                 left = left.parent as? View
@@ -2973,11 +3153,10 @@ class MainActivity : Activity() {
             return null
         }
 
-        val videoParent = commonAncestor(
+        commonAncestor(
             row(videoSectionSpinner),
             row(audioSectionSpinner)
         ) ?: return
-        val audioParent = videoParent
 
         val videoViews = listOf(
             row(videoSectionSpinner),
@@ -3010,20 +3189,20 @@ class MainActivity : Activity() {
             !processingActive && !streamChoiceForced && !inspectionPending
 
         // TEMPORARY DIAGNOSTIC: identify why output forms remain disabled.
-        val gateMessage = buildString {
-            append("Form gate: ")
-            append("mediaLoaded=$mediaLoaded, ")
-            append("hasVideo=$hasVideo, ")
-            append("hasAudio=$hasAudio, ")
-            append("processingActive=$processingActive, ")
-            append("audioOnly=$audioOnly, ")
-            append("videoOnly=$videoOnly, ")
-            append("manualStream=$manualStreamSelection, ")
-            append("videoCodec=${pendingVideoInfo?.videoCodec}, ")
-            append("audioCodec=${pendingVideoInfo?.audioCodec}")
-        }
-        DiagLog.append("FormGate", gateMessage)
-        setStatus(gateMessage)
+//        val gateMessage = buildString {
+//            append("Form gate: ")
+//            append("mediaLoaded=$mediaLoaded, ")
+//            append("hasVideo=$hasVideo, ")
+//            append("hasAudio=$hasAudio, ")
+//            append("processingActive=$processingActive, ")
+//            append("audioOnly=$audioOnly, ")
+//            append("videoOnly=$videoOnly, ")
+//            append("manualStream=$manualStreamSelection, ")
+//            append("videoCodec=${pendingVideoInfo?.videoCodec}, ")
+//            append("audioCodec=${pendingVideoInfo?.audioCodec}")
+//        }
+//        DiagLog.append("FormGate", gateMessage)
+//        setStatus(gateMessage)
 
         radioKeepBoth.isEnabled = streamControlsEnabled
         radioAudioOnly.isEnabled = streamControlsEnabled
@@ -3032,17 +3211,19 @@ class MainActivity : Activity() {
         suppressStreamCallbacks = true
 
         if (audioOnly) {
-            streamOptionsLabel.text = "Output streams: Audio only — no usable video stream"
+            streamOptionsLabel.text =
+                getString(R.string.output_streams_audio_only_unavailable)
             manualStreamSelection = StreamSelection.AUDIO_ONLY
             streamSelectionForced = true
             streamGroup.check(radioAudioOnly.id)
         } else if (videoOnly) {
-            streamOptionsLabel.text = "Output streams: Video only — no usable audio stream"
+            streamOptionsLabel.text =
+                getString(R.string.output_streams_video_only_unavailable)
             manualStreamSelection = StreamSelection.VIDEO_ONLY
             streamSelectionForced = true
             streamGroup.check(radioVideoOnly.id)
         } else if (inspectionPending) {
-            streamOptionsLabel.text = "Output streams: detecting…"
+            streamOptionsLabel.text = getString(R.string.output_streams_detecting)
 
             when (manualStreamSelection) {
                 StreamSelection.AUDIO_ONLY -> streamGroup.check(radioAudioOnly.id)
@@ -3050,7 +3231,7 @@ class MainActivity : Activity() {
                 StreamSelection.BOTH -> streamGroup.check(radioKeepBoth.id)
             }
         } else {
-            streamOptionsLabel.text = "Output streams: Video and audio"
+            streamOptionsLabel.text = getString(R.string.output_streams_both)
 
             // A prior audio-only or video-only file may have forced the stream
             // selection. Restore the normal default when the newly loaded file
@@ -3070,10 +3251,10 @@ class MainActivity : Activity() {
         suppressStreamCallbacks = false
 
         val selectedAudioOnly = audioOnly ||
-            (!videoOnly && manualStreamSelection == StreamSelection.AUDIO_ONLY)
+                (!videoOnly && manualStreamSelection == StreamSelection.AUDIO_ONLY)
 
         val selectedVideoOnly = videoOnly ||
-            (!audioOnly && manualStreamSelection == StreamSelection.VIDEO_ONLY)
+                (!audioOnly && manualStreamSelection == StreamSelection.VIDEO_ONLY)
 
         // Do not reparent or reorder forms. The original layout already places
         // Video before Audio. Hiding the irrelevant Video form for a strict
@@ -3104,14 +3285,14 @@ class MainActivity : Activity() {
         audioContainerSpinner.alpha = if (audioContainerEnabled) 1f else 0.35f
     }
 
-    private fun startProcessing(uri: Uri, videoId: String, idSource: String) {
+    private fun startProcessing(uri: Uri, videoId: String) {
         if (!canReadUri(uri)) {
             pendingUri = null
             fileCardState = CardState.PENDING
             runOnUiThread {
-                fileCardLabel.text = "No file selected"
-                browseFileButton.text = "📁 Browse for video file…"
-                setStatus("File access expired or unavailable. Please re-share or browse the file again.")
+                fileCardLabel.text = getString(R.string.no_file_selected)
+                browseFileButton.text = getString(R.string.browse_video_file)
+                setStatus(getString(R.string.file_access_expired))
                 updateCards()
             }
             return
@@ -3128,6 +3309,7 @@ class MainActivity : Activity() {
         }
         val activeFileName = runCatching { FileResolver.getDisplayName(this, uri) }
             .getOrElse { uri.lastPathSegment ?: "file" }
+        cachedFileName = activeFileName
         saveActiveProcessingSnapshot(
             videoId = videoId,
             uri = uri,
@@ -3139,46 +3321,80 @@ class MainActivity : Activity() {
         clearCompletedRunState()
         setProcessingUi(active = true)
         DiagLog.clear()
-        logButton.text = "📋 Show diagnostic log"
+        logButton.text = getString(R.string.show_diagnostic_log)
         logButton.visibility = View.GONE
         saveLogButton.visibility = View.GONE
         logView.text = ""
         logView.visibility = View.GONE
-        val videoHeader = buildString {
-            if (cachedTitle != null) {
-                append("${cachedTitle}")
-                if (cachedAuthor != null) append("\nby ${cachedAuthor}")
-                append("\n\n")
-            }
+        val videoHeader = when {
+            cachedTitle == null -> ""
+            cachedAuthor == null -> getString(R.string.video_title_only, cachedTitle)
+            else -> getString(R.string.video_title_author, cachedTitle, cachedAuthor)
         }
-        setStatus("${videoHeader}Starting ${buildString {
+        val operation = buildString {
             if (removeSegments) {
                 append(
-                    if (localSegments != null) {
-                        "local TXT/JSON segment removal"
-                    } else {
-                        "SponsorBlock removal"
-                    }
+                    getString(
+                        if (localSegments != null) {
+                            R.string.local_segment_removal
+                        } else {
+                            R.string.sponsorblock_removal
+                        }
+                    )
                 )
             }
             when (streamSelection) {
-                StreamSelection.AUDIO_ONLY -> append(if (removeSegments) " + audio extraction" else "audio extraction")
-                StreamSelection.VIDEO_ONLY -> append(if (removeSegments) " + video extraction" else "video extraction")
-                StreamSelection.BOTH -> if (!removeSegments) append("media processing")
+                StreamSelection.AUDIO_ONLY -> append(
+                    getString(
+                        if (removeSegments) {
+                            R.string.audio_extraction_suffix
+                        } else {
+                            R.string.audio_extraction
+                        }
+                    )
+                )
+
+                StreamSelection.VIDEO_ONLY -> append(
+                    getString(
+                        if (removeSegments) {
+                            R.string.video_extraction_suffix
+                        } else {
+                            R.string.video_extraction
+                        }
+                    )
+                )
+
+                StreamSelection.BOTH -> if (!removeSegments) {
+                    append(getString(R.string.media_processing))
+                }
             }
-        }}… [${when {
-            radioHwAccurate.isChecked -> "HW-accurate"
-            radioSwAccurate.isChecked   -> "SW-accurate"
-            else                      -> "fast"
-        }}]")
+        }
+        val modeLabel = getString(
+            when {
+                radioHwAccurate.isChecked -> R.string.hw_accurate_mode
+                radioSwAccurate.isChecked -> R.string.sw_accurate_mode
+                else -> R.string.fast_mode
+            }
+        )
+        val processingHeader = cachedFileName
+            ?.takeIf { it.isNotBlank() }
+            ?.let { getString(R.string.file_name_with_icon, it) }
+            ?: videoHeader
+
+        val message = "$processingHeader\n\n" +
+            getString(R.string.starting_job, "", operation, modeLabel)
+
+        setStatus(message)
 
         val serviceIntent = Intent(this, ProcessingService::class.java).apply {
             action = ProcessingService.ACTION_PROCESS
             putExtra(ProcessingService.EXTRA_URI, uri.toString())
             putExtra(ProcessingService.EXTRA_VIDEO_ID, videoId)
-            putExtra(ProcessingService.EXTRA_ID_SOURCE, idSource)
             putExtra(ProcessingService.EXTRA_FRAME_ACCURATE, frameAccurate)
-            putStringArrayListExtra(ProcessingService.EXTRA_CATEGORIES, ArrayList(selectedCategories()))
+            putStringArrayListExtra(
+                ProcessingService.EXTRA_CATEGORIES,
+                ArrayList(selectedCategories())
+            )
             putExtra(ProcessingService.EXTRA_HW_ACCURATE, radioHwAccurate.isChecked)
             putExtra(ProcessingService.EXTRA_REMOVE_SEGMENTS, removeSegments)
             putExtra(ProcessingService.EXTRA_STREAM_SELECTION, streamSelection.name)
@@ -3225,7 +3441,10 @@ class MainActivity : Activity() {
                 ProcessingService.EXTRA_OUTPUT_PREFERENCES_JSON,
                 currentOutputPreferences().toJson()
             )
-            if (outputFolderUri != null) putExtra(ProcessingService.EXTRA_OUTPUT_FOLDER_URI, outputFolderUri)
+            if (outputFolderUri != null) putExtra(
+                ProcessingService.EXTRA_OUTPUT_FOLDER_URI,
+                outputFolderUri
+            )
         }
 
         startForegroundService(serviceIntent)
@@ -3240,7 +3459,8 @@ class MainActivity : Activity() {
             } else {
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
-            val controls = listOf(retryButton, browseFileButton, openPlayerButton,
+            val controls = listOf(
+                retryButton, browseFileButton, openPlayerButton,
                 pickFolderButton, idInput, radioFast, radioSwAccurate, radioHwAccurate,
                 radioKeepBoth, radioAudioOnly, radioVideoOnly,
                 processWithoutSegmentsCheckBox, audioBitrateInput,
@@ -3249,8 +3469,9 @@ class MainActivity : Activity() {
                 audioContainerSpinner,
                 qualityModeSpinner, crfSpinner, cqSpinner,
                 bitrateInput, bitratePresetSpinner, presetSpinner,
-                frameRateSpinner, resolutionSpinner, audioSampleRateSpinner) +
-                categoryCheckboxes.values.toList()
+                frameRateSpinner, resolutionSpinner, audioSampleRateSpinner
+            ) +
+                    categoryCheckboxes.values.toList()
             for (v in controls) {
                 v.isEnabled = !active
                 v.alpha = if (active) 0.35f else 1f
@@ -3258,15 +3479,13 @@ class MainActivity : Activity() {
             cancelButton.visibility = if (active) View.VISIBLE else View.GONE
             cancelButton.isEnabled = active
             cancelButton.alpha = 1f
-            cancelButton.text = "⏹ Cancel job"
+            cancelButton.text = getString(R.string.cancel_job)
             progressBar.visibility = if (active) View.VISIBLE else View.GONE
             loadSegmentsButton.isEnabled = !active
             loadSegmentsButton.alpha = if (active) 0.5f else 1f
             if (!active) {
                 progressBar.progress = 0
                 // Re-enable controls; retryButton state managed by updateCards()
-                val nonRetry = listOf(browseFileButton, openPlayerButton, pickFolderButton,
-                    idInput, radioFast, radioSwAccurate, radioHwAccurate) + categoryCheckboxes.values.toList()
                 updateCards()
             }
         }
@@ -3326,8 +3545,8 @@ class MainActivity : Activity() {
         pendingUri = uri
         fileCardState = CardState.OK
         runOnUiThread {
-            fileCardLabel.text = "📄 $fileName"
-            browseFileButton.text = "📁 Change file…"
+            fileCardLabel.text = getString(R.string.file_name_with_icon, fileName)
+            browseFileButton.text = getString(R.string.change_file)
             updateCards()
         }
     }
@@ -3408,14 +3627,15 @@ class MainActivity : Activity() {
         runOnUiThread {
             retryButton.isEnabled = false
             retryButton.alpha = 0.5f
-            retryButton.text = "Checking SponsorBlock…"
+            retryButton.text = getString(R.string.checking_sponsorblock)
         }
         Thread {
             // Fetch title and segments in parallel
             var title: String? = null
             var author: String? = null
             try {
-                val url = java.net.URL("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json")
+                val url =
+                    java.net.URL("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json")
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
@@ -3446,8 +3666,7 @@ class MainActivity : Activity() {
             // fetches triggered by media or URL shares always preserve it.
             val sponsorBlockSourceReady =
                 replaceLocalSourceOnSuccess &&
-                    segments != null &&
-                    segments.isNotEmpty()
+                        !segments.isNullOrEmpty()
 
             cachedSegments = segments
             cachedTitle = title
@@ -3478,40 +3697,56 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun applySegmentUiState(videoId: String, segments: List<SponsorSegmentInfo>?,
-                                    title: String? = null, author: String? = null) {
-        val titleLine = if (title != null) "\"$title\"${if (author != null) "\nby $author" else ""}\n\n" else ""
+    private fun applySegmentUiState(
+        videoId: String, segments: List<SponsorSegmentInfo>?,
+        title: String? = null, author: String? = null
+    ) {
+        val titleLine = when {
+            title == null -> ""
+            author == null -> getString(R.string.video_title_only, title)
+            else -> getString(R.string.video_title_author, title, author)
+        }
         when {
             segments == null -> {
                 renderSegmentList(emptyList())
                 retryButton.isEnabled = false
                 retryButton.alpha = 0.4f
-                retryButton.text = "No segments — cannot process"
+                retryButton.text = getString(R.string.no_segments_cannot_process)
                 if (title != null) {
                     val currentStatus = statusView.text?.toString().orEmpty()
-                    if (!currentStatus.contains(title)) statusView.text = titleLine + currentStatus
+                    if (!currentStatus.contains(title)) {
+                        statusView.text =
+                            getString(R.string.status_with_title, titleLine, currentStatus)
+                    }
                 }
             }
+
             segments.isEmpty() -> {
                 renderSegmentList(emptyList())
                 retryButton.isEnabled = false
                 retryButton.alpha = 0.4f
-                retryButton.text = "No segments — cannot process"
+                retryButton.text = getString(R.string.no_segments_cannot_process)
                 val currentStatus = statusView.text?.toString().orEmpty()
-                val note = "\n\n⚠️ No SponsorBlock segments found for ID: $videoId"
-                val base = if (title != null && !currentStatus.startsWith("\"")) titleLine + currentStatus else currentStatus
-                if (!base.contains("No SponsorBlock segments")) statusView.text = base + note
+                val note = getString(R.string.no_sponsorblock_segments_for_id, videoId)
+                val base =
+                    if (title != null && !currentStatus.startsWith("\"")) titleLine + currentStatus else currentStatus
+                if (!base.contains("No SponsorBlock segments")) {
+                    statusView.text = getString(R.string.status_with_title, base, note)
+                }
             }
+
             else -> {
                 renderSegmentList(segments)
                 renderDetectedCategories()
                 retryButton.isEnabled = true
                 retryButton.alpha = 1f
-                retryButton.text = "Process with this ID"
+                retryButton.text = getString(R.string.process_with_id_button)
                 val totalCut = segments.sumOf { it.end - it.start }
-                val note =
-                    "🔍 ${segments.size} segment(s) to cut " +
-                        "(~${formatSegmentTimestamp(totalCut)}):"
+                val note = getString(
+                    R.string.segments_to_cut,
+                    segments.size,
+                    formatSegmentTimestamp(totalCut)
+                )
                 // Replace full status with: title + note (clean, no stacking)
                 val currentStatus = statusView.text?.toString().orEmpty()
                 val baseStatus = when {
@@ -3522,11 +3757,20 @@ class MainActivity : Activity() {
                             ?: currentStatus.indexOf("✅").takeIf { it == 0 }?.let { 0 }
                         if (cut != null && cut > 0) currentStatus.substring(0, cut) else ""
                     }
+
                     else -> currentStatus
                 }
-                statusView.text = (if (title != null) titleLine else "") +
-                    (if (baseStatus.isNotBlank() && !baseStatus.startsWith("\"")) baseStatus + "\n\n" else "") +
+                val previousStatus = if (baseStatus.isNotBlank() && !baseStatus.startsWith("\"")) {
+                    getString(R.string.status_with_title, baseStatus, "\n\n")
+                } else {
+                    ""
+                }
+                statusView.text = getString(
+                    R.string.segment_status,
+                    if (title != null) titleLine else "",
+                    previousStatus,
                     note
+                )
             }
         }
     }
@@ -3549,7 +3793,7 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "Segments to remove:"
+            text = getString(R.string.segments_to_remove)
             textSize = 13f
             setPadding(0, 0, 0, 8)
         }
@@ -3573,10 +3817,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updatedIndicesForValidation(): Boolean {
-        return true
-    }
-
     private fun isSegmentRowValid(segment: SponsorSegmentInfo): Boolean {
         if (segment.endIsOpen) {
             val duration = pendingVideoInfo?.durationSec ?: return false
@@ -3586,9 +3826,7 @@ class MainActivity : Activity() {
         if (segment.end <= segment.start) return false
 
         val duration = pendingVideoInfo?.durationSec
-        if (duration != null && segment.end > duration) return false
-
-        return true
+        return !(duration != null && segment.end > duration)
     }
 
     private fun circularControl(label: String, onClick: () -> Unit): TextView {
@@ -3614,7 +3852,7 @@ class MainActivity : Activity() {
         index: Int,
         segment: SponsorSegmentInfo,
         isLastRow: Boolean
-    ): android.view.View {
+    ): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
@@ -3661,11 +3899,11 @@ class MainActivity : Activity() {
         row.addView(checkbox)
 
         if (segment.category == "manual") {
-            val categoryEditor = android.widget.EditText(this).apply {
-                hint = "Category"
+            val categoryEditor = EditText(this).apply {
+                hint = getString(R.string.category_hint)
                 setText(segment.category)
                 textSize = 12f
-                setSingleLine(true)
+                isSingleLine = true
                 setPadding(4, 1, 4, 1)
                 setBackgroundColor(0xFF222222.toInt())
                 setTextColor(0xFFFFFFFF.toInt())
@@ -3695,7 +3933,7 @@ class MainActivity : Activity() {
             row.addView(categoryEditor)
         } else {
             row.addView(TextView(this).apply {
-                text = "[${segment.category}]"
+                text = getString(R.string.segment_category_display, segment.category)
                 textSize = 12f
             })
         }
@@ -3714,7 +3952,7 @@ class MainActivity : Activity() {
 
         if (segment.endIsOpen) {
             row.addView(TextView(this).apply {
-                text = "end"
+                text = getString(R.string.segment_end)
                 textSize = 12f
             })
         } else {
@@ -3727,7 +3965,7 @@ class MainActivity : Activity() {
 
         if (isLastRow) {
             val endToken = CheckBox(this).apply {
-                text = "end"
+                text = getString(R.string.segment_end)
                 textSize = 10f
                 isChecked = segment.endIsOpen
                 isEnabled = pendingVideoInfo?.durationSec != null
@@ -3755,8 +3993,8 @@ class MainActivity : Activity() {
         // a correctly entered start time look invalid.
         val startConflictsWithEnd =
             !segment.endIsOpen &&
-                segment.end > 0.0 &&
-                segment.end <= segment.start
+                    segment.end > 0.0 &&
+                    segment.end <= segment.start
 
         val startInvalid = index in invalidSegmentIndexes || startConflictsWithEnd
 
@@ -3793,18 +4031,18 @@ class MainActivity : Activity() {
         val digits = StringBuilder(maskedDigitsFromSeconds(initialSeconds))
         var suppressMaskUpdate = false
 
-        val editor = android.widget.EditText(this).apply {
+        val editor = EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
             textSize = 12f
-            setSingleLine(true)
+            isSingleLine = true
             setPadding(4, 1, 4, 1)
             setBackgroundColor(0xFF333333.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             setText(formatMaskedDigits(digits.toString()))
         }
 
-        val maskWatcher = object : android.text.TextWatcher {
+        val maskWatcher = object : TextWatcher {
             private var oldText = ""
             private var changeStart = 0
             private var removedCount = 0
@@ -3821,9 +4059,10 @@ class MainActivity : Activity() {
 
             override fun onTextChanged(
                 text: CharSequence?, start: Int, before: Int, count: Int
-            ) {}
+            ) {
+            }
 
-            override fun afterTextChanged(editable: android.text.Editable?) {
+            override fun afterTextChanged(editable: Editable?) {
                 if (suppressMaskUpdate) return
                 val editable = editable ?: return
 
@@ -3956,27 +4195,8 @@ class MainActivity : Activity() {
         editor.setSelection(0)
 
         val imm = getSystemService(INPUT_METHOD_SERVICE)
-            as android.view.inputmethod.InputMethodManager
+                as android.view.inputmethod.InputMethodManager
         imm.showSoftInput(editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-    }
-
-    private fun cursorPositionForDigitCount(
-        formatted: String,
-        digitCount: Int
-    ): Int {
-        if (digitCount <= 0) return 0
-
-        var seen = 0
-        for (i in formatted.indices) {
-            if (formatted[i].isDigit()) {
-                seen++
-                if (seen == digitCount) {
-                    return i + 1
-                }
-            }
-        }
-
-        return formatted.length
     }
 
     private fun maskedDigitsFromSeconds(seconds: Double): String {
@@ -3986,7 +4206,7 @@ class MainActivity : Activity() {
         val ss = (totalMillis % 60000) / 1000
         val mmm = totalMillis % 1000
 
-        return String.format("%02d%02d%02d%03d", hh, mm, ss, mmm)
+        return String.format(Locale.ROOT, "%02d%02d%02d%03d", hh, mm, ss, mmm)
     }
 
     private fun formatMaskedDigits(digits: String): String {
@@ -4004,7 +4224,7 @@ class MainActivity : Activity() {
         return if (millisPart.isEmpty()) timePart else "$timePart.$millisPart"
     }
 
-    private fun maskedFieldValue(field: android.widget.EditText): Double? {
+    private fun maskedFieldValue(field: EditText): Double? {
         val digits = field.text?.toString().orEmpty().filter { it.isDigit() }
         if (digits.length != 9) return null
 
@@ -4145,7 +4365,7 @@ class MainActivity : Activity() {
 
         val checkbox = dynamicCategoryCheckboxes[category] ?: return
         checkbox.isChecked = indexes.isNotEmpty() &&
-            indexes.all { it in selectedSegmentIndexes }
+                indexes.all { it in selectedSegmentIndexes }
     }
 
     private fun makeCard(p: Int, bgColor: Int): LinearLayout {
@@ -4161,7 +4381,8 @@ class MainActivity : Activity() {
             }
             background = shape
             val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             lp.setMargins(margin, margin / 2, margin, margin / 2)
             layoutParams = lp
         }
@@ -4226,8 +4447,10 @@ class MainActivity : Activity() {
                 segmentListContainer.visibility = View.GONE
 
                 if (localSegmentFileName != null) {
-                    idCardNote.text =
-                        "Segment file loaded but ignored: $localSegmentFileName"
+                    idCardNote.text = getString(
+                        R.string.segment_file_loaded_ignored,
+                        localSegmentFileName
+                    )
                     idCardNote.visibility = View.VISIBLE
                 } else {
                     idCardNote.visibility = View.GONE
@@ -4242,7 +4465,7 @@ class MainActivity : Activity() {
                 segmentListContainer.visibility = View.VISIBLE
             }
 
-            (segmentListContainer.tag as? android.view.View)?.visibility =
+            (segmentListContainer.tag as? View)?.visibility =
                 if (segmentationEnabled) View.VISIBLE else View.GONE
 
             val hasExportableSegments = segmentationEnabled && currentSegments.isNotEmpty()
@@ -4253,16 +4476,12 @@ class MainActivity : Activity() {
 
             val localSourceReady = segmentationEnabled && localSegments != null
             val manualSourceReady = segmentationEnabled && currentSegments.isNotEmpty()
-            val sponsorBlockSourceReady = segmentationEnabled && idCardState == CardState.OK
-            val segmentationReady =
-                localSourceReady || manualSourceReady || sponsorBlockSourceReady
             val mediaReady = fileCardState == CardState.OK
             val hasInvalidSegments = invalidSegmentIndexes.isNotEmpty() ||
-                (segmentationEnabled && currentSegments.any { !isSegmentRowValid(it) })
+                    (segmentationEnabled && currentSegments.any { !isSegmentRowValid(it) })
 
             val canProcess = mediaReady &&
-                (segmentationEnabled || segmentationReady.not()) &&
-                !(segmentationEnabled && hasInvalidSegments)
+                    !(segmentationEnabled && hasInvalidSegments)
 
             retryButton.isEnabled = canProcess
             retryButton.alpha = if (canProcess) 1f else 0.5f
@@ -4287,10 +4506,14 @@ class MainActivity : Activity() {
             try {
                 val mmr = android.media.MediaMetadataRetriever()
                 mmr.setDataSource(this, uri)
-                durationMs = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-                val mime = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
+                durationMs =
+                    mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull()
+                val mime =
+                    mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+                        ?: ""
                 isAudio = mime.startsWith("audio/") ||
-                    mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes"
+                        mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes"
                 mmr.release()
             } catch (e: Exception) {
                 Log.w(tag, "MediaMetadataRetriever failed: ${e.message}")
@@ -4301,10 +4524,12 @@ class MainActivity : Activity() {
             val (hint, recommendFast) = when {
                 isAudio ->
                     "💡 Fast recommended — audio files gain nothing from frame-accurate mode.\n" +
-                    "Fast stream-copies with ~0.1s precision and results in a smaller file." to true
+                            "Fast stream-copies with ~0.1s precision and results in a smaller file." to true
+
                 durationMin != null && durationMin > 30 ->
                     "💡 Fast recommended — frame-accurate re-encodes the full video (1–3h on a phone).\n" +
-                    "Fast mode takes under a minute, cuts within ~2s, and results in a smaller file." to true
+                            "Fast mode takes under a minute, cuts within ~2s, and results in a smaller file." to true
+
                 else -> "" to false
             }
 
@@ -4345,20 +4570,44 @@ class MainActivity : Activity() {
     }
 
     private fun startDotAnim(baseText: String) {
-        stopDotAnim()  // always cancel previous before starting new
+        stopDotAnim()
         dotBaseText = baseText
         dotPhaseIdx = 0
-        val header = if (cachedTitle != null) {
-            "${cachedTitle}" + (if (cachedAuthor != null) "\nby ${cachedAuthor}" else "") + "\n\n"
-        } else ""
+
+        val header = when {
+            !cachedFileName.isNullOrBlank() ->
+                getString(R.string.file_name_with_icon, cachedFileName)
+
+            cachedTitle != null && cachedAuthor != null ->
+                getString(
+                    R.string.video_title_author,
+                    cachedTitle,
+                    cachedAuthor
+                )
+
+            cachedTitle != null ->
+                getString(R.string.video_title_only, cachedTitle)
+
+            else -> ""
+        }
+
         val tick = object : Runnable {
             override fun run() {
-                if (dotRunnable !== this) return  // stale runnable — bail out
-                statusView.text = "$header$dotBaseText ${dotPhases[dotPhaseIdx]}"
+                if (dotRunnable !== this) return
+
+                val status = getString(
+                    R.string.animated_status,
+                    header,
+                    dotBaseText,
+                    dotPhases[dotPhaseIdx]
+                )
+
+                statusView.text = status
                 dotPhaseIdx = (dotPhaseIdx + 1) % dotPhases.size
                 dotHandler.postDelayed(this, 500)
             }
         }
+
         dotRunnable = tick
         dotHandler.post(tick)
     }
@@ -4447,10 +4696,11 @@ class MainActivity : Activity() {
     private fun isUriAccessError(text: String): Boolean {
         val t = text.lowercase()
         return t.contains("cannot open uri") ||
-            t.contains("bad uri") ||
-            t.contains("permission denied") ||
-            t.contains("no such file")
+                t.contains("bad uri") ||
+                t.contains("permission denied") ||
+                t.contains("no such file")
     }
+
     private fun saveCompletedRunState(status: String, log: String) {
         getSharedPreferences(prefsName, MODE_PRIVATE).edit {
             putString(keyLastCompletedStatus, status)
@@ -4547,6 +4797,7 @@ class MainActivity : Activity() {
         pendingUri = activeUri
         cachedTitle = activeTitle
         cachedAuthor = activeAuthor
+        cachedFileName = activeFileName
 
         // Restore media probing and output-field state for the active file.
         if (activeUri != null && pendingVideoInfo == null) {
@@ -4558,18 +4809,23 @@ class MainActivity : Activity() {
             idCardState = CardState.OK
 
             if (!activeFileName.isNullOrBlank()) {
-                fileCardLabel.text = "📄 $activeFileName"
-                browseFileButton.text = "📁 Change file…"
+                fileCardLabel.text = getString(R.string.file_name_with_icon, activeFileName)
+                browseFileButton.text = getString(R.string.change_file)
                 fileCardState = CardState.OK
             }
 
             val header = buildString {
-                if (!activeTitle.isNullOrBlank()) {
-                    append("\"$activeTitle\"")
-                    if (!activeAuthor.isNullOrBlank()) append("\nby $activeAuthor")
+//                if (!activeTitle.isNullOrBlank()) {
+////                    append("\"$activeTitle\"")
+//                    append("$activeTitle")
+//                    if (!activeAuthor.isNullOrBlank()) append("\nby $activeAuthor")
+//                    append("\n\n")
+//                }
+                if (!activeFileName.isNullOrBlank()) {
+                    append(getString(R.string.file_name_with_icon, activeFileName))
                     append("\n\n")
                 }
-                append("Processing in background…")
+                append(getString(R.string.background_processing))
             }
             setStatus(header)
             updateCards()

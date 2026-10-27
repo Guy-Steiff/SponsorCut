@@ -54,7 +54,7 @@ object FFProbeInspector {
         }
     }
 
-    fun inspect(file: File): VideoInfo? {
+    fun inspect(file: File): VideoInfo {
         // Primary: structured API — parses ffprobe JSON internally
         val fromApi = inspectViaApi(file)
         // JSON path provides additional fields (container format, TS hint). Merge both.
@@ -75,11 +75,10 @@ object FFProbeInspector {
             return merged
         }
 
-        val best = merged
-        if (best != null) {
-            Log.w(TAG, "Both methods uncertain, returning best result: ${best.summaryLine}")
-            DiagLog.append("FFProbe", "uncertain result: ${best.summaryLine}")
-            return best
+        if (merged != null) {
+            Log.w(TAG, "Both methods uncertain, returning best result: ${merged.summaryLine}")
+            DiagLog.append("FFProbe", "uncertain result: ${merged.summaryLine}")
+            return merged
         }
 
         Log.w(TAG, "All inspection methods failed — returning minimal VideoInfo")
@@ -160,9 +159,9 @@ object FFProbeInspector {
 
             var videoCodec = "unknown"
             var width: Int? = null; var height: Int? = null; var fps: Float? = null
-            var pixFmt: String? = null; var videoBitrate: Long? = null; var videoIndex: Int? = null
+            var videoBitrate: Long? = null; var videoIndex: Int? = null
             var audioCodec: String? = null; var sampleRate: Int? = null
-            var audioBitrate: Long? = null; var audioChannels: Int? = null; var audioIndex: Int? = null
+            var audioBitrate: Long? = null; var audioIndex: Int? = null
 
             info.streams?.forEach { stream ->
                 when (stream.type?.lowercase()) {
@@ -187,9 +186,9 @@ object FFProbeInspector {
             val durationSec = info.duration?.toDoubleOrNull()
             val containerBitrate = info.bitrate?.toLongOrNull()
             VideoInfo(
-                videoCodec, width, height, fps, pixFmt,
+                videoCodec, width, height, fps, null,
                 videoBitrate, videoIndex,
-                audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
+                audioCodec, sampleRate, audioBitrate, null, audioIndex,
                 durationSec, containerBitrate, null
             )
         } catch (e: Exception) {
@@ -231,7 +230,7 @@ object FFProbeInspector {
         }
     }
 
-    private fun parseJson(json: String): VideoInfo? {
+    private fun parseJson(json: String): VideoInfo {
         val root = JSONObject(json)
 
         var videoCodec = "unknown"
@@ -325,6 +324,6 @@ object FFProbeInspector {
                 val den = d.toFloat()
                 if (den == 0f) null else n.toFloat() / den
             } else raw.trim().toFloat()
-        } catch (e: Exception) { null }
+        } catch (_: Exception) { null }
     }
 }

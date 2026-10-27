@@ -1,7 +1,6 @@
 package com.sponsorcut
 
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.sponsorcut.core.model.JobKind
 import com.sponsorcut.core.model.ExecutionMode
 import com.sponsorcut.core.model.StreamSelection
 import com.arthenica.ffmpegkit.ReturnCode
@@ -60,7 +59,7 @@ object FfmpegEngine {
         // Builds one filter_complex with trim+setpts+concat, runs a single FFmpeg
         // command so h264_mediacodec is initialised exactly once across all segments.
         if (plan.singlePassFilter) {
-            processSinglePass(input, output, keepRanges, plan, fileDurationSec, onProgress, onProgressNumeric)
+            processSinglePass(input, output, keepRanges, plan, onProgress, onProgressNumeric)
             return ProcessingResult()  // regression computed in ProcessingService for single-pass
         }
 
@@ -96,9 +95,9 @@ object FfmpegEngine {
 
                 val elapsed = System.currentTimeMillis() - jobStartMs
 
-                val (regA, regB) = when {
-                    regN == 0 -> null to null
-                    regN == 1 -> (regSY / regSX) to 0.0
+                val (regA, regB) = when (regN) {
+                    0 -> null to null
+                    1 -> (regSY / regSX) to 0.0
                     else -> {
                         val denom = regN * regSX2 - regSX * regSX
                         if (denom == 0.0) null to null
@@ -421,14 +420,13 @@ object FfmpegEngine {
             return
         }
 
-        val label = when (plan.streamSelection) {
-            StreamSelection.AUDIO_ONLY ->
+        val label = when {
+            plan.streamSelection == StreamSelection.AUDIO_ONLY ->
                 if (plan.canCopyAudio) "Extracting audio"
                 else "Extracting and transcoding audio"
-            StreamSelection.VIDEO_ONLY ->
+            else ->
                 if (plan.canCopyVideo) "Extracting video"
                 else "Extracting and transcoding video"
-            StreamSelection.BOTH -> "Processing media"
         }
 
         runExtraction(
@@ -448,16 +446,16 @@ object FfmpegEngine {
     ) {
         val args = mutableListOf("-y", "-i", input.absolutePath)
 
-        if (plan.canCopyVideo) {
-            args += listOf("-c:v", "copy")
+        args += if (plan.canCopyVideo) {
+            listOf("-c:v", "copy")
         } else {
-            args += plan.videoEncoderArgs
+            plan.videoEncoderArgs
         }
 
-        if (plan.canCopyAudio) {
-            args += listOf("-c:a", "copy")
+        args += if (plan.canCopyAudio) {
+            listOf("-c:a", "copy")
         } else {
-            args += audioEncoderArgsWithCompatibility(plan.audioEncoderArgs)
+            audioEncoderArgsWithCompatibility(plan.audioEncoderArgs)
         }
 
         plan.outputMuxer?.let { args += listOf("-f", it) }
@@ -497,19 +495,15 @@ object FfmpegEngine {
      * jumps directly to the right position — no wasted decoding of discarded frames.
      * The h264_mediacodec encoder is initialised exactly once for all segments combined.
      *
-     * e.g. 2 keep ranges → command:
-     *   ffmpeg -y -i input -ss 449.236 -i input
-     *     -filter_complex "[0:v]trim=end=395.883,...[v0]; [0:a]...[a0];
-     *                      [1:v]setpts=PTS-STARTPTS[v1]; [1:a]...[a1];
-     *                      [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
-     *     -map [outv] -map [outa] -c:v h264_mediacodec -b:v Nk -c:a aac -b:a 128k out.mp4
+     * For example, two keep ranges:
+     * ```text
+     * ffmpeg -y -i input -ss 449.236 -i input
+     *   -filter_complex "[0:v]trim=end=395.883,...[v0]; [0:a]...[a0];
+     *                    [1:v]setpts=PTS-STARTPTS[v1]; [1:a]...[a1];
+     *                    [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+     *   -map [outv] -map [outa] -c:v h264_mediacodec -b:v Nk -c:a aac -b:a 128k out.mp4
+     * ```
      */
-        private fun validFrameRate(value: String?): String? {
-        return value
-            ?.trim()
-            ?.takeIf { it.matches(Regex("\\d+(?:\\.\\d+)?")) }
-    }
-
 private fun validateSinglePassGraph(
         filters: List<String>,
         expectedBranchCount: Int,
@@ -530,7 +524,7 @@ private fun validateSinglePassGraph(
             // setpts/asetpts branch would consume the entire source and duplicate
             // it during concat.
             if (!isAudioOnly) {
-                val videoTrimCount = Regex("""\[\d+:v\]trim=""")
+                val videoTrimCount = Regex("""\[\d+:v]trim=""")
                     .findAll(graph)
                     .count()
 
@@ -539,7 +533,7 @@ private fun validateSinglePassGraph(
                         "video trim branches, found $videoTrimCount. Graph=$graph"
                 }
 
-                val untrimmedVideoBranch = Regex("""\[\d+:v\]setpts=""")
+                val untrimmedVideoBranch = Regex("""\[\d+:v]setpts=""")
                     .containsMatchIn(graph)
 
                 require(!untrimmedVideoBranch) {
@@ -548,7 +542,7 @@ private fun validateSinglePassGraph(
             }
 
             if (keepAudio) {
-                val audioTrimCount = Regex("""\[\d+:a\]atrim=""")
+                val audioTrimCount = Regex("""\[\d+:a]atrim=""")
                     .findAll(graph)
                     .count()
 
@@ -557,7 +551,7 @@ private fun validateSinglePassGraph(
                         "audio trim branches, found $audioTrimCount. Graph=$graph"
                 }
 
-                val untrimmedAudioBranch = Regex("""\[\d+:a\]asetpts=""")
+                val untrimmedAudioBranch = Regex("""\[\d+:a]asetpts=""")
                     .containsMatchIn(graph)
 
                 require(!untrimmedAudioBranch) {
@@ -570,7 +564,7 @@ private fun validateSinglePassGraph(
             // use bare setpts/asetpts because its input begins at the requested
             // seek position.
             if (!isAudioOnly) {
-                val videoBranchCount = Regex("""\[\d+:v\](?:trim=|setpts=)""")
+                val videoBranchCount = Regex("""\[\d+:v](?:trim=|setpts=)""")
                     .findAll(graph)
                     .count()
 
@@ -581,7 +575,7 @@ private fun validateSinglePassGraph(
             }
 
             if (keepAudio) {
-                val audioBranchCount = Regex("""\[\d+:a\](?:atrim=|asetpts=)""")
+                val audioBranchCount = Regex("""\[\d+:a](?:atrim=|asetpts=)""")
                     .findAll(graph)
                     .count()
 
@@ -598,7 +592,6 @@ private fun processSinglePass(
         output: File,
         keepRanges: List<Pair<Double, Double>>,
         plan: TranscodePolicy.ProcessingPlan,
-        fileDurationSec: Double?,
         onProgress: ((String) -> Unit)?,
         onProgressNumeric: ((Int, Int) -> Unit)?
     ) {
@@ -831,7 +824,6 @@ private fun processSinglePass(
         val keepAudio = !plan.dropAudio
         val isCopy = (!keepVideo || plan.canCopyVideo) &&
             (!keepAudio || plan.canCopyAudio)
-        val audioOnly = !keepVideo
 
         val args = mutableListOf("-y")
 

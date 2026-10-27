@@ -7,8 +7,6 @@ import kotlin.math.roundToInt
 
 object TranscodePolicy {
 
-    private const val TAG = "TranscodePolicy"
-
     enum class ComplexityTier { LOW, MEDIUM, HIGH }
 
     data class ProcessingPlan(
@@ -77,10 +75,6 @@ object TranscodePolicy {
         "H.265/HEVC" to listOf("hevc_mediacodec")
     )
 
-    private val COPY_SAFE_AUDIO = setOf(
-        "aac", "mp3", "opus", "vorbis", "ac3", "eac3", "flac", "pcm_s16le"
-    )
-
     fun plan(
         info: FFProbeInspector.VideoInfo,
         frameAccurate: Boolean,
@@ -119,18 +113,16 @@ object TranscodePolicy {
             info, mode, preferences, catalog, inputVideoFamily, reasons
         )
         val audioEncoder = resolveAudioEncoder(
-            info, mode, preferences, catalog, inputAudioFamily, videoEncoder, reasons
+            mode, preferences, catalog, inputAudioFamily, videoEncoder, reasons
         )
         val container = resolveContainer(
-            info, mode, preferences, catalog, videoEncoder, audioEncoder, reasons
+            info, preferences, catalog, videoEncoder, audioEncoder, reasons
         )
 
         val canCopyVideo = mode == ExecutionMode.FAST && videoEncoder == null
         val canCopyAudio = mode == ExecutionMode.FAST && audioEncoder == null
 
-        val quality = resolveQuality(
-            mode, videoEncoder, preferences, info, audioEncoder, reasons
-        )
+        val quality = resolveQuality(mode, videoEncoder, preferences, info, reasons)
 
         val videoArgs = buildVideoArgs(
             mode, videoEncoder, quality, preferences.videoFrameRate,
@@ -144,12 +136,9 @@ object TranscodePolicy {
             preferences.audioBitrate
         )
 
-        val outputExtension = container
         val outputMuxer = muxerForContainer(container)
 
-        val singlePass = removeSegments &&
-            mode != ExecutionMode.FAST &&
-            !canCopyVideo
+        val singlePass = removeSegments && mode != ExecutionMode.FAST
 
         if (preferences.videoFrameRate != null) {
             reasons += "frame rate explicitly set to ${preferences.videoFrameRate}"
@@ -163,7 +152,7 @@ object TranscodePolicy {
             hwDecoderArgs = emptyList(),
             audioEncoderArgs = audioArgs,
             fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k"),
-            outputExtension = outputExtension,
+            outputExtension = container,
             outputMuxer = outputMuxer,
             complexity = complexityFor(info, mode),
             rationale = reasons.joinToString("; ").ifBlank { "input-matched processing" },
@@ -189,20 +178,17 @@ object TranscodePolicy {
         if (streamSelection == StreamSelection.AUDIO_ONLY) {
             val inputFamily = EncoderCatalog.familyForInputCodec(info.audioCodec)
             val encoder = resolveAudioEncoder(
-                info, mode, preferences, catalog, inputFamily, null, reasons
+                mode, preferences, catalog, inputFamily, null, reasons
             )
             val canCopy = mode == ExecutionMode.FAST && encoder == null
             // The Audio container dropdown's first entry means "retain the
             // input-derived transcode policy"; it is serialized as null.
             // Otherwise, use the user-selected audio-only container.
             val container = preferences.audioContainer
-                ?: if (preferences.audioSectionMode == SectionMode.CUSTOM &&
-                    preferences.container != null
-                ) {
-                    preferences.container!!
-                } else {
-                    audioContainerFor(encoder ?: info.audioCodec)
+                ?: preferences.container.takeIf {
+                    preferences.audioSectionMode == SectionMode.CUSTOM
                 }
+                ?: audioContainerFor(encoder ?: info.audioCodec)
 
             return ProcessingPlan(
                 canCopyVideo = false,
@@ -237,14 +223,10 @@ object TranscodePolicy {
             info, mode, preferences, catalog, inputFamily, reasons
         )
         val canCopy = mode == ExecutionMode.FAST && encoder == null
-        val quality = resolveQuality(mode, encoder, preferences, info, null, reasons)
-        val container = if (preferences.videoSectionMode == SectionMode.CUSTOM &&
-            preferences.container != null
-        ) {
-            preferences.container!!
-        } else {
-            videoContainerFor(encoder ?: info.videoCodec)
-        }
+        val quality = resolveQuality(mode, encoder, preferences, info, reasons)
+        val container = preferences.container.takeIf {
+            preferences.videoSectionMode == SectionMode.CUSTOM
+        } ?: videoContainerFor(encoder ?: info.videoCodec)
 
         return ProcessingPlan(
             canCopyVideo = canCopy,
@@ -377,7 +359,6 @@ object TranscodePolicy {
     }
 
     private fun resolveAudioEncoder(
-        info: FFProbeInspector.VideoInfo,
         mode: ExecutionMode,
         preferences: OutputPreferences,
         catalog: List<EncoderOption>,
@@ -430,7 +411,6 @@ object TranscodePolicy {
 
     private fun resolveContainer(
         info: FFProbeInspector.VideoInfo,
-        mode: ExecutionMode,
         preferences: OutputPreferences,
         catalog: List<EncoderOption>,
         videoEncoder: String?,
@@ -529,7 +509,6 @@ object TranscodePolicy {
         videoEncoder: String?,
         preferences: OutputPreferences,
         info: FFProbeInspector.VideoInfo,
-        audioEncoder: String?,
         reasons: MutableList<String>
     ): Quality {
         if (mode == ExecutionMode.FAST) {
@@ -688,8 +667,8 @@ object TranscodePolicy {
         )
     }
 
-    private val minPlausibleAudioBitrate = 32_000L
-    private val fallbackAudioBitrate = 128_000L
+    private const val minPlausibleAudioBitrate = 32_000L
+    private const val fallbackAudioBitrate = 128_000L
 
     private fun effectiveAudioBitrate(info: FFProbeInspector.VideoInfo): Long {
         val parsed = info.audioBitrate
@@ -705,7 +684,7 @@ object TranscodePolicy {
         }
     }
 
-    private val minPlausibleVideoBitrate = 64_000L
+    private const val minPlausibleVideoBitrate = 64_000L
 
     private fun effectiveVideoBitrate(info: FFProbeInspector.VideoInfo): Long? {
         val streamBitrate = info.videoBitrate
@@ -719,7 +698,7 @@ object TranscodePolicy {
             DiagLog.append(
                 "VideoPolicy",
                 "Stream video bitrate ${streamBitrate ?: "missing"} is missing or implausible; " +
-                    "inferred ${inferred} from container ${info.containerBitrate} minus audio $audioBitrate"
+                    "inferred $inferred from container ${info.containerBitrate} minus audio $audioBitrate"
             )
             return inferred
         }

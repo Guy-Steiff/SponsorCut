@@ -20,6 +20,7 @@ local.properties
 .idea/
 *.iml
 .gradle/
+.kotlin/
 gradle/wrapper/gradle-wrapper.jar
 
 # Build reports

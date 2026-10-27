@@ -9,7 +9,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import androidx.core.content.edit
 import androidx.core.net.toUri
@@ -34,7 +33,6 @@ class ProcessingService : Service() {
         const val ACTION_CANCEL = "com.sponsorcut.CANCEL"
         const val EXTRA_URI = "uri"
         const val EXTRA_VIDEO_ID = "video_id"
-        const val EXTRA_ID_SOURCE = "id_source"
         const val EXTRA_OUTPUT_FOLDER_URI = "output_folder_uri"
         const val EXTRA_FRAME_ACCURATE = "frame_accurate"
         const val EXTRA_CATEGORIES = "categories"
@@ -81,10 +79,10 @@ class ProcessingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         createChannel()
         try {
-            startForeground(NOTIF_ID, buildNotification("SponsorCut", "Starting…"))
+            startForeground(NOTIF_ID, buildNotification("Starting…"))
         } catch (e: Exception) {
             Log.e(tag, "startForeground failed", e)
         }
@@ -106,7 +104,6 @@ class ProcessingService : Service() {
         if (uriString.isNullOrBlank()) { stopSelf(startId); return START_NOT_STICKY }
 
         val videoId = intent.getStringExtra(EXTRA_VIDEO_ID).orEmpty()
-        val idSource = intent.getStringExtra(EXTRA_ID_SOURCE) ?: "manual"
         val outputFolderUri = intent.getStringExtra(EXTRA_OUTPUT_FOLDER_URI)
         val frameAccurate = intent.getBooleanExtra(EXTRA_FRAME_ACCURATE, false)
         val categories = intent.getStringArrayListExtra(EXTRA_CATEGORIES)?.toList() ?: listOf("sponsor")
@@ -146,7 +143,7 @@ class ProcessingService : Service() {
             var cachedInput: File? = null
             var outputTarget: OutputTarget? = null
             // Acquire CPU wake lock — keeps processing running when screen turns off
-            wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sponsorcut:processing")
                 .also { it.acquire(2 * 60 * 60 * 1000L) }  // max 2 hours
             try {
@@ -172,7 +169,6 @@ class ProcessingService : Service() {
                     // Need to inspect first to know if we're re-encoding (affects output extension)
                     progress("Inspecting video…")
                     val info = FFProbeInspector.inspect(inputFile)
-                        ?: error("ffprobe could not read the video file — unsupported format?")
                     DiagLog.append("FFProbe", "isTsEncapsulated=${info.isTsEncapsulated} codec=${info.videoCodec} audio=${info.audioCodec} summary=${info.summaryLine}")
                     TranscodePolicy.plan(
                         info = info,
@@ -268,7 +264,7 @@ class ProcessingService : Service() {
                         }
                     } ?: "input/inherited"
 
-                    val outputDurationNote = outputInfo?.durationSec?.let {
+                    val outputDurationNote = outputInfo.durationSec?.let {
                         "Output duration: ${formatElapsedHms(it)}"
                     } ?: "Output duration: unavailable"
 
@@ -389,7 +385,7 @@ class ProcessingService : Service() {
                     onProgress = { step -> progress(step) },
                     onProgressNumeric = { current, total ->
                         broadcastNumeric(current, total)
-                        val notif = buildProgressNotification("SponsorCut", "Part $current/$total", current, total)
+                        val notif = buildProgressNotification("Part $current/$total", current, total)
                         nm.notify(NOTIF_ID, notif)
                     }
                 )
@@ -426,9 +422,9 @@ class ProcessingService : Service() {
                     inputSizeBytes = inputFile.length(),
                     outputSizeBytes = tempOutput.length(),
                     inputDurationSec = videoInfo.durationSec,
-                    outputDurationSec = outputInfo?.durationSec,
+                    outputDurationSec = outputInfo.durationSec,
                     requestedVideoBitrateBps = requestedVideoBitrateBps,
-                    actualVideoBitrateBps = outputInfo?.videoBitrate,
+                    actualVideoBitrateBps = outputInfo.videoBitrate,
                     executionMode = executionMode
                 )
 
@@ -556,7 +552,7 @@ class ProcessingService : Service() {
 
     private fun progress(text: String) {
         lastProgressText = text
-        nm.notify(NOTIF_ID, buildNotification("SponsorCut", text))
+        nm.notify(NOTIF_ID, buildNotification(text))
         broadcast(text = text)
     }
 
@@ -578,7 +574,7 @@ class ProcessingService : Service() {
                 runCatching {
                     nm.notify(
                         NOTIF_ID,
-                        buildNotification("SponsorCut", body)
+                        buildNotification(body)
                     )
                 }
 
@@ -623,7 +619,7 @@ class ProcessingService : Service() {
         })
     }
 
-    private fun buildProgressNotification(title: String, body: String, current: Int, total: Int): Notification {
+    private fun buildProgressNotification(body: String, current: Int, total: Int): Notification {
         val pi = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
@@ -631,7 +627,7 @@ class ProcessingService : Service() {
         )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle(title)
+            .setContentTitle("SponsorCut")
             .setContentText(body)
             .setProgress(total, current, false)
             .setContentIntent(pi)
@@ -645,7 +641,7 @@ class ProcessingService : Service() {
         nm.createNotificationChannel(ch)
     }
 
-    private fun buildNotification(title: String, body: String?): Notification {
+    private fun buildNotification(body: String?): Notification {
         val pi = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java).apply {
@@ -655,7 +651,7 @@ class ProcessingService : Service() {
         )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle(title)
+            .setContentTitle("SponsorCut")
             .setContentText(body)
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setContentIntent(pi)
@@ -717,7 +713,7 @@ class ProcessingService : Service() {
             chargingState = "unknown"
         }
 
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
         val powerSaveMode = runCatching { pm.isPowerSaveMode }.getOrDefault(false)
         val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching { thermalStatusLabel(pm.currentThermalStatus) }.getOrElse { "unknown" }
