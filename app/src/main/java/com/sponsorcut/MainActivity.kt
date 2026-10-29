@@ -3755,7 +3755,7 @@ class MainActivity : Activity() {
                 updateCategoryAvailability(segments)
                 idCardState = when {
                     segments == null -> CardState.ERROR
-                    segments.isNullOrEmpty() -> CardState.ERROR
+                    segments.isEmpty() -> CardState.ERROR
                     else -> CardState.OK
                 }
                 applySegmentUiState(videoId, segments, title, author)
