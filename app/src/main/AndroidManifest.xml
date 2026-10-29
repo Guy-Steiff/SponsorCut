@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
     <application
@@ -56,6 +58,15 @@
                 <action android:name="android.intent.action.SEND"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <data android:mimeType="application/json"/>
+            </intent-filter>
+
+            <!-- Open supported media files directly from file managers / gallery apps -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+
+                <data android:mimeType="video/*"/>
+                <data android:mimeType="audio/*"/>
             </intent-filter>
 
             <!-- Direct integration intent from PipePipe/NewPipe forks -->

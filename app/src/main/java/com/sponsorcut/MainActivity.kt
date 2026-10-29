@@ -331,10 +331,17 @@ class MainActivity : Activity() {
 
         // Request notification permission on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) {
-                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 99)
+            val requested = mutableListOf(
+                android.Manifest.permission.POST_NOTIFICATIONS,
+                android.Manifest.permission.READ_MEDIA_VIDEO,
+                android.Manifest.permission.READ_MEDIA_AUDIO
+            ).filter {
+                checkSelfPermission(it) !=
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+
+            if (requested.isNotEmpty()) {
+                requestPermissions(requested.toTypedArray(), 99)
             }
         }
 
@@ -402,6 +409,22 @@ class MainActivity : Activity() {
                     inspectSelectedUri(savedInputUri)
                 }
             }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == 99 &&
+            pendingUri != null &&
+            grantResults.isNotEmpty() &&
+            grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }
+        ) {
+            inspectSelectedUri(pendingUri!!)
         }
     }
 
@@ -662,6 +685,10 @@ class MainActivity : Activity() {
             setBackgroundColor(0xFF2E7D32.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             setOnClickListener {
+                // Commit any in-progress timestamp/category edit before
+                // validating segments or deciding whether processing can start.
+                currentFocus?.clearFocus()
+
                 val uri = pendingUri
                 if (uri == null) {
                     setStatus(getString(R.string.no_shared_video_pending))
@@ -676,6 +703,25 @@ class MainActivity : Activity() {
                 if (!segmentationEnabled) {
                     startProcessing(uri, "")
                     return@setOnClickListener
+                }
+
+                // An open-ended manual segment means "through end of media".
+                // If media duration is known, resolve it now instead of blocking
+                // processing with "Load a media file...".
+                val mediaDuration = pendingVideoInfo?.durationSec
+                if (mediaDuration != null && currentSegments.any { it.endIsOpen }) {
+                    val resolved = currentSegments.map { segment ->
+                        if (segment.endIsOpen) {
+                            segment.copy(end = mediaDuration, endIsOpen = false)
+                        } else {
+                            segment
+                        }
+                    }
+
+                    currentSegments = resolved
+                    hasManualSegmentEdits = true
+                    renderSegmentList(resolved, preserveSelection = true)
+                    updateCards()
                 }
 
                 // Local TXT/JSON segments and manually created segments are
@@ -2408,6 +2454,7 @@ class MainActivity : Activity() {
                 FFProbeInspector.inspect(cached)
             } catch (e: Exception) {
                 DiagLog.append("TaskUI", "input inspection failed: ${e.message}")
+                setStatus("Media inspection failed:\n${e.message}")
                 null
             }
 
@@ -2726,6 +2773,7 @@ class MainActivity : Activity() {
         when (intent?.action) {
             "com.sponsorcut.PROCESS_FILE" -> handleDirectIntent(intent)
             Intent.ACTION_SEND -> handleShareIntent(intent)
+            Intent.ACTION_VIEW -> handleViewIntent(intent)
             else -> {
                 // While a job is active, never run cold-open restore/fetch logic.
                 // This avoids re-fetching segments when returning from background.
@@ -2919,6 +2967,33 @@ class MainActivity : Activity() {
             fetchSegmentsForId(videoId, force = true)
             applyModeRecommendation()
         }
+    }
+
+    private fun handleViewIntent(intent: Intent) {
+        setStatus("Open-with intent received.\nURI: ${intent.data}\nType: ${intent.type}")
+        if (rejectIfBusy()) return
+
+        val uri = intent.data ?: run {
+            setStatus("Open-with intent received, but no file URI was provided.")
+            return
+        }
+
+        setStatus("Open-with file selected:\n$uri")
+        pendingUri = uri
+        fileCardState = CardState.OK
+        clearCompletedRunState()
+        inspectSelectedUri(uri)
+
+        val fileName = FileResolver.getDisplayName(this, uri)
+            .ifBlank { uri.lastPathSegment ?: "file" }
+
+        runOnUiThread {
+            fileCardLabel.text = getString(R.string.file_name_with_icon, fileName)
+            browseFileButton.text = getString(R.string.change_file)
+        }
+
+        saveFileUri(uri, fileName)
+        updateCards()
     }
 
     private fun handleSharedSegmentFile(uri: Uri, fileName: String) {
@@ -3671,13 +3746,6 @@ class MainActivity : Activity() {
             cachedSegments = segments
             cachedTitle = title
             cachedAuthor = author
-            val selected = selectedCategories()
-            val filteredSegments = segments?.filter { it.category in selected }
-            val visibleSegments = if (segments != null && filteredSegments.isNullOrEmpty()) {
-                segments
-            } else {
-                filteredSegments
-            }
 
             runOnUiThread {
                 if (sponsorBlockSourceReady) {
@@ -3687,10 +3755,10 @@ class MainActivity : Activity() {
                 updateCategoryAvailability(segments)
                 idCardState = when {
                     segments == null -> CardState.ERROR
-                    visibleSegments.isNullOrEmpty() -> CardState.ERROR
+                    segments.isNullOrEmpty() -> CardState.ERROR
                     else -> CardState.OK
                 }
-                applySegmentUiState(videoId, visibleSegments, title, author)
+                applySegmentUiState(videoId, segments, title, author)
                 updateCards()
                 applyModeRecommendation()
             }
@@ -3925,6 +3993,7 @@ class MainActivity : Activity() {
 
                             post {
                                 renderSegmentList(currentSegments, preserveSelection = true)
+                                updateCards()
                             }
                         }
                     }
@@ -4248,7 +4317,13 @@ class MainActivity : Activity() {
                 end = 0.0
             )
         )
+
+        // A newly added manual segment should always start selected, even when
+        // every previously displayed segment was unchecked.
+        selectedSegmentIndexes.add(updated.lastIndex)
+
         renderSegmentList(updated, preserveSelection = true)
+        syncCategoryCheckbox("manual")
         updateCards()
     }
 
