@@ -9,6 +9,48 @@ object TranscodePolicy {
 
     enum class ComplexityTier { LOW, MEDIUM, HIGH }
 
+    enum class AudioBitrateProvenance {
+        NONE,
+        STREAM_COPY,
+        EXPLICIT,
+        AUTO_SOURCE,
+        POLICY_FALLBACK,
+        EXPLICIT_BELOW_MINIMUM_SOURCE,
+        EXPLICIT_BELOW_MINIMUM_FALLBACK
+    }
+
+    enum class VideoBitrateProvenance {
+        NONE,
+        STREAM_COPY,
+        EXPLICIT,
+        INPUT_STREAM,
+        CONTAINER_MINUS_AUDIO,
+        RESOLUTION_FALLBACK
+    }
+
+    enum class FrameRateProvenance {
+        NONE,
+        INPUT,
+        INPUT_VARIABLE,
+        EXPLICIT
+    }
+
+    data class OutputResolution(
+        val requestedVideoBitrateBps: Long?,
+        val videoBitrateBps: Long?,
+        val videoBitrateProvenance: VideoBitrateProvenance,
+        val requestedAudioBitrateBps: Long?,
+        val audioBitrateBps: Long?,
+        val audioBitrateProvenance: AudioBitrateProvenance,
+        val requestedFrameRate: String?,
+        val inputFrameRate: String?,
+        val effectiveFrameRate: String?,
+        val frameRateDisplay: String?,
+        val inputFrameRateDisplay: String?,
+        val frameRateProvenance: FrameRateProvenance,
+        val forceFrameRate: Boolean
+    )
+
     data class ProcessingPlan(
         val canCopyVideo: Boolean,
         val canCopyAudio: Boolean,
@@ -21,6 +63,7 @@ object TranscodePolicy {
         val outputMuxer: String?,
         val complexity: ComplexityTier,
         val rationale: String,
+        val outputResolution: OutputResolution,
         val executionMode: ExecutionMode,
         val useSlowSeek: Boolean = false,
         val singlePassFilter: Boolean = false,
@@ -28,7 +71,27 @@ object TranscodePolicy {
         val dropAudio: Boolean = false,
         val jobKind: JobKind = JobKind.REMOVE_SEGMENTS,
         val removeSegments: Boolean = true,
-        val streamSelection: StreamSelection = StreamSelection.BOTH
+        val streamSelection: StreamSelection = StreamSelection.BOTH,
+        val audioBitrateBps: Long? = null,
+        val requestedAudioBitrateBps: Long? = null,
+        val audioBitrateProvenance: AudioBitrateProvenance =
+            AudioBitrateProvenance.NONE,
+        val videoBitrateBps: Long? = null,
+        val requestedVideoBitrateBps: Long? = null,
+        val videoBitrateProvenance: VideoBitrateProvenance =
+            VideoBitrateProvenance.NONE
+    )
+
+    private data class AudioEncoding(
+        val args: List<String>,
+        val bitrateBps: Long?,
+        val requestedBitrateBps: Long?,
+        val provenance: AudioBitrateProvenance
+    )
+
+    private data class AudioBitrateResolution(
+        val bitrateBps: Long,
+        val provenance: AudioBitrateProvenance
     )
 
     private val VIDEO_CONTAINER_COMPATIBILITY = mapOf(
@@ -123,13 +186,14 @@ object TranscodePolicy {
         val canCopyAudio = mode == ExecutionMode.FAST && audioEncoder == null
 
         val quality = resolveQuality(mode, videoEncoder, preferences, info, reasons)
+        val frameRate = resolveFrameRate(preferences.videoFrameRate, info)
 
         val videoArgs = buildVideoArgs(
-            mode, videoEncoder, quality, preferences.videoFrameRate,
-            info.fps, info.height, preferences.videoMaxHeight
+            mode, videoEncoder, quality, frameRate,
+            info.height, preferences.videoMaxHeight
         ).toMutableList()
 
-        val audioArgs = buildAudioArgs(
+        val audioEncoding = buildAudioArgs(
             audioEncoder,
             info,
             preferences.audioSampleRate,
@@ -144,23 +208,40 @@ object TranscodePolicy {
             reasons += "frame rate explicitly set to ${preferences.videoFrameRate}"
         }
 
+        val outputResolution = outputResolution(
+            info = info,
+            preferences = preferences,
+            quality = quality,
+            audioEncoding = audioEncoding,
+            frameRate = frameRate,
+            copiedVideo = canCopyVideo,
+            copiedAudio = canCopyAudio
+        )
+
         return ProcessingPlan(
             canCopyVideo = canCopyVideo,
             canCopyAudio = canCopyAudio,
             videoEncoderArgs = videoArgs,
             fallbackVideoEncoderArgs = fallbackVideoArgs(mode, videoEncoder, quality),
             hwDecoderArgs = emptyList(),
-            audioEncoderArgs = audioArgs,
+            audioEncoderArgs = audioEncoding.args,
             fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k"),
             outputExtension = container,
             outputMuxer = outputMuxer,
             complexity = complexityFor(info, mode),
             rationale = reasons.joinToString("; ").ifBlank { "input-matched processing" },
+            outputResolution = outputResolution,
             executionMode = mode,
             useSlowSeek = info.isTsEncapsulated,
             singlePassFilter = singlePass,
             removeSegments = removeSegments,
-            streamSelection = StreamSelection.BOTH
+            streamSelection = StreamSelection.BOTH,
+            audioBitrateBps = audioEncoding.bitrateBps,
+            requestedAudioBitrateBps = audioEncoding.requestedBitrateBps,
+            audioBitrateProvenance = audioEncoding.provenance,
+            videoBitrateBps = outputResolution.videoBitrateBps,
+            requestedVideoBitrateBps = preferences.videoBitrate,
+            videoBitrateProvenance = outputResolution.videoBitrateProvenance
         )
     }
 
@@ -190,23 +271,36 @@ object TranscodePolicy {
                 }
                 ?: audioContainerFor(encoder ?: info.audioCodec)
 
+            val audioEncoding = buildAudioArgs(
+                encoder,
+                info,
+                preferences.audioSampleRate,
+                preferences.audioBitrate
+            )
+            val frameRate = resolveFrameRate(preferences.videoFrameRate, info)
+            val outputResolution = outputResolution(
+                info = info,
+                preferences = preferences,
+                quality = Quality(QualityMode.BITRATE),
+                audioEncoding = audioEncoding,
+                frameRate = frameRate,
+                copiedVideo = false,
+                copiedAudio = canCopy
+            )
+
             return ProcessingPlan(
                 canCopyVideo = false,
                 canCopyAudio = canCopy,
                 videoEncoderArgs = empty,
                 fallbackVideoEncoderArgs = empty,
                 hwDecoderArgs = empty,
-                audioEncoderArgs = buildAudioArgs(
-                    encoder,
-                    info,
-                    preferences.audioSampleRate,
-                    preferences.audioBitrate
-                ),
+                audioEncoderArgs = audioEncoding.args,
                 fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k"),
                 outputExtension = container,
                 outputMuxer = muxerForContainer(container),
                 complexity = ComplexityTier.LOW,
                 rationale = reasons.joinToString("; ").ifBlank { "audio extraction" },
+                outputResolution = outputResolution,
                 executionMode = mode,
             useSlowSeek = info.isTsEncapsulated,
                 singlePassFilter = removeSegments && !canCopy,
@@ -214,7 +308,13 @@ object TranscodePolicy {
                 dropAudio = false,
                 jobKind = JobKind.EXTRACT_AUDIO,
                 removeSegments = removeSegments,
-                streamSelection = streamSelection
+                streamSelection = streamSelection,
+                audioBitrateBps = audioEncoding.bitrateBps,
+                requestedAudioBitrateBps = audioEncoding.requestedBitrateBps,
+                audioBitrateProvenance = audioEncoding.provenance,
+                videoBitrateBps = null,
+                requestedVideoBitrateBps = preferences.videoBitrate,
+                videoBitrateProvenance = VideoBitrateProvenance.NONE
             )
         }
 
@@ -224,6 +324,21 @@ object TranscodePolicy {
         )
         val canCopy = mode == ExecutionMode.FAST && encoder == null
         val quality = resolveQuality(mode, encoder, preferences, info, reasons)
+        val frameRate = resolveFrameRate(preferences.videoFrameRate, info)
+        val outputResolution = outputResolution(
+            info = info,
+            preferences = preferences,
+            quality = quality,
+            audioEncoding = AudioEncoding(
+                empty,
+                null,
+                preferences.audioBitrate,
+                AudioBitrateProvenance.NONE
+            ),
+            frameRate = frameRate,
+            copiedVideo = canCopy,
+            copiedAudio = false
+        )
         val container = preferences.container.takeIf {
             preferences.videoSectionMode == SectionMode.CUSTOM
         } ?: videoContainerFor(encoder ?: info.videoCodec)
@@ -232,8 +347,8 @@ object TranscodePolicy {
             canCopyVideo = canCopy,
             canCopyAudio = false,
             videoEncoderArgs = buildVideoArgs(
-                mode, encoder, quality, preferences.videoFrameRate,
-                info.fps, info.height, preferences.videoMaxHeight
+                mode, encoder, quality, frameRate,
+                info.height, preferences.videoMaxHeight
             ),
             fallbackVideoEncoderArgs = fallbackVideoArgs(mode, encoder, quality),
             hwDecoderArgs = emptyList(),
@@ -243,6 +358,7 @@ object TranscodePolicy {
             outputMuxer = muxerForContainer(container),
             complexity = complexityFor(info, mode),
             rationale = reasons.joinToString("; ").ifBlank { "video extraction" },
+            outputResolution = outputResolution,
             executionMode = mode,
             useSlowSeek = info.isTsEncapsulated,
             singlePassFilter = removeSegments && !canCopy,
@@ -250,9 +366,30 @@ object TranscodePolicy {
             dropAudio = true,
             jobKind = JobKind.EXTRACT_VIDEO,
             removeSegments = removeSegments,
-            streamSelection = streamSelection
+            streamSelection = streamSelection,
+            videoBitrateBps = outputResolution.videoBitrateBps,
+            requestedVideoBitrateBps = preferences.videoBitrate,
+            videoBitrateProvenance = outputResolution.videoBitrateProvenance
         )
     }
+
+    fun resolveForUi(
+        info: FFProbeInspector.VideoInfo,
+        frameAccurate: Boolean,
+        hwAccurate: Boolean = false,
+        removeSegments: Boolean = true,
+        streamSelection: StreamSelection = StreamSelection.BOTH,
+        preferences: OutputPreferences = OutputPreferences(),
+        catalog: List<EncoderOption> = EncoderCatalog.discover()
+    ): OutputResolution = plan(
+        info = info,
+        frameAccurate = frameAccurate,
+        hwAccurate = hwAccurate,
+        removeSegments = removeSegments,
+        streamSelection = streamSelection,
+        preferences = preferences,
+        catalog = catalog
+    ).outputResolution
 
     fun resolveVideoEncoderForUi(
         info: FFProbeInspector.VideoInfo,
@@ -512,7 +649,11 @@ object TranscodePolicy {
         reasons: MutableList<String>
     ): Quality {
         if (mode == ExecutionMode.FAST) {
-            return Quality(mode = QualityMode.BITRATE, bitrate = null)
+            return Quality(
+                mode = QualityMode.BITRATE,
+                bitrate = null,
+                bitrateProvenance = VideoBitrateProvenance.STREAM_COPY
+            )
         }
 
         val supportsCrf = videoEncoder in setOf(
@@ -548,20 +689,25 @@ object TranscodePolicy {
                 }
             }
             QualityMode.BITRATE -> {
-                val bitrate = preferences.videoBitrate
-                    ?: effectiveVideoBitrate(info)
-                    ?: fallbackBitrate(info)
-
-                val source = when {
-                    preferences.videoBitrate != null -> "requested"
-                    info.videoBitrate != null &&
-                        info.videoBitrate >= minPlausibleVideoBitrate -> "input stream"
-                    info.containerBitrate != null -> "container minus audio"
-                    else -> "resolution fallback"
+                val resolved = when {
+                    preferences.videoBitrate != null ->
+                        VideoBitrateResolution(
+                            preferences.videoBitrate,
+                            VideoBitrateProvenance.EXPLICIT
+                        )
+                    else -> effectiveVideoBitrate(info) ?: VideoBitrateResolution(
+                        fallbackBitrate(info),
+                        VideoBitrateProvenance.RESOLUTION_FALLBACK
+                    )
                 }
 
-                reasons += "$videoEncoder bitrate ${formatBitrate(bitrate)} ($source)"
-                Quality(mode = QualityMode.BITRATE, bitrate = bitrate)
+                reasons += "$videoEncoder bitrate ${formatBitrate(resolved.bitrateBps)} " +
+                    "(${resolved.provenance})"
+                Quality(
+                    mode = QualityMode.BITRATE,
+                    bitrate = resolved.bitrateBps,
+                    bitrateProvenance = resolved.provenance
+                )
             }
         }
     }
@@ -570,21 +716,36 @@ object TranscodePolicy {
         val mode: QualityMode,
         val crf: Int? = null,
         val cq: Int? = null,
-        val bitrate: Long? = null
+        val bitrate: Long? = null,
+        val bitrateProvenance: VideoBitrateProvenance =
+            VideoBitrateProvenance.NONE
+    )
+
+    private data class FrameRateResolution(
+        val requested: String?,
+        val inputDisplay: String?,
+        val effective: String?,
+        val display: String?,
+        val provenance: FrameRateProvenance,
+        val force: Boolean
+    )
+
+    private data class VideoBitrateResolution(
+        val bitrateBps: Long,
+        val provenance: VideoBitrateProvenance
     )
 
     private fun buildVideoArgs(
         mode: ExecutionMode,
         encoder: String?,
         quality: Quality,
-        frameRate: String?,
-        inputFrameRate: Float?,
+        frameRate: FrameRateResolution,
         inputHeight: Int?,
         maxHeight: Int?
     ): List<String> {
         if (mode == ExecutionMode.FAST || encoder == null) return emptyList()
 
-        val safeFrameRate = frameRate
+        val safeFrameRate = frameRate.requested
             ?.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
 
         val args = mutableListOf("-c:v", encoder)
@@ -616,14 +777,14 @@ object TranscodePolicy {
                     }
                     else -> {
                         quality.bitrate?.let {
-                            args += listOf("-b:v", "${it / 1000L}k")
+                            args += listOf("-b:v", it.toString())
                         }
                     }
                 }
             }
             QualityMode.BITRATE -> {
                 quality.bitrate?.let {
-                    args += listOf("-b:v", "${it / 1000L}k")
+                    args += listOf("-b:v", it.toString())
                 }
             }
         }
@@ -631,16 +792,7 @@ object TranscodePolicy {
         // input. Forcing -r on an already-matching stream can normalize VFR or
         // fractional-rate MPEG-TS input and has caused MediaCodec video-duration
         // loss on long files.
-        val shouldForceFrameRate = safeFrameRate != null && run {
-            val requested = safeFrameRate.toDoubleOrNull()
-            val source = inputFrameRate?.toDouble()
-
-            requested == null ||
-                source == null ||
-                kotlin.math.abs(requested - source) > 0.01
-        }
-
-        if (shouldForceFrameRate) {
+        if (frameRate.force && safeFrameRate != null) {
             args += listOf("-r", safeFrameRate)
         }
 
@@ -662,7 +814,7 @@ object TranscodePolicy {
         val bitrate = quality.bitrate ?: 4_000_000L
         return listOf(
             "-c:v", encoder,
-            "-b:v", "${bitrate / 1000L}k",
+            "-b:v", bitrate.toString(),
             "-pix_fmt", "yuv420p"
         )
     }
@@ -671,25 +823,20 @@ object TranscodePolicy {
     private const val fallbackAudioBitrate = 128_000L
 
     private fun effectiveAudioBitrate(info: FFProbeInspector.VideoInfo): Long {
-        val parsed = info.audioBitrate
-        return if (parsed != null && parsed >= minPlausibleAudioBitrate) {
-            parsed
-        } else {
-            DiagLog.append(
-                "AudioPolicy",
-                "Source audio bitrate ${parsed ?: "missing"} is missing or below " +
-                    "${minPlausibleAudioBitrate / 1000}k; using ${fallbackAudioBitrate / 1000}k"
-            )
-            fallbackAudioBitrate
-        }
+        return resolveAudioBitrate(info, requestedBitrate = null).bitrateBps
     }
 
     private const val minPlausibleVideoBitrate = 64_000L
 
-    private fun effectiveVideoBitrate(info: FFProbeInspector.VideoInfo): Long? {
+    private fun effectiveVideoBitrate(
+        info: FFProbeInspector.VideoInfo
+    ): VideoBitrateResolution? {
         val streamBitrate = info.videoBitrate
         if (streamBitrate != null && streamBitrate >= minPlausibleVideoBitrate) {
-            return streamBitrate
+            return VideoBitrateResolution(
+                streamBitrate,
+                VideoBitrateProvenance.INPUT_STREAM
+            )
         }
 
         val audioBitrate = effectiveAudioBitrate(info)
@@ -700,7 +847,10 @@ object TranscodePolicy {
                 "Stream video bitrate ${streamBitrate ?: "missing"} is missing or implausible; " +
                     "inferred $inferred from container ${info.containerBitrate} minus audio $audioBitrate"
             )
-            return inferred
+            return VideoBitrateResolution(
+                inferred,
+                VideoBitrateProvenance.CONTAINER_MINUS_AUDIO
+            )
         }
 
         DiagLog.append(
@@ -711,6 +861,104 @@ object TranscodePolicy {
         return null
     }
 
+    private fun resolveFrameRate(
+        requested: String?,
+        info: FFProbeInspector.VideoInfo
+    ): FrameRateResolution {
+        val sourceRate = info.preferredFrameRate?.value ?: info.fps?.toDouble()
+        val sourceValue = info.preferredFrameRate?.decimal() ?: info.fps?.let {
+            java.math.BigDecimal.valueOf(it.toDouble()).stripTrailingZeros().toPlainString()
+        }
+        val sourceDisplay = info.preferredFrameRate?.decimal(3) ?: info.fps?.let {
+            "%.2f".format(it)
+        }
+        val nominal = info.nominalFrameRate
+        val average = info.averageFrameRate
+        val isVariable = nominal != null && average != null &&
+            kotlin.math.abs(nominal.value - average.value) > 0.000001
+        val inputDisplay = when {
+            isVariable ->
+                "avg ${average!!.decimal(3)} fps; nominal ${nominal!!.decimal(3)} fps"
+            info.preferredFrameRate != null ->
+                "${info.preferredFrameRate.decimal(3)} fps"
+            sourceDisplay != null -> "$sourceDisplay fps"
+            else -> null
+        }
+
+        val safeRequest = requested?.takeUnless {
+            it.isBlank() || it.equals("null", ignoreCase = true)
+        }
+        val shouldForce = safeRequest != null && run {
+            val requestedValue = safeRequest.toDoubleOrNull()
+            requestedValue == null || sourceRate == null ||
+                kotlin.math.abs(requestedValue - sourceRate) > 0.01
+        }
+
+        return FrameRateResolution(
+            requested = safeRequest,
+            inputDisplay = inputDisplay,
+            effective = safeRequest ?: sourceValue,
+            display = if (safeRequest != null) "$safeRequest fps" else inputDisplay,
+            provenance = when {
+                safeRequest != null -> FrameRateProvenance.EXPLICIT
+                isVariable -> FrameRateProvenance.INPUT_VARIABLE
+                sourceValue != null -> FrameRateProvenance.INPUT
+                else -> FrameRateProvenance.NONE
+            },
+            force = shouldForce
+        )
+    }
+
+    private fun outputResolution(
+        info: FFProbeInspector.VideoInfo,
+        preferences: OutputPreferences,
+        quality: Quality,
+        audioEncoding: AudioEncoding,
+        frameRate: FrameRateResolution,
+        copiedVideo: Boolean,
+        copiedAudio: Boolean
+    ): OutputResolution {
+        val videoBitrate = quality.bitrate ?: if (copiedVideo) {
+            info.videoBitrate
+        } else {
+            null
+        }
+        val videoProvenance = when {
+            quality.bitrate != null -> quality.bitrateProvenance
+            copiedVideo && videoBitrate != null -> VideoBitrateProvenance.STREAM_COPY
+            else -> VideoBitrateProvenance.NONE
+        }
+        val audioBitrate = audioEncoding.bitrateBps ?: if (copiedAudio) {
+            info.audioBitrate
+        } else {
+            null
+        }
+        val audioProvenance = when {
+            audioEncoding.bitrateBps != null -> audioEncoding.provenance
+            copiedAudio && audioBitrate != null -> AudioBitrateProvenance.STREAM_COPY
+            else -> audioEncoding.provenance
+        }
+
+        return OutputResolution(
+            requestedVideoBitrateBps = preferences.videoBitrate,
+            videoBitrateBps = videoBitrate,
+            videoBitrateProvenance = videoProvenance,
+            requestedAudioBitrateBps = audioEncoding.requestedBitrateBps,
+            audioBitrateBps = audioBitrate,
+            audioBitrateProvenance = audioProvenance,
+            requestedFrameRate = frameRate.requested,
+            inputFrameRate = info.preferredFrameRate?.decimal()
+                ?: info.fps?.let {
+                    java.math.BigDecimal.valueOf(it.toDouble()).stripTrailingZeros().toPlainString()
+                },
+            effectiveFrameRate = frameRate.effective,
+            frameRateDisplay = frameRate.display,
+            inputFrameRateDisplay = frameRate.inputDisplay,
+            frameRateProvenance = frameRate.provenance,
+            forceFrameRate = frameRate.force
+        )
+    }
+
 
 
 
@@ -719,23 +967,86 @@ object TranscodePolicy {
         info: FFProbeInspector.VideoInfo,
         sampleRate: Int?,
         requestedBitrate: Long? = null
-    ): List<String> {
-        if (encoder == null) return emptyList()
+    ): AudioEncoding {
+        if (encoder == null) {
+            return AudioEncoding(
+                args = emptyList(),
+                bitrateBps = null,
+                requestedBitrateBps = requestedBitrate,
+                provenance = AudioBitrateProvenance.NONE
+            )
+        }
+
         val args = mutableListOf("-c:a", encoder)
-        val bitrate = requestedBitrate?.takeIf { it >= minPlausibleAudioBitrate }
-            ?: effectiveAudioBitrate(info)
+        val bitrate = if (encoder in setOf("aac", "libopus", "libmp3lame", "libvorbis")) {
+            resolveAudioBitrate(info, requestedBitrate)
+        } else {
+            null
+        }
+
+        if (bitrate != null) {
+            DiagLog.append(
+                "AudioPolicy",
+                "Audio bitrate: requested=${requestedBitrate ?: "Auto"}, " +
+                    "source=${info.audioBitrate ?: "missing"}bps, " +
+                    "effective=${bitrate.bitrateBps}bps, provenance=${bitrate.provenance}"
+            )
+            args += listOf("-b:a", bitrate.bitrateBps.toString())
+        }
+        sampleRate?.let { args += listOf("-ar", it.toString()) }
+        return AudioEncoding(
+            args = args,
+            bitrateBps = bitrate?.bitrateBps,
+            requestedBitrateBps = requestedBitrate,
+            provenance = bitrate?.provenance ?: AudioBitrateProvenance.NONE
+        )
+    }
+
+    private fun resolveAudioBitrate(
+        info: FFProbeInspector.VideoInfo,
+        requestedBitrate: Long?
+    ): AudioBitrateResolution {
+        if (requestedBitrate != null && requestedBitrate >= minPlausibleAudioBitrate) {
+            return AudioBitrateResolution(
+                requestedBitrate,
+                AudioBitrateProvenance.EXPLICIT
+            )
+        }
+
+        val explicitBelowMinimum = requestedBitrate != null
+        if (explicitBelowMinimum) {
+            DiagLog.append(
+                "AudioPolicy",
+                "Requested audio bitrate $requestedBitrate bps is below " +
+                    "$minPlausibleAudioBitrate bps; using source policy"
+            )
+        }
+
+        val sourceBitrate = info.audioBitrate
+        if (sourceBitrate != null && sourceBitrate >= minPlausibleAudioBitrate) {
+            return AudioBitrateResolution(
+                sourceBitrate,
+                if (explicitBelowMinimum) {
+                    AudioBitrateProvenance.EXPLICIT_BELOW_MINIMUM_SOURCE
+                } else {
+                    AudioBitrateProvenance.AUTO_SOURCE
+                }
+            )
+        }
 
         DiagLog.append(
             "AudioPolicy",
-            "Audio bitrate: requested=${requestedBitrate ?: "none"}, " +
-                "source=${info.audioBitrate ?: "missing"}, effective=${bitrate / 1000L}k"
+            "Source audio bitrate ${sourceBitrate ?: "missing"} is missing or below " +
+                "${minPlausibleAudioBitrate}bps; using ${fallbackAudioBitrate}bps"
         )
-
-        if (encoder in setOf("aac", "libopus", "libmp3lame", "libvorbis")) {
-            args += listOf("-b:a", "${bitrate / 1000L}k")
-        }
-        sampleRate?.let { args += listOf("-ar", it.toString()) }
-        return args
+        return AudioBitrateResolution(
+            fallbackAudioBitrate,
+            if (explicitBelowMinimum) {
+                AudioBitrateProvenance.EXPLICIT_BELOW_MINIMUM_FALLBACK
+            } else {
+                AudioBitrateProvenance.POLICY_FALLBACK
+            }
+        )
     }
 
     private fun fallbackBitrate(info: FFProbeInspector.VideoInfo): Long {

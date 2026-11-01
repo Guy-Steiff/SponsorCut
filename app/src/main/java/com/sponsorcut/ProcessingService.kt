@@ -210,7 +210,7 @@ class ProcessingService : Service() {
                     progress(label)
 
                     val encodeStartMs = System.currentTimeMillis()
-                    FfmpegEngine.process(
+                    val processingResult = FfmpegEngine.process(
                         input = inputFile,
                         output = tempOutput,
                         segments = emptyList(),
@@ -253,16 +253,10 @@ class ProcessingService : Service() {
                         )
                     }
 
-                    val audioBitrateNote = outputPreferences.audioBitrate?.let {
-                        val sourceBitrate = videoInfo.audioBitrate
-                        val fallback =
-                            sourceBitrate == null || sourceBitrate < 32000
-                        if (fallback && it == 128000L) {
-                            "${it / 1000}k (128k - fallback)"
-                        } else {
-                            "${it / 1000}k"
-                        }
-                    } ?: "input/inherited"
+                    val audioBitrateNote = audioBitrateSummary(
+                        processingPlan,
+                        processingResult.audioRecoveryProfileUsed
+                    )
 
                     val outputDurationNote = outputInfo.durationSec?.let {
                         "Output duration: ${formatElapsedHms(it)}"
@@ -474,11 +468,16 @@ class ProcessingService : Service() {
                 val timingLine = "Processing time: ${formatElapsedHms(encodeElapsedSec)}" +
                     (if (equationLine.isNotBlank()) "\n$equationLine" else "")
 
+                val audioBitrateNote = audioBitrateSummary(
+                    processingPlan,
+                    encodeStats.audioRecoveryProfileUsed
+                )
                 val result = "✓ Done — $segmentSourceLabel\n\n" +
                     "Removed ${segments.size} segment(s) (~%.1fs):\n".format(totalCut) +
                     "$segSummary\n\n" +
                     "Media: ${videoInfo.summaryLine}\n" +
                     "Mode: ${processingPlan.rationale}\n" +
+                    "Audio bitrate: $audioBitrateNote\n" +
                     "$timingLine\n\n" +
                     "Size: ${inputSizeMb}MB → ${outputSizeMb}MB ($sizeNote)\n\n" +
                     "Saved to:\n${outputTarget.label}" +
@@ -738,6 +737,40 @@ class ProcessingService : Service() {
         PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
         PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
         else -> "unknown($status)"
+    }
+
+    private fun audioBitrateSummary(
+        plan: TranscodePolicy.ProcessingPlan,
+        audioRecoveryProfileUsed: Boolean
+    ): String {
+        val effectiveBitrate = plan.audioBitrateBps?.let(::formatBitrateKbps)
+        val requestedBitrate = plan.requestedAudioBitrateBps?.let(::formatBitrateKbps)
+        val planned = when {
+            plan.dropAudio -> "not applicable"
+            plan.canCopyAudio -> "input/inherited (stream copy)"
+            else -> when (plan.audioBitrateProvenance) {
+                TranscodePolicy.AudioBitrateProvenance.STREAM_COPY ->
+                    "input/inherited (stream copy)"
+                TranscodePolicy.AudioBitrateProvenance.AUTO_SOURCE ->
+                    "$effectiveBitrate (Input/Auto; source bitrate)"
+                TranscodePolicy.AudioBitrateProvenance.POLICY_FALLBACK ->
+                    "$effectiveBitrate (128k - policy fallback)"
+                TranscodePolicy.AudioBitrateProvenance.EXPLICIT ->
+                    "$effectiveBitrate (explicit)"
+                TranscodePolicy.AudioBitrateProvenance.EXPLICIT_BELOW_MINIMUM_SOURCE ->
+                    "$effectiveBitrate (source bitrate; explicit $requestedBitrate below minimum)"
+                TranscodePolicy.AudioBitrateProvenance.EXPLICIT_BELOW_MINIMUM_FALLBACK ->
+                    "$effectiveBitrate (policy fallback; explicit $requestedBitrate below minimum)"
+                TranscodePolicy.AudioBitrateProvenance.NONE ->
+                    "not specified by the selected encoder"
+            }
+        }
+
+        return if (audioRecoveryProfileUsed) {
+            "$planned; AAC recovery profile used: 128k"
+        } else {
+            planned
+        }
     }
 
     private fun formatElapsedHms(seconds: Double): String {

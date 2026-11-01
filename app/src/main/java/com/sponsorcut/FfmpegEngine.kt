@@ -17,7 +17,8 @@ data class ProcessingResult(
     /** processing_time = a × duration + b  (per-segment regression) */
     val regressionA: Double? = null,
     /** Fixed overhead per segment (seconds). Null for single-pass or < 2 data points. */
-    val regressionB: Double? = null
+    val regressionB: Double? = null,
+    val audioRecoveryProfileUsed: Boolean = false
 )
 
 object FfmpegEngine {
@@ -67,6 +68,7 @@ object FfmpegEngine {
         val total = keepRanges.size
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
+        var audioRecoveryProfileUsed = false
 
         var regN  = 0
         var regSX = 0.0
@@ -226,6 +228,9 @@ object FfmpegEngine {
                         useFallbackAudioArgs = true
                     )
                     if (rc == RETURN_CANCEL) error("CANCELLED")
+                    if (rc == RETURN_SUCCESS && !plan.canCopyAudio && !plan.dropAudio) {
+                        audioRecoveryProfileUsed = true
+                    }
                 }
 
                 // HW-Accurate: do NOT silently fall back — surface the error for the user to see.
@@ -272,6 +277,7 @@ object FfmpegEngine {
                 onProgressNumeric?.invoke(total, total)
                 parts[0].copyTo(output, overwrite = true)
                 return buildRegressionResult(regN, regSX, regSY, regSXY, regSX2)
+                    .copy(audioRecoveryProfileUsed = audioRecoveryProfileUsed)
             }
 
             onProgress?.invoke("Merging ${parts.size} parts...")
@@ -293,6 +299,7 @@ object FfmpegEngine {
             parts.forEach { it.delete() }
         }
         return buildRegressionResult(regN, regSX, regSY, regSXY, regSX2)
+            .copy(audioRecoveryProfileUsed = audioRecoveryProfileUsed)
     }
 
     private fun buildRegressionResult(regN: Int, regSX: Double, regSY: Double, regSXY: Double, regSX2: Double): ProcessingResult {

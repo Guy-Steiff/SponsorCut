@@ -145,11 +145,17 @@ class MainActivity : Activity() {
 
     private var frameRateRows: List<DropdownRow<String>> = emptyList()
     private var selectedFrameRate: String? = null
+    private var frameRateIsAuto = true
+    private var videoBitrateIsAuto = true
+    private var selectedVideoBitratePreset = "Input"
+    private var updatingVideoBitrateInput = false
+    private var outputResolutionPreview: TranscodePolicy.OutputResolution? = null
     private var selectedResolutionHeight: Int? = null
     private var selectedAudioSampleRate: Int? = null
     private var selectedAudioBitratePreset: String? = null
-    private var detectedAudioBitrate: Long? = null
     private var audioBitrateFallbackActive = false
+    private var audioBitrateIsAuto = true
+    private var updatingAudioBitrateInput = false
     private var suppressOutputCallbacks = false
     private lateinit var bitratePresetSpinner: Spinner
     private lateinit var outputConsequenceView: TextView
@@ -569,22 +575,41 @@ class MainActivity : Activity() {
     }
 
     private fun refreshFrameRateDropdown() {
-        frameRateRows = frameRateTable.rowsForInput(
-            inputValue = inputFrameRate
-        )
+        frameRateRows = if (inputFrameRate == null) {
+            listOf(DropdownRow(-1, "", "Input (unresolved)", isInput = true)) +
+                frameRateTable.rowsForInput(inputValue = null)
+        } else {
+            frameRateTable.rowsForInput(inputValue = inputFrameRate)
+        }
 
-        val selectedDisplay = frameRateTable.displayForRealValue(
-            rows = frameRateRows,
-            realValue = selectedFrameRate
-        ) ?: frameRateRows.first().displayValue
+        if (frameRateRows.firstOrNull()?.isInput == true &&
+            outputResolutionPreview?.inputFrameRateDisplay != null
+        ) {
+            frameRateRows = frameRateRows.toMutableList().also { rows ->
+                rows[0] = rows[0].copy(
+                    displayValue = "${outputResolutionPreview?.inputFrameRateDisplay} - input"
+                )
+            }
+        }
+
+        val selectedDisplay = if (frameRateIsAuto) {
+            frameRateRows.first().displayValue
+        } else {
+            frameRateTable.displayForRealValue(
+                rows = frameRateRows,
+                realValue = selectedFrameRate
+            ) ?: frameRateRows.first().displayValue
+        }
 
         // Keep the selected value synchronized with the row actually shown.
         // Without this, a stale numeric frame rate can remain in
         // selectedFrameRate while the spinner visibly falls back to Input.
-        selectedFrameRate = frameRateTable.realValueForDisplay(
-            rows = frameRateRows,
-            displayValue = selectedDisplay
-        ) ?: selectedFrameRate
+        if (!frameRateIsAuto) {
+            selectedFrameRate = frameRateTable.realValueForDisplay(
+                rows = frameRateRows,
+                displayValue = selectedDisplay
+            ) ?: selectedFrameRate
+        }
 
         setAdapterKeepingSelection(
             frameRateSpinner,
@@ -1150,6 +1175,7 @@ class MainActivity : Activity() {
                 }
 
                 updateStreamSelectionAvailability()
+                refreshOutputOptionsCallback?.invoke()
             }
 
             // ── Output format controls ─────────────────────────────────────
@@ -1207,6 +1233,29 @@ class MainActivity : Activity() {
             audioSampleRateSpinner = Spinner(context)
             audioBitrateInput = EditText(context).apply {
                 hint = getString(R.string.audio_bitrate_hint)
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(
+                        s: CharSequence?,
+                        start: Int,
+                        count: Int,
+                        after: Int
+                    ) = Unit
+
+                    override fun onTextChanged(
+                        s: CharSequence?,
+                        start: Int,
+                        before: Int,
+                        count: Int
+                    ) = Unit
+
+                    override fun afterTextChanged(s: Editable?) {
+                        if (!updatingAudioBitrateInput) {
+                            audioBitrateIsAuto = false
+                            selectedAudioBitratePreset = getString(R.string.custom)
+                            refreshOutputOptionsCallback?.invoke()
+                        }
+                    }
+                })
             }
 
             audioBitratePresetSpinner = Spinner(context).apply {
@@ -1223,22 +1272,47 @@ class MainActivity : Activity() {
                         selectedAudioBitratePreset = choice
 
                         when {
-                            choice == getString(R.string.custom) -> Unit
-                            choice == getString(R.string.input_bitrate) -> detectedAudioBitrate?.let {
-                                audioBitrateInput.setText(
-                                    getString(
-                                        R.string.audio_bitrate_with_unit,
-                                        it / 1000
-                                    )
+                            choice == getString(R.string.custom) -> {
+                                if (audioBitrateIsAuto) setAudioBitrateInput("")
+                                audioBitrateIsAuto = false
+                            }
+
+                            choice == getString(R.string.input_bitrate) -> {
+                                audioBitrateIsAuto = true
+                                if (outputResolutionPreview?.audioBitrateProvenance ==
+                                    TranscodePolicy.AudioBitrateProvenance.POLICY_FALLBACK
+                                ) {
+                                    selectedAudioBitratePreset =
+                                        getString(R.string.audio_bitrate_fallback)
+                                }
+                                val displayValue = outputResolutionPreview
+                                    ?.audioBitrateBps
+                                    ?.let(::formatBitrateKbps)
+                                    .orEmpty()
+                                setAudioBitrateInput(displayValue)
+                            }
+
+                            choice == getString(R.string.audio_bitrate_fallback) -> {
+                                audioBitrateIsAuto = true
+                                setAudioBitrateInput(
+                                    outputResolutionPreview
+                                        ?.audioBitrateBps
+                                        ?.let(::formatBitrateKbps)
+                                        ?: getString(R.string.audio_bitrate_128k)
                                 )
                             }
 
-                            choice == getString(R.string.audio_bitrate_128k) ||
-                                    choice == getString(R.string.audio_bitrate_fallback) ->
-                                audioBitrateInput.setText(getString(R.string.audio_bitrate_128k))
+                            choice == getString(R.string.audio_bitrate_128k) -> {
+                                audioBitrateIsAuto = false
+                                setAudioBitrateInput(choice)
+                            }
 
-                            choice.endsWith("k") -> audioBitrateInput.setText(choice)
+                            choice.endsWith("k") -> {
+                                audioBitrateIsAuto = false
+                                setAudioBitrateInput(choice)
+                            }
                         }
+                        refreshOutputOptionsCallback?.invoke()
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -1249,6 +1323,23 @@ class MainActivity : Activity() {
             cqSpinner = Spinner(context)
             bitrateInput = EditText(context).apply {
                 hint = getString(R.string.video_bitrate_hint)
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(
+                        s: CharSequence?, start: Int, count: Int, after: Int
+                    ) = Unit
+
+                    override fun onTextChanged(
+                        s: CharSequence?, start: Int, before: Int, count: Int
+                    ) = Unit
+
+                    override fun afterTextChanged(s: Editable?) {
+                        if (!updatingVideoBitrateInput) {
+                            videoBitrateIsAuto = false
+                            selectedVideoBitratePreset = getString(R.string.custom)
+                            refreshOutputOptionsCallback?.invoke()
+                        }
+                    }
+                })
             }
             videoInputInfoView = TextView(context)
             audioInputInfoView = TextView(context)
@@ -1705,7 +1796,7 @@ class MainActivity : Activity() {
                 setAdapterKeepingSelection(
                     bitratePresetSpinner,
                     listOf("Input", "1M", "2M", "4M", "8M", "12M", "Custom"),
-                    "Input"
+                    selectedVideoBitratePreset
                 )
 
                 setAdapterKeepingSelection(
@@ -1720,19 +1811,6 @@ class MainActivity : Activity() {
                 presetSpinner.isEnabled = isSoftwareX264X265 &&
                         mode == ExecutionMode.SW_ACCURATE
                 presetSpinner.alpha = if (presetSpinner.isEnabled) 1f else 0.4f
-
-                val probeFps = pendingVideoInfo?.fps
-                val frameRateInputValue = probeFps?.let { fps ->
-                    if (fps == fps.toInt().toFloat()) {
-                        fps.toInt().toString()
-                    } else {
-                        "%.2f".format(fps)
-                    }
-                }
-
-                inputFrameRate = frameRateInputValue
-//                selectedFrameRate = null
-                refreshFrameRateDropdown()
 
                 val inputHeight = pendingVideoInfo?.height
                 val allHeights = listOf(2160, 1440, 1080, 720, 480, 360, 240, 144)
@@ -1828,12 +1906,57 @@ class MainActivity : Activity() {
                     selectedContainer?.replaceFirstChar { it.uppercase() }
                 )
 
+                val previewInfo = pendingVideoInfo
+                val outputResolution = previewInfo?.let { info ->
+                    TranscodePolicy.resolveForUi(
+                        info = info,
+                        frameAccurate = mode == ExecutionMode.SW_ACCURATE,
+                        hwAccurate = mode == ExecutionMode.HW_ACCURATE,
+                        streamSelection = when {
+                            radioAudioOnly.isChecked -> StreamSelection.AUDIO_ONLY
+                            radioVideoOnly.isChecked -> StreamSelection.VIDEO_ONLY
+                            else -> StreamSelection.BOTH
+                        },
+                        preferences = currentOutputPreferences(),
+                        catalog = encoderCatalog
+                    )
+                }
+                outputResolutionPreview = outputResolution
+                inputFrameRate = outputResolution?.inputFrameRate
+                refreshFrameRateDropdown()
+
+                if (videoBitrateIsAuto) {
+                    val autoDisplay = when {
+                        outputResolution == null -> ""
+                        outputResolution.videoBitrateProvenance ==
+                            TranscodePolicy.VideoBitrateProvenance.STREAM_COPY ->
+                            outputResolution.videoBitrateBps?.let(::formatBitrateKbps)
+                                .orEmpty()
+                        else -> outputResolution.videoBitrateBps
+                            ?.let(::formatBitrateKbps)
+                            .orEmpty()
+                    }
+                    setVideoBitrateInput(autoDisplay)
+                }
+
+                audioBitrateFallbackActive =
+                    audioBitrateIsAuto &&
+                        outputResolution?.audioBitrateProvenance ==
+                        TranscodePolicy.AudioBitrateProvenance.POLICY_FALLBACK
+                if (audioBitrateIsAuto) {
+                    setAudioBitrateInput(
+                        outputResolution?.audioBitrateBps
+                            ?.let(::formatBitrateKbps)
+                            .orEmpty()
+                    )
+                }
+
                 val inputSummary = pendingVideoInfo?.summaryLine ?: "unknown"
                 val inputAudioCodec = pendingVideoInfo?.audioCodec ?: "unknown"
                 val inputSampleRate = pendingVideoInfo?.sampleRate
                     ?.let { "$it Hz" } ?: "unknown"
                 val inputAudioBitrate = pendingVideoInfo?.audioBitrate
-                    ?.let { "${it / 1000} kbps" } ?: "unknown"
+                    ?.let { "${formatBitrateKbps(it).removeSuffix("k")} kbps" } ?: "unknown"
 
                 videoInputInfoView.text = getString(R.string.input_summary, inputSummary)
                 audioInputInfoView.text = getString(
@@ -1843,9 +1966,6 @@ class MainActivity : Activity() {
                     inputAudioBitrate
                 )
 
-                // The fallback marker reflects the inspected source bitrate.
-                // Do not derive it from the text field: after applying the
-                // 128 kbps fallback, the text field is intentionally 128k.
                 val audioBitrateFallback = audioBitrateFallbackActive
 
                 if (audioBitrateFallback && selectedAudioBitratePreset == null) {
@@ -1899,6 +2019,8 @@ class MainActivity : Activity() {
                     getString(R.string.remove_selected_provided_segments)
                 )
             }
+
+            refreshOutputOptionsCallback = { refreshOutputOptions() }
 
             videoSectionSpinner.onItemSelectedListener =
                 object : AdapterView.OnItemSelectedListener {
@@ -2062,7 +2184,6 @@ class MainActivity : Activity() {
                     ) {
                         if (suppressOutputCallbacks) return
                         qualityUsesCrf = qualityModeSpinner.selectedItem in setOf("CRF", "CQ")
-                        refreshOutputOptionsCallback = { refreshOutputOptions() }
                         refreshOutputOptions()
                     }
 
@@ -2096,16 +2217,26 @@ class MainActivity : Activity() {
                     ) {
                         if (suppressOutputCallbacks) return
                         val selected = bitratePresetSpinner.selectedItem?.toString() ?: return
-                        if (selected == "Custom") return
-
-                        if (selected == "Input") {
-                            val bps = pendingVideoInfo?.videoBitrate
-                            bitrateInput.setText(
-                                if (bps != null) "${bps / 1000}k" else ""
-                            )
-                        } else {
-                            bitrateInput.setText(selected.lowercase())
+                        selectedVideoBitratePreset = selected
+                        when {
+                            selected == "Custom" -> {
+                                if (videoBitrateIsAuto) setVideoBitrateInput("")
+                                videoBitrateIsAuto = false
+                            }
+                            selected == "Input" -> {
+                                videoBitrateIsAuto = true
+                                setVideoBitrateInput(
+                                    outputResolutionPreview?.videoBitrateBps
+                                        ?.let(::formatBitrateKbps)
+                                        .orEmpty()
+                                )
+                            }
+                            else -> {
+                                videoBitrateIsAuto = false
+                                setVideoBitrateInput(selected.lowercase())
+                            }
                         }
+                        refreshOutputOptionsCallback?.invoke()
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2129,10 +2260,22 @@ class MainActivity : Activity() {
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
                         if (suppressOutputCallbacks) return
-                        selectedFrameRate = frameRateTable.realValueForDisplay(
+                        val display = frameRateSpinner.selectedItem as? String
+                        val row = frameRateTable.rowForDisplay(
                             rows = frameRateRows,
-                            displayValue = frameRateSpinner.selectedItem as? String
+                            displayValue = display
                         )
+                        if (row?.isInput == true) {
+                            frameRateIsAuto = true
+                            selectedFrameRate = null
+                        } else {
+                            frameRateIsAuto = false
+                            selectedFrameRate = frameRateTable.realValueForDisplay(
+                                rows = frameRateRows,
+                                displayValue = display
+                            )
+                        }
+                        refreshOutputOptionsCallback?.invoke()
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2548,11 +2691,19 @@ class MainActivity : Activity() {
                 null
             },
             cq = null,
-            videoBitrate = parseBitrate(bitrateInput.text?.toString()),
+            videoBitrate = if (videoBitrateIsAuto) {
+                null
+            } else {
+                parseBitrateBps(bitrateInput.text?.toString())
+            },
             preset = if (presetSpinner.isEnabled) selectedPreset else null,
-            videoFrameRate = selectedFrameRate,
+            videoFrameRate = if (frameRateIsAuto) null else selectedFrameRate,
             audioSampleRate = selectedAudioSampleRate,
-            audioBitrate = parseBitrate(audioBitrateInput.text?.toString()),
+            audioBitrate = if (audioBitrateIsAuto) {
+                null
+            } else {
+                parseBitrateBps(audioBitrateInput.text?.toString())
+            },
             videoMaxHeight = selectedResolutionHeight
         )
     }
@@ -2581,30 +2732,18 @@ class MainActivity : Activity() {
                     // reset this during ordinary output-option refreshes, where
                     // the user may have explicitly chosen a non-input rate.
                     selectedFrameRate = null
+                    frameRateIsAuto = true
                 }
 
                 // Discover encoders now that we know an input is present.
                 encoderCatalog = EncoderCatalog.discover()
 
-                detectedAudioBitrate = info?.audioBitrate
                 selectedAudioBitratePreset = null
-
-                val audioBitrate = info?.audioBitrate
-                audioBitrateFallbackActive =
-                    audioBitrate == null || audioBitrate < 32000
-
-                if (audioBitrateFallbackActive) {
-                    // Telegram-related files can expose implausibly low audio
-                    // bitrate metadata. Do not inherit it for re-encoding.
-                    audioBitrateInput.setText(getString(R.string.audio_bitrate_128k))
-                    selectedAudioBitratePreset = getString(R.string.audio_bitrate_fallback)
-                } else {
-                    audioBitrate?.let {
-                        audioBitrateInput.setText(
-                            getString(R.string.audio_bitrate_with_unit, it / 1000)
-                        )
-                    }
-                }
+                audioBitrateIsAuto = true
+                audioBitrateFallbackActive = false
+                videoBitrateIsAuto = true
+                selectedVideoBitratePreset = "Input"
+                setVideoBitrateInput("")
 
                 // Temporary post-inspection fault isolation:
                 // identify which UI rebuild stage crashes without losing the
@@ -2657,7 +2796,7 @@ class MainActivity : Activity() {
                 val inputAudioCodec = info?.audioCodec ?: "unknown"
                 val inputSampleRate = info?.sampleRate?.let { "$it Hz" } ?: "unknown"
                 val inputAudioBitrate = info?.audioBitrate
-                    ?.let { "${it / 1000} kbps" } ?: "unknown"
+                    ?.let { "${formatBitrateKbps(it).removeSuffix("k")} kbps" } ?: "unknown"
 
                 videoInputInfoView.text = getString(R.string.input_summary, inputSummary)
                 audioInputInfoView.text = getString(
@@ -2667,29 +2806,6 @@ class MainActivity : Activity() {
                     inputAudioBitrate
                 )
 
-                // Show the input bitrate immediately when Quality is set to Input.
-                // Prefer the video stream's own bitrate. If ffprobe cannot provide
-                // one, estimate it as container bitrate minus audio bitrate, but
-                // only when both values are present and internally consistent.
-                val detectedVideoBitrate = info?.videoBitrate
-                    ?: info?.containerBitrate?.let { container ->
-                        val audio = info.audioBitrate
-                        if (audio != null && container > audio) {
-                            container - audio
-                        } else {
-                            container
-                        }
-                    }
-
-                detectedVideoBitrate?.let {
-                    bitrateInput.setText(
-                        getString(R.string.audio_bitrate_with_unit, it / 1000)
-                    )
-                }
-
-                // Audio-bitrate fallback was applied before the first
-                // output-options refresh, so the dropdown and text field already
-                // reflect the effective encoding target.
             }
         }.start()
     }
@@ -2883,17 +2999,22 @@ class MainActivity : Activity() {
         return array.toString()
     }
 
-    private fun parseBitrate(raw: String?): Long? {
-        val value = raw?.trim()?.lowercase() ?: return null
-        if (value.isBlank() || value == "auto") return null
-        val match = Regex("^(\\d+(?:\\.\\d+)?)([kKmM]?)$").find(value) ?: return null
-        val amount = match.groupValues[1].toDouble()
-        val multiplier = when (match.groupValues[2]) {
-            "k" -> 1000.0
-            "m" -> 1_000_000.0
-            else -> 1.0
+    private fun setAudioBitrateInput(value: String) {
+        updatingAudioBitrateInput = true
+        try {
+            audioBitrateInput.setText(value)
+        } finally {
+            updatingAudioBitrateInput = false
         }
-        return (amount * multiplier).toLong()
+    }
+
+    private fun setVideoBitrateInput(value: String) {
+        updatingVideoBitrateInput = true
+        try {
+            bitrateInput.setText(value)
+        } finally {
+            updatingVideoBitrateInput = false
+        }
     }
 
     private fun handle(intent: Intent?) {

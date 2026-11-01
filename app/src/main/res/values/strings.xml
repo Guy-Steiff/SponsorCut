@@ -62,7 +62,7 @@
     <string name="output_streams_video_only_unavailable">Output streams: Video only — no usable audio stream</string>
     <string name="output_streams_detecting">Output streams: detecting…</string>
     <string name="output_streams_both">Output streams: Video and audio</string>
-    <string name="audio_bitrate_with_unit">%1$dk</string>
+    <string name="audio_bitrate_with_unit">%1$sk</string>
     <string name="audio_bitrate_128k">128k</string>
     <string name="audio_bitrate_fallback">128k - fallback</string>
     <string name="input_bitrate">Input</string>

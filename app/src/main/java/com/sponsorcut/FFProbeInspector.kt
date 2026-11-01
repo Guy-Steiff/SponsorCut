@@ -8,6 +8,8 @@ import com.arthenica.ffmpegkit.ReturnCode
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 /**
  * Single source of truth for media file characteristics.
@@ -18,6 +20,22 @@ import java.io.File
 object FFProbeInspector {
 
     private const val TAG = "FFProbeInspector"
+
+    data class RationalFrameRate(val numerator: Long, val denominator: Long) {
+        init {
+            require(denominator > 0)
+        }
+
+        val value: Double get() = numerator.toDouble() / denominator
+
+        fun decimal(places: Int = 6): String =
+            BigDecimal.valueOf(numerator)
+                .divide(BigDecimal.valueOf(denominator), places, RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString()
+
+        override fun toString(): String = "$numerator/$denominator"
+    }
 
     data class VideoInfo(
         val videoCodec: String,
@@ -35,20 +53,40 @@ object FFProbeInspector {
         val durationSec: Double?,
         val containerBitrate: Long?,
         val containerFormat: String?,
-        val isTsEncapsulated: Boolean = false
+        val isTsEncapsulated: Boolean = false,
+        val nominalFrameRate: RationalFrameRate? = null,
+        val averageFrameRate: RationalFrameRate? = null,
+        val preferredFrameRate: RationalFrameRate? = null
     ) {
         val pixels: Int? get() = if (width != null && height != null) width * height else null
+
+        val frameRateSummary: String?
+            get() {
+                val nominal = nominalFrameRate
+                val average = averageFrameRate
+                return when {
+                    nominal != null && average != null &&
+                        kotlin.math.abs(nominal.value - average.value) > 0.000001 ->
+                        "avg ${average.decimal(3)} fps; nominal ${nominal.decimal(3)} fps"
+                    preferredFrameRate != null ->
+                        "${preferredFrameRate.decimal(3)} fps"
+                    fps != null -> "${"%.2f".format(fps)} fps"
+                    else -> null
+                }
+            }
 
         val summaryLine: String get() = buildString {
             append(videoCodec.uppercase())
             if (width != null && height != null) append(" ${width}x${height}")
-            if (fps != null) append(" @${"%.2f".format(fps)}fps")
+            frameRateSummary?.let { append(" @$it") }
             val vbr = videoBitrate ?: containerBitrate
-            if (vbr != null) append(" ${"%.0f".format(vbr / 1000.0)}kbps")
+            if (vbr != null) append(" ${formatBitrateKbps(vbr).removeSuffix("k")}kbps")
             if (audioCodec != null) {
                 append(" | ${audioCodec.uppercase()}")
                 if (sampleRate != null) append(" ${sampleRate}Hz")
-                if (audioBitrate != null) append(" ${"%.0f".format(audioBitrate / 1000.0)}kbps")
+                if (audioBitrate != null) {
+                    append(" ${formatBitrateKbps(audioBitrate).removeSuffix("k")}kbps")
+                }
             }
             if (!containerFormat.isNullOrBlank()) append(" | ${containerFormat.uppercase()}")
         }
@@ -144,7 +182,10 @@ object FFProbeInspector {
             durationSec = primary.durationSec ?: secondary.durationSec,
             containerBitrate = primary.containerBitrate ?: secondary.containerBitrate,
             containerFormat = primary.containerFormat ?: secondary.containerFormat,
-            isTsEncapsulated = primary.isTsEncapsulated || secondary.isTsEncapsulated
+            isTsEncapsulated = primary.isTsEncapsulated || secondary.isTsEncapsulated,
+            nominalFrameRate = secondary.nominalFrameRate ?: primary.nominalFrameRate,
+            averageFrameRate = primary.averageFrameRate ?: secondary.averageFrameRate,
+            preferredFrameRate = primary.preferredFrameRate ?: secondary.preferredFrameRate
         )
     }
 
@@ -159,6 +200,7 @@ object FFProbeInspector {
 
             var videoCodec = "unknown"
             var width: Int? = null; var height: Int? = null; var fps: Float? = null
+            var averageFrameRate: RationalFrameRate? = null
             var videoBitrate: Long? = null; var videoIndex: Int? = null
             var audioCodec: String? = null; var sampleRate: Int? = null
             var audioBitrate: Long? = null; var audioIndex: Int? = null
@@ -169,7 +211,8 @@ object FFProbeInspector {
                         videoCodec = stream.codec?.lowercase() ?: "unknown"
                         width = stream.width?.toInt()
                         height = stream.height?.toInt()
-                        fps = parseFraction(stream.averageFrameRate)
+                        averageFrameRate = parseRationalFrameRate(stream.averageFrameRate)
+                        fps = averageFrameRate?.value?.toFloat()
                         videoBitrate = stream.bitrate?.toLongOrNull()
                         videoIndex = 0
                         // isTsEncapsulated not available via this API; defaults false
@@ -189,7 +232,9 @@ object FFProbeInspector {
                 videoCodec, width, height, fps, null,
                 videoBitrate, videoIndex,
                 audioCodec, sampleRate, audioBitrate, null, audioIndex,
-                durationSec, containerBitrate, null
+                durationSec, containerBitrate, null,
+                averageFrameRate = averageFrameRate,
+                preferredFrameRate = averageFrameRate
             )
         } catch (e: Exception) {
             Log.e(TAG, "inspectViaApi failed: ${e.message}")
@@ -201,7 +246,7 @@ object FFProbeInspector {
     private fun inspectViaJson(file: File): VideoInfo? {
         return try {
             val session = FFprobeKit.execute(
-                "-v quiet -print_format json -show_streams -show_format -show_entries stream=index,codec_type,codec_name,width,height,r_frame_rate,bit_rate,sample_rate,channels,channel_layout,duration:format=bit_rate,duration,format_name ${file.absolutePath}"
+                "-v quiet -print_format json -show_streams -show_format -show_entries stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,bit_rate,sample_rate,channels,channel_layout,duration:format=bit_rate,duration,format_name ${file.absolutePath}"
             )
 
             if (!ReturnCode.isSuccess(session.returnCode)) {
@@ -237,6 +282,8 @@ object FFProbeInspector {
         var width: Int? = null
         var height: Int? = null
         var fps: Float? = null
+        var nominalFrameRate: RationalFrameRate? = null
+        var averageFrameRate: RationalFrameRate? = null
         var pixFmt: String? = null
         var videoBitrate: Long? = null
         var videoIndex: Int? = null
@@ -262,8 +309,9 @@ object FFProbeInspector {
                     videoCodec = s.optString("codec_name", "unknown").lowercase()
                     width = s.optInt("width").takeIf { it > 0 }
                     height = s.optInt("height").takeIf { it > 0 }
-                    fps = parseFraction(s.optString("r_frame_rate"))
-                        ?: parseFraction(s.optString("avg_frame_rate"))
+                    nominalFrameRate = parseRationalFrameRate(s.optString("r_frame_rate"))
+                    averageFrameRate = parseRationalFrameRate(s.optString("avg_frame_rate"))
+                    fps = (nominalFrameRate ?: averageFrameRate)?.value?.toFloat()
                     pixFmt = s.optString("pix_fmt").ifBlank { null }
                     videoBitrate = s.optString("bit_rate").toLongOrNull()
                     videoIndex = s.optInt("index")
@@ -312,18 +360,38 @@ object FFProbeInspector {
         return VideoInfo(
             videoCodec, width, height, fps, pixFmt, videoBitrate, videoIndex,
             audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
-            durationSec, containerBitrate, containerFormat, isTsEncapsulated
+            durationSec, containerBitrate, containerFormat, isTsEncapsulated,
+            nominalFrameRate = nominalFrameRate,
+            averageFrameRate = averageFrameRate,
+            preferredFrameRate = nominalFrameRate ?: averageFrameRate
         )
     }
 
-    private fun parseFraction(raw: String?): Float? {
+    private fun parseRationalFrameRate(raw: String?): RationalFrameRate? {
         if (raw.isNullOrBlank() || raw == "0/0") return null
         return try {
             if ('/' in raw) {
                 val (n, d) = raw.trim().split('/')
-                val den = d.toFloat()
-                if (den == 0f) null else n.toFloat() / den
-            } else raw.trim().toFloat()
-        } catch (_: Exception) { null }
+                val numerator = n.toLong()
+                val denominator = d.toLong()
+                if (numerator <= 0L || denominator <= 0L) null
+                else RationalFrameRate(numerator, denominator)
+            } else {
+                val decimal = BigDecimal(raw.trim()).stripTrailingZeros()
+                val scale = decimal.scale().coerceAtLeast(0)
+                val numerator = decimal.movePointRight(scale).longValueExact()
+                val denominator = BigDecimal.TEN.pow(scale).longValueExact()
+                if (numerator <= 0L || denominator <= 0L) null
+                else {
+                    val divisor = gcd(numerator, denominator)
+                    RationalFrameRate(numerator / divisor, denominator / divisor)
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
+
+    private fun gcd(a: Long, b: Long): Long =
+        if (b == 0L) a else gcd(b, a % b)
 }

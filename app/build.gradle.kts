@@ -82,4 +82,5 @@ dependencies {
 
     // Required transitive dependency of ffmpeg-kit.
     implementation("com.arthenica:smart-exception-java:0.2.1")
+
 }

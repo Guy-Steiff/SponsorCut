@@ -2,6 +2,8 @@
 
 package com.sponsorcut
 
+import java.math.BigDecimal
+
 enum class SectionMode {
     AUTO,
     CUSTOM
@@ -10,6 +12,26 @@ enum class SectionMode {
 enum class QualityMode {
     CRF,
     BITRATE
+}
+
+fun formatBitrateKbps(bitrateBps: Long): String =
+    BigDecimal.valueOf(bitrateBps)
+        .divide(BigDecimal.valueOf(1_000))
+        .stripTrailingZeros()
+        .toPlainString() + "k"
+
+fun parseBitrateBps(raw: String?): Long? {
+    val value = raw?.trim()?.lowercase() ?: return null
+    if (value.isBlank() || value == "auto") return null
+    val match = Regex("^(\\d+(?:\\.\\d+)?)([km]?)$").find(value) ?: return null
+    val amount = match.groupValues[1].toBigDecimalOrNull() ?: return null
+    val multiplier = when (match.groupValues[2]) {
+        "k" -> 1_000L
+        "m" -> 1_000_000L
+        else -> 1L
+    }
+    return runCatching { amount.multiply(multiplier.toBigDecimal()).toLong() }
+        .getOrNull()
 }
 
 data class EncoderOption(
