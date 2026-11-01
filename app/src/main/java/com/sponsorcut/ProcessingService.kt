@@ -22,6 +22,8 @@ import android.os.PowerManager
 import android.util.Log
 import com.sponsorcut.core.model.StreamSelection
 import java.io.File
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 class ProcessingService : Service() {
 
@@ -52,15 +54,77 @@ class ProcessingService : Service() {
         const val EXTRA_DONE = "done"
         const val EXTRA_ERROR = "error"
         const val EXTRA_CANCELLED = "cancelled"
+        const val EXTRA_JOB_ID = "job_id"
 
         const val PREFS_NAME = "sponsorcut_prefs"
         const val KEY_LAST_OUTPUT_FILE_NAME = "last_output_file_name"
 
-        @Volatile
-        var isProcessingActive: Boolean = false
+        private const val JOB_TAG = "ProcessingJob"
+
+        /**
+         * Authoritative single-job guard. A job ID is claimed before the
+         * service is started and released exactly once when that job reaches
+         * a terminal state. Every start path must claim it; nothing else may
+         * clear it.
+         */
+        private val activeJobId = AtomicReference<String?>(null)
+
+        /** Job whose worker thread has been launched; prevents duplicate threads per job. */
+        private val runningJobId = AtomicReference<String?>(null)
+
+        val isProcessingActive: Boolean
+            get() = activeJobId.get() != null
+
+        val currentJobId: String?
+            get() = activeJobId.get()
 
         @Volatile
         private var cancelRequested = false
+
+        /** Claims the single processing slot; returns null when another job owns it. */
+        fun claimJob(): String? {
+            val jobId = "job-" + UUID.randomUUID().toString().take(8)
+            if (!activeJobId.compareAndSet(null, jobId)) {
+                Log.w(JOB_TAG, "Claim rejected: active job=${activeJobId.get()}")
+                return null
+            }
+            cancelRequested = false
+            Log.i(JOB_TAG, "Claimed job=$jobId")
+            return jobId
+        }
+
+        /** Releases the slot only if [jobId] still owns it; returns true exactly once per job. */
+        fun releaseJob(jobId: String, reason: String): Boolean {
+            clearIfOwned(runningJobId, jobId)
+            val released = clearIfOwned(activeJobId, jobId)
+            if (released) {
+                Log.i(JOB_TAG, "Released job=$jobId reason=$reason")
+                DiagLog.append("Job", "Released job=$jobId reason=$reason")
+            } else {
+                Log.w(
+                    JOB_TAG,
+                    "Release ignored for job=$jobId reason=$reason; active job=${activeJobId.get()}"
+                )
+                DiagLog.append(
+                    "Job",
+                    "Release ignored for job=$jobId reason=$reason; active job=${activeJobId.get()}"
+                )
+            }
+            return released
+        }
+
+        /**
+         * AtomicReference.compareAndSet compares by identity, but job IDs that
+         * round-trip through an Intent are distinct String instances. Match by
+         * value, then clear using the stored instance.
+         */
+        private fun clearIfOwned(ref: AtomicReference<String?>, jobId: String): Boolean {
+            while (true) {
+                val current = ref.get()
+                if (current != jobId) return false
+                if (ref.compareAndSet(current, null)) return true
+            }
+        }
     }
 
     private val tag = "ProcessingService"
@@ -72,6 +136,14 @@ class ProcessingService : Service() {
 
     @Volatile
     private var lastProgressText = "Starting…"
+
+    /** Job ID attached to every broadcast from this service instance. */
+    @Volatile
+    private var broadcastJobId: String? = null
+
+    /** Terminal result held back until the job guard has been released. */
+    @Volatile
+    private var pendingTerminalIntent: Intent? = null
 
     private var jobStartElapsedRealtime = 0L
 
@@ -88,20 +160,64 @@ class ProcessingService : Service() {
         }
     }
 
+    /** Every startForegroundService() call must be answered with startForeground(). */
+    private fun ensureForeground() {
+        try {
+            startForeground(NOTIF_ID, buildNotification(lastProgressText))
+        } catch (e: Exception) {
+            Log.e(tag, "startForeground failed", e)
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
-            Log.i(tag, "Cancel requested")
+            val requestedJob = intent.getStringExtra(EXTRA_JOB_ID)
+            val activeJob = activeJobId.get()
+            if (activeJob == null || (requestedJob != null && requestedJob != activeJob)) {
+                Log.w(JOB_TAG, "Cancel ignored: requested job=$requestedJob active job=$activeJob")
+                DiagLog.append("Job", "Cancel ignored: requested job=$requestedJob active job=$activeJob")
+                return START_NOT_STICKY
+            }
+            Log.i(JOB_TAG, "Cancel requested: job=$activeJob")
+            DiagLog.append("Job", "Cancel requested: job=$activeJob")
             cancelRequested = true
             com.arthenica.ffmpegkit.FFmpegKit.cancel()
             return START_NOT_STICKY
         }
         if (intent?.action != ACTION_PROCESS) {
-            stopSelf(startId)
+            if (!isProcessingActive) stopSelf(startId)
             return START_NOT_STICKY
         }
 
+        // Accept only the job the caller claimed (or claim one here for callers
+        // without an ID), and launch at most one worker per job.
+        val requestedJobId = intent.getStringExtra(EXTRA_JOB_ID)
+        val jobId = requestedJobId ?: claimJob()
+        if (jobId == null || activeJobId.get() != jobId || !runningJobId.compareAndSet(null, jobId)) {
+            Log.w(
+                JOB_TAG,
+                "Duplicate start rejected: requested job=$requestedJobId active job=${activeJobId.get()} " +
+                    "running job=${runningJobId.get()} startId=$startId"
+            )
+            DiagLog.append(
+                "Job",
+                "Duplicate start rejected: requested job=$requestedJobId active job=${activeJobId.get()}"
+            )
+            ensureForeground()
+            return START_NOT_STICKY
+        }
+        broadcastJobId = jobId
+        pendingTerminalIntent = null
+        lastProgressText = "Starting…"
+        ensureForeground()
+        Log.i(JOB_TAG, "Start accepted: job=$jobId startId=$startId")
+
         val uriString = intent.getStringExtra(EXTRA_URI)
-        if (uriString.isNullOrBlank()) { stopSelf(startId); return START_NOT_STICKY }
+        if (uriString.isNullOrBlank()) {
+            broadcast(text = "Failed: missing input URI", error = true)
+            completeWithoutWorker(jobId, startId, "missing URI")
+            return START_NOT_STICKY
+        }
 
         val videoId = intent.getStringExtra(EXTRA_VIDEO_ID).orEmpty()
         val outputFolderUri = intent.getStringExtra(EXTRA_OUTPUT_FOLDER_URI)
@@ -123,19 +239,23 @@ class ProcessingService : Service() {
             } else {
                 "ID: Manual"
             }
-        val outputPreferences = OutputPreferences.fromJson(
-            intent.getStringExtra(EXTRA_OUTPUT_PREFERENCES_JSON)
-        )
+        val outputPreferences = try {
+            OutputPreferences.fromJson(intent.getStringExtra(EXTRA_OUTPUT_PREFERENCES_JSON))
+        } catch (e: Exception) {
+            Log.e(tag, "Invalid output preferences", e)
+            broadcast(text = "Failed: invalid output preferences\n${e.message}", error = true)
+            completeWithoutWorker(jobId, startId, "invalid output preferences")
+            return START_NOT_STICKY
+        }
         val uri = try { uriString.toUri() } catch (e: Exception) {
             broadcast(text = "Bad URI: $uriString\n${e.message}", error = true)
-            finish(startId)
+            completeWithoutWorker(jobId, startId, "bad URI")
             return START_NOT_STICKY
         }
 
         Thread {
-            isProcessingActive = true
-            cancelRequested = false
-            lastProgressText = "Starting…"
+            var terminalReason = "unknown"
+            var outputCommitted = false
             jobStartElapsedRealtime = SystemClock.elapsedRealtime()
             startElapsedUpdates()
             cleanupPreviousRunArtifacts()
@@ -148,6 +268,7 @@ class ProcessingService : Service() {
                 .also { it.acquire(2 * 60 * 60 * 1000L) }  // max 2 hours
             try {
                 DiagLog.clear()
+                DiagLog.append("Job", "Started job=$jobId startId=$startId")
                 DiagLog.append("Input", "File: ${FileResolver.getDisplayName(this, uri)}\nMedia: $inputSummary")
                 DiagLog.append("Service", "Starting. frameAccurate=$frameAccurate uri=$uriString")
                 val power = collectPowerDiagnostics()
@@ -198,6 +319,7 @@ class ProcessingService : Service() {
                 } else {
                     FileResolver.createOutputTarget(this, uri, outputFileName, inputFile)
                 }
+                DiagLog.append("Job", "job=$jobId owns output target: ${outputTarget.label}")
                 tempOutput = File(cacheDir, "processed_${System.currentTimeMillis()}.$outputExt")
                 DiagLog.append("Service", "Output container: .$outputExt muxer=${processingPlan.outputMuxer ?: "auto"}")
 
@@ -223,6 +345,8 @@ class ProcessingService : Service() {
 
                     progress("Saving output…")
                     FileResolver.writeToOutputTarget(this, tempOutput, outputTarget)
+                    outputCommitted = true
+                    DiagLog.append("Job", "job=$jobId output committed: ${outputTarget.label}")
 
                     val outputSizeMb = "%.2f".format(tempOutput.length() / 1_000_000.0)
                     val inputSizeMb = "%.2f".format(inputFile.length() / 1_000_000.0)
@@ -289,7 +413,7 @@ class ProcessingService : Service() {
                         "SponsorCut done ✓",
                         "Saved: ${outputTarget.label}"
                     )
-                    finish(startId)
+                    terminalReason = "done"
                     return@Thread
                 }
 
@@ -322,7 +446,7 @@ class ProcessingService : Service() {
                             text = "No selected categories match the loaded local segments. Nothing to remove.",
                             done = true
                         )
-                        finish(startId)
+                        terminalReason = "nothing to remove"
                         return@Thread
                     }
 
@@ -337,7 +461,7 @@ class ProcessingService : Service() {
                             text = "SponsorBlock had no segments for ID: $videoId. Nothing to remove.",
                             done = true
                         )
-                        finish(startId)
+                        terminalReason = "nothing to remove"
                         return@Thread
                     }
 
@@ -361,7 +485,7 @@ class ProcessingService : Service() {
                         text = "No individual segments were selected for removal. Nothing to do.",
                         done = true
                     )
-                    finish(startId)
+                    terminalReason = "nothing to remove"
                     return@Thread
                 }
 
@@ -402,6 +526,8 @@ class ProcessingService : Service() {
                 val inputSizeMb = "%.2f".format(inputFile.length() / 1_000_000.0)
                 progress("Saving output…")
                 FileResolver.writeToOutputTarget(this, tempOutput, outputTarget)
+                outputCommitted = true
+                DiagLog.append("Job", "job=$jobId output committed: ${outputTarget.label}")
                 val outputSizeMb = "%.2f".format(tempOutput.length() / 1_000_000.0)
 
                 val outputInfo = FFProbeInspector.inspect(tempOutput)
@@ -486,16 +612,17 @@ class ProcessingService : Service() {
                 DiagLog.setRunSummary(result)
                 broadcast(text = result, done = true)
                 showDoneNotification("SponsorCut done ✓", "Saved: ${outputTarget.label}")
+                terminalReason = "done"
 
             } catch (e: Exception) {
                 Log.e(tag, "Processing failed", e)
-                // Clean up the placeholder output file so no empty/partial file is left behind
-                outputTarget?.let { FileResolver.deleteOutputTarget(this, it) }
                 if (e.message == "CANCELLED") {
+                    terminalReason = "cancelled"
                     DiagLog.append("Service", "Job cancelled by user")
                     broadcast(text = "Job cancelled.", cancelled = true)
                     showDoneNotification("SponsorCut cancelled", "Job was cancelled by user.")
                 } else {
+                    terminalReason = "failed"
                     DiagLog.append("Service", "FAILED: ${e.message}\n${e.stackTraceToString().take(800)}")
                     broadcast(text = "Failed: ${e.message ?: "unknown error"}", error = true)
                     showDoneNotification("SponsorCut failed", e.message ?: "unknown error")
@@ -503,16 +630,61 @@ class ProcessingService : Service() {
             } finally {
                 stopElapsedUpdates()
                 cancelRequested = false
-                isProcessingActive = false
                 wakeLock?.let { if (it.isHeld) it.release() }
                 wakeLock = null
+                // Remove only this job's own placeholder/partial output. A
+                // committed output is never deleted, even if a later step fails.
+                val ownedTarget = outputTarget
+                if (ownedTarget != null && !outputCommitted) {
+                    DiagLog.append(
+                        "Job",
+                        "job=$jobId removing uncommitted output (reason=$terminalReason): ${ownedTarget.label}"
+                    )
+                    FileResolver.deleteOutputTarget(this, ownedTarget)
+                }
                 tempOutput?.delete()
                 cachedInput?.delete()
-                finish(startId)
+                completeJob(jobId, startId, terminalReason)
             }
         }.start()
 
         return START_NOT_STICKY
+    }
+
+    /** Terminates a job that failed validation before its worker thread started. */
+    private fun completeWithoutWorker(jobId: String, startId: Int, reason: String) {
+        DiagLog.append("Job", "job=$jobId ended before worker start: $reason")
+        completeJob(jobId, startId, reason)
+    }
+
+    /**
+     * Releases the job guard exactly once, then announces the terminal result.
+     * The broadcast is sent after release so the UI never re-enables processing
+     * while the guard is still held.
+     */
+    private fun completeJob(jobId: String, startId: Int, reason: String) {
+        val recorded = pendingTerminalIntent
+        pendingTerminalIntent = null
+        val terminal = recorded ?: Intent(BROADCAST_PROGRESS).apply {
+            `package` = packageName
+            putExtra(EXTRA_PROGRESS_TEXT, "Failed: processing ended unexpectedly ($reason)")
+            putExtra(EXTRA_DONE, false)
+            putExtra(EXTRA_ERROR, true)
+            putExtra(EXTRA_CANCELLED, false)
+            putExtra(EXTRA_JOB_ID, jobId)
+        }
+        DiagLog.append("Job", "job=$jobId terminal: $reason")
+        // Re-persist so a paused Activity restores the complete log, including
+        // the job-terminal diagnostics appended after the result was recorded.
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit {
+            if (recorded == null) {
+                putString("last_completed_status", terminal.getStringExtra(EXTRA_PROGRESS_TEXT))
+            }
+            putString("last_completed_log", DiagLog.get())
+        }
+        releaseJob(jobId, reason)
+        finish(startId)
+        sendBroadcast(terminal)
     }
 
     private fun cleanupPreviousRunArtifacts() {
@@ -534,19 +706,27 @@ class ProcessingService : Service() {
     }
 
     private fun finish(startId: Int) {
-        // Remove the active foreground/progress notification. The separate
-        // completion notification uses NOTIF_DONE_ID and must remain visible.
-        runCatching {
-            nm.cancel(NOTIF_ID)
-        }
+        // Runs on the main thread, serialized with job claims and
+        // onStartCommand, so a newer job's foreground state is never removed.
+        elapsedHandler.post {
+            if (isProcessingActive) {
+                Log.i(JOB_TAG, "Teardown skipped for startId=$startId; active job=${currentJobId}")
+                return@post
+            }
+            // Remove the active foreground/progress notification. The separate
+            // completion notification uses NOTIF_DONE_ID and must remain visible.
+            runCatching {
+                nm.cancel(NOTIF_ID)
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
         }
-        stopSelf(startId)
     }
 
     private fun progress(text: String) {
@@ -601,13 +781,20 @@ class ProcessingService : Service() {
             }
         }
 
-        sendBroadcast(Intent(BROADCAST_PROGRESS).apply {
+        val intent = Intent(BROADCAST_PROGRESS).apply {
             `package` = packageName
             putExtra(EXTRA_PROGRESS_TEXT, text)
             putExtra(EXTRA_DONE, done)
             putExtra(EXTRA_ERROR, error)
             putExtra(EXTRA_CANCELLED, cancelled)
-        })
+            putExtra(EXTRA_JOB_ID, broadcastJobId)
+        }
+        if (done || error || cancelled) {
+            // Delivered by completeJob() after the job guard is released.
+            pendingTerminalIntent = intent
+            return
+        }
+        sendBroadcast(intent)
     }
 
     private fun broadcastNumeric(current: Int, total: Int) {

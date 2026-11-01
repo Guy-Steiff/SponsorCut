@@ -72,6 +72,12 @@
     <string name="media_loaded_output_options_failed">Media loaded, but output options failed: %1$s</string>
     <string name="media_loaded_segment_reload_failed">Media loaded, but segment reload failed: %1$s</string>
     <string name="media_loaded_stream_ui_failed">Media loaded, but stream UI failed: %1$s</string>
+    <string name="output_policy_preview_failed">Output settings could not be resolved: %1$s</string>
+    <string name="auto_unresolved">Auto (unresolved)</string>
+    <string name="copy_input_video">Copy input video</string>
+    <string name="copy_compatible_audio">Copy compatible audio</string>
+    <string name="input_choice_suffix">input</string>
+    <string name="fallback_choice_suffix">fallback</string>
     <string name="show_diagnostic_log">📋 Show diagnostic log</string>
     <string name="hide_diagnostic_log">📋 Hide diagnostic log</string>
     <string name="save_diagnostic_log">💾 Save diagnostic log</string>

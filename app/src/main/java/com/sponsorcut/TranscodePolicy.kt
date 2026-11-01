@@ -7,6 +7,8 @@ import kotlin.math.roundToInt
 
 object TranscodePolicy {
 
+    class PolicyResolutionException(message: String) : IllegalStateException(message)
+
     enum class ComplexityTier { LOW, MEDIUM, HIGH }
 
     enum class AudioBitrateProvenance {
@@ -65,6 +67,8 @@ object TranscodePolicy {
         val rationale: String,
         val outputResolution: OutputResolution,
         val executionMode: ExecutionMode,
+        val videoEncoder: String? = null,
+        val audioEncoder: String? = null,
         val useSlowSeek: Boolean = false,
         val singlePassFilter: Boolean = false,
         val dropVideo: Boolean = false,
@@ -81,6 +85,19 @@ object TranscodePolicy {
         val videoBitrateProvenance: VideoBitrateProvenance =
             VideoBitrateProvenance.NONE
     )
+
+    data class UiPreview(
+        val outputResolution: OutputResolution?,
+        val videoEncoder: String?,
+        val audioEncoder: String?,
+        val outputExtension: String?,
+        val canCopyVideo: Boolean,
+        val canCopyAudio: Boolean,
+        val unsupportedMessage: String? = null,
+        val failureStackTrace: String? = null
+    ) {
+        val isSupported: Boolean get() = unsupportedMessage == null
+    }
 
     private data class AudioEncoding(
         val args: List<String>,
@@ -118,24 +135,11 @@ object TranscodePolicy {
         "MPEG-4 Part 2" to "aac"
     )
 
-    private val SW_AUTO_BY_FAMILY = mapOf(
-        "H.264" to "libx264",
-        "H.265/HEVC" to "libx265",
-        "VP9" to "libvpx-vp9",
-        "AV1" to "libsvtav1",
-        "MPEG-4 Part 2" to "mpeg4"
-    )
-
-    private val SW_FALLBACK_FAMILIES = listOf(
+    private val AUTO_VIDEO_FALLBACK_FAMILIES = listOf(
         "H.264",
         "VP9",
         "AV1",
         "MPEG-4 Part 2"
-    )
-
-    private val HW_AUTO_BY_FAMILY = mapOf(
-        "H.264" to listOf("h264_mediacodec"),
-        "H.265/HEVC" to listOf("hevc_mediacodec")
     )
 
     fun plan(
@@ -175,8 +179,23 @@ object TranscodePolicy {
         val videoEncoder = resolveVideoEncoder(
             info, mode, preferences, catalog, inputVideoFamily, reasons
         )
+        val compatibilityContainer = resolveContainer(
+            info,
+            preferences,
+            catalog,
+            videoEncoder,
+            null,
+            mutableListOf(),
+            validateAudioCompatibility = false
+        )
         val audioEncoder = resolveAudioEncoder(
-            mode, preferences, catalog, inputAudioFamily, videoEncoder, reasons
+            mode = mode,
+            preferences = preferences,
+            catalog = catalog,
+            inputFamily = inputAudioFamily,
+            videoEncoder = videoEncoder,
+            container = compatibilityContainer,
+            reasons = reasons
         )
         val container = resolveContainer(
             info, preferences, catalog, videoEncoder, audioEncoder, reasons
@@ -232,6 +251,8 @@ object TranscodePolicy {
             rationale = reasons.joinToString("; ").ifBlank { "input-matched processing" },
             outputResolution = outputResolution,
             executionMode = mode,
+            videoEncoder = videoEncoder,
+            audioEncoder = audioEncoder,
             useSlowSeek = info.isTsEncapsulated,
             singlePassFilter = singlePass,
             removeSegments = removeSegments,
@@ -259,7 +280,12 @@ object TranscodePolicy {
         if (streamSelection == StreamSelection.AUDIO_ONLY) {
             val inputFamily = EncoderCatalog.familyForInputCodec(info.audioCodec)
             val encoder = resolveAudioEncoder(
-                mode, preferences, catalog, inputFamily, null, reasons
+                mode = mode,
+                preferences = preferences,
+                catalog = catalog,
+                inputFamily = inputFamily,
+                videoEncoder = null,
+                reasons = reasons
             )
             val canCopy = mode == ExecutionMode.FAST && encoder == null
             // The Audio container dropdown's first entry means "retain the
@@ -302,6 +328,8 @@ object TranscodePolicy {
                 rationale = reasons.joinToString("; ").ifBlank { "audio extraction" },
                 outputResolution = outputResolution,
                 executionMode = mode,
+            videoEncoder = null,
+            audioEncoder = encoder,
             useSlowSeek = info.isTsEncapsulated,
                 singlePassFilter = removeSegments && !canCopy,
                 dropVideo = true,
@@ -360,6 +388,8 @@ object TranscodePolicy {
             rationale = reasons.joinToString("; ").ifBlank { "video extraction" },
             outputResolution = outputResolution,
             executionMode = mode,
+            videoEncoder = encoder,
+            audioEncoder = null,
             useSlowSeek = info.isTsEncapsulated,
             singlePassFilter = removeSegments && !canCopy,
             dropVideo = false,
@@ -381,34 +411,36 @@ object TranscodePolicy {
         streamSelection: StreamSelection = StreamSelection.BOTH,
         preferences: OutputPreferences = OutputPreferences(),
         catalog: List<EncoderOption> = EncoderCatalog.discover()
-    ): OutputResolution = plan(
-        info = info,
-        frameAccurate = frameAccurate,
-        hwAccurate = hwAccurate,
-        removeSegments = removeSegments,
-        streamSelection = streamSelection,
-        preferences = preferences,
-        catalog = catalog
-    ).outputResolution
-
-    fun resolveVideoEncoderForUi(
-        info: FFProbeInspector.VideoInfo,
-        mode: ExecutionMode,
-        preferences: OutputPreferences,
-        catalog: List<EncoderOption>,
-        inputFamily: String?
-    ): String? {
+    ): UiPreview {
         return try {
-            resolveVideoEncoder(
-                info,
-                mode,
-                preferences,
-                catalog,
-                inputFamily,
-                mutableListOf()
+            val processingPlan = plan(
+                info = info,
+                frameAccurate = frameAccurate,
+                hwAccurate = hwAccurate,
+                removeSegments = removeSegments,
+                streamSelection = streamSelection,
+                preferences = preferences,
+                catalog = catalog
             )
-        } catch (_: Exception) {
-            null
+            UiPreview(
+                outputResolution = processingPlan.outputResolution,
+                videoEncoder = processingPlan.videoEncoder,
+                audioEncoder = processingPlan.audioEncoder,
+                outputExtension = processingPlan.outputExtension,
+                canCopyVideo = processingPlan.canCopyVideo,
+                canCopyAudio = processingPlan.canCopyAudio
+            )
+        } catch (e: PolicyResolutionException) {
+            UiPreview(
+                outputResolution = null,
+                videoEncoder = null,
+                audioEncoder = null,
+                outputExtension = null,
+                canCopyVideo = false,
+                canCopyAudio = false,
+                unsupportedMessage = e.message ?: "Output settings are not supported.",
+                failureStackTrace = e.stackTraceToString()
+            )
         }
     }
 
@@ -431,68 +463,45 @@ object TranscodePolicy {
             reasons += "Custom video section had no codec selected; using Auto"
         } else if (preferences.videoSectionMode == SectionMode.CUSTOM) {
             val requested = preferences.videoCodec
-                ?: error("Video is Custom but no video codec was selected")
+                ?: throw PolicyResolutionException("Video is Custom but no video codec was selected")
             val option = EncoderCatalog.find(catalog, requested)
-                ?: error("Unknown video encoder: $requested")
-            if (!option.available) error("Video encoder $requested is unavailable")
+                ?: throw PolicyResolutionException("Unknown video encoder: $requested")
+            if (!option.available) throw PolicyResolutionException("Video encoder $requested is unavailable")
             if (mode == ExecutionMode.SW_ACCURATE && option.hardware) {
-                error("$requested is a hardware encoder; select HW mode")
+                throw PolicyResolutionException("$requested is a hardware encoder; select HW mode")
             }
             if (mode == ExecutionMode.HW_ACCURATE && !option.hardware) {
-                error("$requested is a software encoder; select SW mode")
+                throw PolicyResolutionException("$requested is a software encoder; select SW mode")
             }
             reasons += "Custom video encoder: $requested"
             return requested
         }
 
-        val family = inputFamily
-            ?: error("No input-matching policy for video codec '${info.videoCodec}'")
-
-        if (mode == ExecutionMode.HW_ACCURATE) {
-            val candidates = HW_AUTO_BY_FAMILY[family]
-                ?: error("HW Auto is not defined for $family input; choose SW or a custom HW encoder")
-            val available = candidates.firstOrNull { name ->
-                EncoderCatalog.find(catalog, name)?.available == true
-            }
-
-            if (available != null) {
-                reasons += "HW Auto matches $family using $available"
-                return available
-            }
-
-            val softwareFallback = SW_AUTO_BY_FAMILY[family]
-            val softwareOption = softwareFallback?.let {
-                EncoderCatalog.find(catalog, it)
-            }
-
-            if (softwareOption?.available == true) {
-                reasons += "No HW encoder for $family; using SW fallback $softwareFallback"
-                return softwareFallback
-            }
-
-            error("No available HW or SW encoder for $family input")
+        val availableOptions = EncoderCatalog.videoOptions(catalog, mode)
+            .filter { it.available }
+        val inputMatch = inputFamily?.let { family ->
+            availableOptions.firstOrNull { it.codecFamily == family }
+        }
+        if (inputMatch != null) {
+            reasons += "Auto matches input family $inputFamily using ${inputMatch.name}"
+            return inputMatch.name
         }
 
-        val preferred = SW_AUTO_BY_FAMILY[family]
-        val orderedFamilies = buildList {
-            if (preferred != null) add(family)
-            SW_FALLBACK_FAMILIES.forEach { if (it !in this) add(it) }
-        }
-
-        for (candidateFamily in orderedFamilies) {
-            val candidateName = SW_AUTO_BY_FAMILY[candidateFamily] ?: continue
-            val option = EncoderCatalog.find(catalog, candidateName)
-            if (option?.available == true) {
-                reasons += if (candidateFamily == family) {
-                    "SW Auto matches $family using $candidateName"
-                } else {
-                    "SW Auto fallback: $family -> $candidateName"
-                }
-                return candidateName
+        for (family in AUTO_VIDEO_FALLBACK_FAMILIES) {
+            val fallback = availableOptions.firstOrNull { it.codecFamily == family }
+            if (fallback != null) {
+                reasons += "Auto fallback: ${inputFamily ?: info.videoCodec} -> " +
+                    "$family using ${fallback.name}"
+                return fallback.name
             }
         }
 
-        error("No available SW video encoder matches the fallback hierarchy")
+        val fallback = availableOptions.firstOrNull()
+            ?: throw PolicyResolutionException(
+                "No available ${mode.name.lowercase()} video encoder matches the Auto fallback hierarchy"
+            )
+        reasons += "Auto fallback: no preferred family encoder available; using ${fallback.name}"
+        return fallback.name
     }
 
     private fun resolveAudioEncoder(
@@ -501,7 +510,8 @@ object TranscodePolicy {
         catalog: List<EncoderOption>,
         inputFamily: String?,
         videoEncoder: String?,
-        reasons: MutableList<String>
+        reasons: MutableList<String>,
+        container: String? = null
     ): String? {
         if (mode == ExecutionMode.FAST) {
             reasons += "Fast audio stream copy"
@@ -510,10 +520,10 @@ object TranscodePolicy {
 
         if (preferences.audioSectionMode == SectionMode.CUSTOM) {
             val requested = preferences.audioCodec
-                ?: error("Audio is Custom but no audio codec was selected")
+                ?: throw PolicyResolutionException("Audio is Custom but no audio codec was selected")
             val option = EncoderCatalog.find(catalog, requested)
-                ?: error("Unknown audio encoder: $requested")
-            if (!option.available) error("Audio encoder $requested is unavailable")
+                ?: throw PolicyResolutionException("Unknown audio encoder: $requested")
+            if (!option.available) throw PolicyResolutionException("Audio encoder $requested is unavailable")
             reasons += "Custom audio encoder: $requested"
             return requested
         }
@@ -527,9 +537,12 @@ object TranscodePolicy {
             else -> null
         }
 
-        if (inputEncoder != null &&
-            EncoderCatalog.find(catalog, inputEncoder)?.available == true
-        ) {
+        val inputEncoderOption = EncoderCatalog.find(catalog, inputEncoder)
+        val inputAudioCompatible = inputEncoderOption?.let { option ->
+            container == null ||
+                AUDIO_CONTAINER_COMPATIBILITY[option.codecFamily]?.contains(container) != false
+        } == true
+        if (inputEncoder != null && inputEncoderOption?.available == true && inputAudioCompatible) {
             reasons += "Audio Auto matches input family $inputFamily using $inputEncoder"
             return inputEncoder
         }
@@ -540,9 +553,13 @@ object TranscodePolicy {
         val fallback = DEFAULT_AUDIO_BY_FAMILY[videoFamily] ?: "aac"
         val fallbackOption = EncoderCatalog.find(catalog, fallback)
         if (fallbackOption?.available != true) {
-            error("Required audio encoder $fallback is unavailable")
+            throw PolicyResolutionException("Required audio encoder $fallback is unavailable")
         }
-        reasons += "Audio Auto fallback: $fallback"
+        reasons += if (inputEncoder != null && !inputAudioCompatible && container != null) {
+            "Audio Auto fallback: $inputEncoder is incompatible with .$container; using $fallback"
+        } else {
+            "Audio Auto fallback: $fallback"
+        }
         return fallback
     }
 
@@ -552,15 +569,20 @@ object TranscodePolicy {
         catalog: List<EncoderOption>,
         videoEncoder: String?,
         audioEncoder: String?,
-        reasons: MutableList<String>
+        reasons: MutableList<String>,
+        validateAudioCompatibility: Boolean = true
     ): String {
         val videoFamily = videoEncoder?.let {
             EncoderCatalog.find(catalog, it)?.codecFamily
         } ?: EncoderCatalog.familyForInputCodec(info.videoCodec)
 
-        val audioFamily = audioEncoder?.let {
-            EncoderCatalog.find(catalog, it)?.codecFamily
-        } ?: EncoderCatalog.familyForInputCodec(info.audioCodec)
+        val audioFamily = if (!validateAudioCompatibility) {
+            null
+        } else {
+            audioEncoder?.let {
+                EncoderCatalog.find(catalog, it)?.codecFamily
+            } ?: EncoderCatalog.familyForInputCodec(info.audioCodec)
+        }
 
         if (preferences.videoSectionMode == SectionMode.CUSTOM &&
             preferences.container != null
@@ -568,7 +590,7 @@ object TranscodePolicy {
             val requested = preferences.container.lowercase()
 
             if (requested == "ts" || requested == "m2ts") {
-                error(
+                throw PolicyResolutionException(
                     "MPEG-TS output is currently unsupported for transcoding. " +
                         "TS inputs are automatically processed to MP4. " +
                         "TS output preservation will be re-examined after the FFmpegKitNext upgrade."
@@ -581,7 +603,7 @@ object TranscodePolicy {
         }
 
         val allowed = VIDEO_CONTAINER_COMPATIBILITY[videoFamily]
-            ?: error("No container policy for video family $videoFamily")
+            ?: throw PolicyResolutionException("No container policy for video family $videoFamily")
 
         val inputFormats = info.containerFormat
             ?.split(',')
@@ -624,7 +646,7 @@ object TranscodePolicy {
         if (videoFamily != null) {
             val allowed = VIDEO_CONTAINER_COMPATIBILITY[videoFamily]
             if (allowed != null && container !in allowed) {
-                error(
+                throw PolicyResolutionException(
                     "$videoFamily video is incompatible with .$container; " +
                         "allowed: ${allowed.joinToString(", ") { ".$it" }}"
                 )
@@ -633,7 +655,7 @@ object TranscodePolicy {
         if (audioFamily != null) {
             val allowed = AUDIO_CONTAINER_COMPATIBILITY[audioFamily]
             if (allowed != null && container !in allowed) {
-                error(
+                throw PolicyResolutionException(
                     "$audioFamily audio is incompatible with .$container; " +
                         "allowed: ${allowed.joinToString(", ") { ".$it" }}"
                 )
@@ -670,7 +692,7 @@ object TranscodePolicy {
             QualityMode.CRF -> {
                 if (videoEncoder in setOf("h264_mediacodec", "hevc_mediacodec")) {
                     val cq = preferences.cq
-                        ?: error("CQ value is required for $videoEncoder CQ mode")
+                    ?: throw PolicyResolutionException("CQ value is required for $videoEncoder CQ mode")
 
                     reasons += "$videoEncoder CQ $cq"
                     Quality(
@@ -679,7 +701,7 @@ object TranscodePolicy {
                     )
                 } else {
                     val crf = preferences.crf ?: 23
-                    if (crf !in 0..51) error("CRF must be between 0 and 51")
+                    if (crf !in 0..51) throw PolicyResolutionException("CRF must be between 0 and 51")
 
                     reasons += "$videoEncoder CRF $crf"
                     Quality(
@@ -758,7 +780,7 @@ object TranscodePolicy {
                     }
                     "h264_mediacodec", "hevc_mediacodec" -> {
                         val cq = quality.cq
-                            ?: error("CQ value is required for $encoder CQ mode")
+                            ?: throw PolicyResolutionException("CQ value is required for $encoder CQ mode")
 
                         args += listOf(
                             "-bitrate_mode", "cq",

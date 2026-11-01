@@ -86,7 +86,8 @@ class MainActivity : Activity() {
     private var uiAudioCatalog: List<EncoderOption> = emptyList()
     private var uiVideoChoices: List<EncoderOption?> = emptyList()
     private var uiAudioChoices: List<EncoderOption?> = emptyList()
-    private var refreshOutputOptionsCallback: (() -> Unit)? = null
+    private var refreshOutputOptionsCallback: ((String) -> Unit)? = null
+    private var inspectionGeneration = 0L
     private val segmentFetchHandler = Handler(Looper.getMainLooper())
     private var pendingSegmentFetchId: String? = null
     private var detectedCategories: List<String> = emptyList()
@@ -259,6 +260,21 @@ class MainActivity : Activity() {
             val error = intent.getBooleanExtra(ProcessingService.EXTRA_ERROR, false)
             val cancelled = intent.getBooleanExtra(ProcessingService.EXTRA_CANCELLED, false)
             if (done || error || cancelled) {
+                val terminalJobId = intent.getStringExtra(ProcessingService.EXTRA_JOB_ID)
+                val activeJobId = ProcessingService.currentJobId
+                if (activeJobId != null && activeJobId != terminalJobId) {
+                    // A stale terminal result must never unlock a different running job.
+                    Log.w(
+                        "ProcessingJob",
+                        "Ignoring terminal broadcast for job=$terminalJobId; active job=$activeJobId"
+                    )
+                    DiagLog.append(
+                        "Job",
+                        "UI ignored stale terminal broadcast job=$terminalJobId active job=$activeJobId"
+                    )
+                    return
+                }
+                Log.i("ProcessingJob", "UI received terminal broadcast for job=$terminalJobId")
                 val finalStatus = if (cancelled) "⏹ Cancelled." else text
                 saveCompletedRunState(finalStatus, DiagLog.get())
                 clearActiveProcessingSnapshot()
@@ -638,14 +654,17 @@ class MainActivity : Activity() {
         }
 
         suppressOutputCallbacks = true
-        spinner.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
-            values
-        )
-        val index = preferred?.let { values.indexOf(it) } ?: -1
-        spinner.setSelection(if (index >= 0) index else 0, false)
-        suppressOutputCallbacks = false
+        try {
+            spinner.adapter = ArrayAdapter(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                values
+            )
+            val index = preferred?.let { values.indexOf(it) } ?: -1
+            spinner.setSelection(if (index >= 0) index else 0, false)
+        } finally {
+            suppressOutputCallbacks = false
+        }
     }
 
     private fun setupUi() {
@@ -716,6 +735,9 @@ class MainActivity : Activity() {
             setBackgroundColor(0xFF2E7D32.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             setOnClickListener {
+                // Never mutate segments or start work while a job owns the slot.
+                if (rejectIfBusy(source = "process button")) return@setOnClickListener
+
                 // Commit any in-progress timestamp/category edit before
                 // validating segments or deciding whether processing can start.
                 currentFocus?.clearFocus()
@@ -827,6 +849,7 @@ class MainActivity : Activity() {
                 text = getString(R.string.cancelling)
                 val cancelIntent = Intent(this@MainActivity, ProcessingService::class.java).apply {
                     action = ProcessingService.ACTION_CANCEL
+                    putExtra(ProcessingService.EXTRA_JOB_ID, ProcessingService.currentJobId)
                 }
                 startService(cancelIntent)
             }
@@ -1175,7 +1198,7 @@ class MainActivity : Activity() {
                 }
 
                 updateStreamSelectionAvailability()
-                refreshOutputOptionsCallback?.invoke()
+                refreshOutputOptionsCallback?.invoke("stream selection")
             }
 
             // ── Output format controls ─────────────────────────────────────
@@ -1252,7 +1275,7 @@ class MainActivity : Activity() {
                         if (!updatingAudioBitrateInput) {
                             audioBitrateIsAuto = false
                             selectedAudioBitratePreset = getString(R.string.custom)
-                            refreshOutputOptionsCallback?.invoke()
+                            refreshOutputOptionsCallback?.invoke("audio bitrate text edit")
                         }
                     }
                 })
@@ -1312,7 +1335,7 @@ class MainActivity : Activity() {
                                 setAudioBitrateInput(choice)
                             }
                         }
-                        refreshOutputOptionsCallback?.invoke()
+                        refreshOutputOptionsCallback?.invoke("audio bitrate preset selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -1336,7 +1359,7 @@ class MainActivity : Activity() {
                         if (!updatingVideoBitrateInput) {
                             videoBitrateIsAuto = false
                             selectedVideoBitratePreset = getString(R.string.custom)
-                            refreshOutputOptionsCallback?.invoke()
+                            refreshOutputOptionsCallback?.invoke("video bitrate text edit")
                         }
                     }
                 })
@@ -1421,113 +1444,19 @@ class MainActivity : Activity() {
 
             addView(makeRow(getString(R.string.audio_bitrate_label), audioBitrateValueRow), lp)
 
-            fun resolvedVideoChoiceLabel(mode: ExecutionMode): String {
-                val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.videoCodec)
-                val matching = uiVideoCatalog.firstOrNull { it.codecFamily == inputFamily }
-
-                if (matching != null) {
-                    return "${matching.label} - input"
-                }
-
-                val fallback = when (mode) {
-                    ExecutionMode.HW_ACCURATE ->
-                        uiVideoCatalog.firstOrNull { it.name == "h264_mediacodec" }
-                            ?: uiVideoCatalog.firstOrNull()
-
-                    ExecutionMode.SW_ACCURATE ->
-                        uiVideoCatalog.firstOrNull { it.name == "mpeg4" }
-                            ?: uiVideoCatalog.firstOrNull()
-
-                    else -> null
-                }
-
-                return fallback?.let { "${it.label} - fallback" }
-                    ?: "No compatible video encoder"
-            }
-
-            fun resolvedAudioChoiceLabel(
-                effectiveVideoFamily: String?,
-                videoFallbackActive: Boolean
-            ): String {
-                val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
-                val inputMatching = uiAudioCatalog.firstOrNull { it.codecFamily == inputFamily }
-
-                // Mirror TranscodePolicy: once the effective video family changes,
-                // audio Auto must be re-evaluated for the new output target.
-                val effectiveAudioFamily = when (effectiveVideoFamily) {
-                    "H.264", "H.265/HEVC", "AV1", "MPEG-4 Part 2" -> "AAC"
-                    "VP9" -> "Opus"
-                    else -> "AAC"
-                }
-
-                val effectiveMatching = uiAudioCatalog.firstOrNull {
-                    it.codecFamily == effectiveAudioFamily
-                }
-
-                return when {
-                    !videoFallbackActive && inputMatching != null ->
-                        "${inputMatching.label} - input"
-
-                    effectiveMatching != null ->
-                        "${effectiveMatching.label} - fallback"
-
-                    else -> "AAC - fallback"
-                }
-            }
-
-            fun resolvedContainerChoiceLabel(
-                mode: ExecutionMode,
-                effectiveVideoFamily: String?,
-                videoFallbackActive: Boolean
-            ): String {
-                val summary = pendingVideoInfo?.summaryLine ?: ""
-
-                // A video-codec fallback changes the compatibility target, so the
-                // Auto container must follow the effective video family rather than
-                // merely preserving the input container.
-                return when {
-                    mode == ExecutionMode.FAST -> {
-                        when {
-                            summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
-                            summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
-                            summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
-                            summary.contains("WebM", ignoreCase = true) -> "WebM - input"
-                            summary.contains("AVI", ignoreCase = true) -> "AVI - input"
-                            else -> "MP4 - fallback"
-                        }
-                    }
-
-                    videoFallbackActive -> "MP4 - fallback"
-
-                    effectiveVideoFamily == "VP9" -> {
-                        when {
-                            summary.contains("WebM", ignoreCase = true) -> "WebM - input"
-                            summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
-                            else -> "WebM - fallback"
-                        }
-                    }
-
-                    else -> {
-                        when {
-                            summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
-                            summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
-                            summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
-                            summary.contains("AVI", ignoreCase = true) -> "AVI - input"
-                            else -> "MP4 - fallback"
-                        }
-                    }
-                }
-            }
+            var refreshInProgress = false
+            var refreshTrigger = "initial"
+            var refreshStageName = "initial"
 
             fun refreshOutputOptions() {
                 if (suppressOutputCallbacks) return
 
+                refreshStageName = "mode-and-encoder-catalog"
                 val mode = when {
                     radioHwAccurate.isChecked -> ExecutionMode.HW_ACCURATE
                     radioSwAccurate.isChecked -> ExecutionMode.SW_ACCURATE
                     else -> ExecutionMode.FAST
                 }
-
                 val videoCatalog = EncoderCatalog.videoOptions(encoderCatalog, mode)
                     .filter { it.available }
                 val audioCatalog = EncoderCatalog.audioOptions(encoderCatalog)
@@ -1565,37 +1494,72 @@ class MainActivity : Activity() {
                     if (audioSectionCustom) "Custom" else "Auto"
                 )
 
-                val resolvedVideoLabel = resolvedVideoChoiceLabel(mode)
+                refreshStageName = "policy-preview"
+                val previewInfo = pendingVideoInfo
+                val preview = previewInfo?.let { info ->
+                    TranscodePolicy.resolveForUi(
+                        info = info,
+                        frameAccurate = mode == ExecutionMode.SW_ACCURATE,
+                        hwAccurate = mode == ExecutionMode.HW_ACCURATE,
+                        streamSelection = when {
+                            radioAudioOnly.isChecked -> StreamSelection.AUDIO_ONLY
+                            radioVideoOnly.isChecked -> StreamSelection.VIDEO_ONLY
+                            else -> StreamSelection.BOTH
+                        },
+                        preferences = currentOutputPreferences(),
+                        catalog = encoderCatalog
+                    )
+                }
+                outputResolutionPreview = preview?.outputResolution
+                val unsupportedDisplayMessage = preview?.unsupportedMessage
+                unsupportedDisplayMessage?.let { message ->
+                    DiagLog.append(
+                        "OutputRefresh",
+                        "trigger=$refreshTrigger stage=policy-preview expected policy failure: " +
+                            "$message\n${preview?.failureStackTrace.orEmpty()}"
+                    )
+                    setStatus(message)
+                }
+                val outputResolution = preview?.outputResolution
+
+                refreshStageName = "codec-and-container-controls"
+                val resolvedVideoLabel = when {
+                    unsupportedDisplayMessage != null -> unsupportedDisplayMessage
+                    preview == null -> getString(R.string.auto_unresolved)
+                    preview.canCopyVideo -> getString(R.string.copy_input_video)
+                    else -> {
+                        val encoder = EncoderCatalog.find(encoderCatalog, preview.videoEncoder)
+                        val inputFamily =
+                            EncoderCatalog.familyForInputCodec(previewInfo?.videoCodec)
+                        val suffix = if (encoder?.codecFamily == inputFamily) {
+                            getString(R.string.input_choice_suffix)
+                        } else {
+                            getString(R.string.fallback_choice_suffix)
+                        }
+                        "${encoder?.label ?: preview.videoEncoder} - $suffix"
+                    }
+                }
                 val resolvedVideoBase = resolvedVideoLabel.substringBefore(" - ")
 
-                // Derive the effective video family from the label actually shown
-                // by the video Auto selector. This covers both a successfully
-                // resolved encoder and a fallback selected because no encoder
-                // policy was available for the input family.
-                val effectiveVideoFamily = uiVideoCatalog.firstOrNull {
-                    it.label == resolvedVideoBase
-                }?.codecFamily
-                    ?: EncoderCatalog.familyForInputCodec(
-                        pendingVideoInfo?.videoCodec
-                    )
-
-                val inputVideoFamily = EncoderCatalog.familyForInputCodec(
-                    pendingVideoInfo?.videoCodec
-                )
-
-                val videoFallbackActive =
-                    effectiveVideoFamily != null &&
-                        effectiveVideoFamily != inputVideoFamily
+                val effectiveVideoFamily = preview?.videoEncoder
+                    ?.let { EncoderCatalog.find(encoderCatalog, it)?.codecFamily }
+                    ?: EncoderCatalog.familyForInputCodec(previewInfo?.videoCodec)
+                val videoFallbackActive = preview?.videoEncoder?.let { encoder ->
+                    EncoderCatalog.find(encoderCatalog, encoder)?.codecFamily !=
+                        EncoderCatalog.familyForInputCodec(previewInfo?.videoCodec)
+                } ?: false
 
                 uiVideoChoices = listOf(null) + videoCatalog.filter {
                     it.label != resolvedVideoBase
                 }
 
-                val videoValues = if (mode == ExecutionMode.FAST) {
-                    listOf("Copy input video")
-                } else {
-                    listOf(resolvedVideoLabel) + uiVideoChoices.drop(1).mapNotNull {
-                        it?.label
+                val videoValues = when {
+                    preview == null -> listOf(getString(R.string.auto_unresolved))
+                    mode == ExecutionMode.FAST -> listOf(getString(R.string.copy_input_video))
+                    else -> {
+                        listOf(resolvedVideoLabel) + uiVideoChoices.drop(1).mapNotNull {
+                            it?.label
+                        }
                     }
                 }
                 val preferredVideo = if (videoSectionCustom && selectedVideoEncoder != null) {
@@ -1610,21 +1574,35 @@ class MainActivity : Activity() {
                     preferredVideo
                 )
 
-                val resolvedAudioLabel = resolvedAudioChoiceLabel(
-                    effectiveVideoFamily,
-                    videoFallbackActive
-                )
+                val resolvedAudioLabel = when {
+                    unsupportedDisplayMessage != null -> unsupportedDisplayMessage
+                    preview == null -> getString(R.string.auto_unresolved)
+                    preview.canCopyAudio -> getString(R.string.copy_compatible_audio)
+                    else -> {
+                        val encoder = EncoderCatalog.find(encoderCatalog, preview.audioEncoder)
+                        val inputFamily =
+                            EncoderCatalog.familyForInputCodec(previewInfo?.audioCodec)
+                        val suffix = if (encoder?.codecFamily == inputFamily) {
+                            getString(R.string.input_choice_suffix)
+                        } else {
+                            getString(R.string.fallback_choice_suffix)
+                        }
+                        "${encoder?.label ?: preview.audioEncoder} - $suffix"
+                    }
+                }
                 val resolvedAudioBase = resolvedAudioLabel.substringBefore(" - ")
 
                 uiAudioChoices = listOf(null) + audioCatalog.filter {
                     it.label != resolvedAudioBase
                 }
 
-                val audioValues = if (mode == ExecutionMode.FAST) {
-                    listOf("Copy compatible audio")
-                } else {
-                    listOf(resolvedAudioLabel) + uiAudioChoices.drop(1).mapNotNull {
-                        it?.label
+                val audioValues = when {
+                    preview == null -> listOf(getString(R.string.auto_unresolved))
+                    mode == ExecutionMode.FAST -> listOf(getString(R.string.copy_compatible_audio))
+                    else -> {
+                        listOf(resolvedAudioLabel) + uiAudioChoices.drop(1).mapNotNull {
+                            it?.label
+                        }
                     }
                 }
                 val preferredAudio = if (audioSectionCustom && selectedAudioEncoder != null) {
@@ -1633,27 +1611,19 @@ class MainActivity : Activity() {
                 } else null
                 setAdapterKeepingSelection(audioCodecSpinner, audioValues, preferredAudio)
 
-                val effectiveAudioFamily = when {
-                    videoFallbackActive -> {
-                        when (effectiveVideoFamily) {
-                            "H.264", "H.265/HEVC", "AV1", "MPEG-4 Part 2" -> "AAC"
-                            "VP9" -> "Opus"
-                            else -> "AAC"
-                        }
-                    }
-
-                    else -> {
-                        EncoderCatalog.familyForInputCodec(
-                            pendingVideoInfo?.audioCodec
-                        )
-                    }
-                }
+                val effectiveAudioFamily = preview?.audioEncoder
+                    ?.let { EncoderCatalog.find(encoderCatalog, it)?.codecFamily }
+                    ?: EncoderCatalog.familyForInputCodec(previewInfo?.audioCodec)
 
                 val inputAudioCodecForContainer =
                     pendingVideoInfo?.audioCodec?.lowercase().orEmpty()
 
-                val resolvedAudioContainerLabel = when (effectiveAudioFamily) {
-                    "AAC" -> {
+                val resolvedAudioContainerLabel = when {
+                    unsupportedDisplayMessage != null ->
+                        unsupportedDisplayMessage
+                    effectiveAudioFamily == null ->
+                        getString(R.string.auto_unresolved)
+                    effectiveAudioFamily == "AAC" -> {
                         if (!videoFallbackActive &&
                             inputAudioCodecForContainer.contains("aac")
                         ) {
@@ -1663,7 +1633,7 @@ class MainActivity : Activity() {
                         }
                     }
 
-                    "MP3" -> {
+                    effectiveAudioFamily == "MP3" -> {
                         if (!videoFallbackActive &&
                             inputAudioCodecForContainer.contains("mp3")
                         ) {
@@ -1673,7 +1643,7 @@ class MainActivity : Activity() {
                         }
                     }
 
-                    "Opus" -> {
+                    effectiveAudioFamily == "Opus" -> {
                         if (!videoFallbackActive &&
                             inputAudioCodecForContainer.contains("opus")
                         ) {
@@ -1683,7 +1653,7 @@ class MainActivity : Activity() {
                         }
                     }
 
-                    "Vorbis" -> {
+                    effectiveAudioFamily == "Vorbis" -> {
                         if (!videoFallbackActive &&
                             inputAudioCodecForContainer.contains("vorbis")
                         ) {
@@ -1718,7 +1688,7 @@ class MainActivity : Activity() {
                     selectedAudioContainer?.replaceFirstChar { it.uppercase() }
                 )
 
-                val effectiveVideoEncoder = effectiveVideoEncoderName(mode)
+                val effectiveVideoEncoder = preview?.videoEncoder
 
                 val selectedVideo = effectiveVideoEncoder?.let { name ->
                     videoCatalog.firstOrNull { it.name == name }
@@ -1862,11 +1832,26 @@ class MainActivity : Activity() {
                     selectedContainer = null
                 }
 
-                val resolvedContainerLabel = resolvedContainerChoiceLabel(
-                    mode,
-                    effectiveVideoFamily,
-                    videoFallbackActive
-                )
+                val resolvedContainerLabel = when {
+                    unsupportedDisplayMessage != null -> unsupportedDisplayMessage
+                    preview == null -> getString(R.string.auto_unresolved)
+                    else -> {
+                        val inputFormats = previewInfo?.containerFormat
+                            ?.split(',')
+                            ?.map { it.trim().lowercase() }
+                            .orEmpty()
+                        val outputIsInput =
+                            preview.outputExtension?.let { it in inputFormats } == true ||
+                            (preview.outputExtension == "mp4" &&
+                                inputFormats.any { it in setOf("mov", "m4a", "3gp", "3g2") })
+                        val provenance = if (outputIsInput) {
+                            getString(R.string.input_choice_suffix)
+                        } else {
+                            getString(R.string.fallback_choice_suffix)
+                        }
+                        "${preview.outputExtension?.uppercase() ?: getString(R.string.auto_unresolved)} - $provenance"
+                    }
+                }
                 val resolvedContainerBase = resolvedContainerLabel.substringBefore(" - ")
 
                 val containerInputSummary = pendingVideoInfo?.summaryLine ?: ""
@@ -1906,22 +1891,7 @@ class MainActivity : Activity() {
                     selectedContainer?.replaceFirstChar { it.uppercase() }
                 )
 
-                val previewInfo = pendingVideoInfo
-                val outputResolution = previewInfo?.let { info ->
-                    TranscodePolicy.resolveForUi(
-                        info = info,
-                        frameAccurate = mode == ExecutionMode.SW_ACCURATE,
-                        hwAccurate = mode == ExecutionMode.HW_ACCURATE,
-                        streamSelection = when {
-                            radioAudioOnly.isChecked -> StreamSelection.AUDIO_ONLY
-                            radioVideoOnly.isChecked -> StreamSelection.VIDEO_ONLY
-                            else -> StreamSelection.BOTH
-                        },
-                        preferences = currentOutputPreferences(),
-                        catalog = encoderCatalog
-                    )
-                }
-                outputResolutionPreview = outputResolution
+                refreshStageName = "frame-rate-and-bitrate-controls"
                 inputFrameRate = outputResolution?.inputFrameRate
                 refreshFrameRateDropdown()
 
@@ -1951,6 +1921,7 @@ class MainActivity : Activity() {
                     )
                 }
 
+                refreshStageName = "input-summary-and-audio-options"
                 val inputSummary = pendingVideoInfo?.summaryLine ?: "unknown"
                 val inputAudioCodec = pendingVideoInfo?.audioCodec ?: "unknown"
                 val inputSampleRate = pendingVideoInfo?.sampleRate
@@ -2018,9 +1989,52 @@ class MainActivity : Activity() {
                     ),
                     getString(R.string.remove_selected_provided_segments)
                 )
+                refreshStageName = "complete"
             }
 
-            refreshOutputOptionsCallback = { refreshOutputOptions() }
+            fun refreshOutputOptionsSafely(trigger: String) {
+                if (suppressOutputCallbacks) return
+                if (refreshInProgress) {
+                    DiagLog.append(
+                        "OutputRefresh",
+                        "trigger=$trigger ignored during active refresh=$refreshTrigger"
+                    )
+                    return
+                }
+
+                refreshInProgress = true
+                refreshTrigger = trigger
+                try {
+                    refreshOutputOptions()
+                } catch (e: TranscodePolicy.PolicyResolutionException) {
+                    DiagLog.append(
+                        "OutputRefresh",
+                        "trigger=$trigger stage=$refreshStageName policy resolution failed:\n" +
+                            e.stackTraceToString()
+                    )
+                    setStatus(
+                        getString(
+                            R.string.output_policy_preview_failed,
+                            e.message ?: "Unknown policy error"
+                        )
+                    )
+                } catch (e: Throwable) {
+                    DiagLog.append(
+                        "OutputRefresh",
+                        "trigger=$trigger stage=$refreshStageName unexpected refresh failure:\n" +
+                            e.stackTraceToString()
+                    )
+                    throw e
+                } finally {
+                    refreshInProgress = false
+                    refreshTrigger = "idle"
+                    refreshStageName = "idle"
+                }
+            }
+
+            refreshOutputOptionsCallback = { trigger ->
+                refreshOutputOptionsSafely(trigger)
+            }
 
             videoSectionSpinner.onItemSelectedListener =
                 object : AdapterView.OnItemSelectedListener {
@@ -2028,12 +2042,14 @@ class MainActivity : Activity() {
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
                         if (suppressOutputCallbacks) return
-                        videoSectionCustom = position == 1
+                        val custom = position == 1
+                        if (videoSectionCustom == custom) return
+                        videoSectionCustom = custom
                         if (!videoSectionCustom) {
                             selectedVideoEncoder = null
                             selectedContainer = null
                         }
-                        refreshOutputOptions()
+                        refreshOutputOptionsSafely("video section selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2045,7 +2061,9 @@ class MainActivity : Activity() {
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
                         if (suppressOutputCallbacks) return
-                        audioSectionCustom = position == 1
+                        val custom = position == 1
+                        if (audioSectionCustom == custom) return
+                        audioSectionCustom = custom
 
                         if (!audioSectionCustom) {
                             selectedAudioEncoder = null
@@ -2060,7 +2078,7 @@ class MainActivity : Activity() {
                             }?.name ?: "aac"
                         }
 
-                        refreshOutputOptions()
+                        refreshOutputOptionsSafely("audio section selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2071,22 +2089,24 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks || position <= 0) return
+                        if (suppressOutputCallbacks) return
 
                         val option = uiVideoChoices
                             .getOrNull(position)
 
                         if (option == null) {
+                            if (!videoSectionCustom && selectedVideoEncoder == null) return
                             selectedVideoEncoder = null
                             videoSectionCustom = false
                         } else {
+                            if (videoSectionCustom && selectedVideoEncoder == option.name) return
                             selectedVideoEncoder = option.name
                             videoSectionCustom = true
                             DiagLog.append("UI", "video codec selected: ${option.name}")
                         }
 
                         selectedContainer = null
-                        refreshOutputOptions()
+                        refreshOutputOptionsSafely("video encoder selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2097,21 +2117,23 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks || position <= 0) return
+                        if (suppressOutputCallbacks) return
 
                         val option = uiAudioChoices
                             .getOrNull(position)
 
                         if (option == null) {
+                            if (!audioSectionCustom && selectedAudioEncoder == null) return
                             selectedAudioEncoder = null
                             audioSectionCustom = false
                         } else {
+                            if (audioSectionCustom && selectedAudioEncoder == option.name) return
                             selectedAudioEncoder = option.name
                             audioSectionCustom = true
                             DiagLog.append("UI", "audio codec selected: ${option.name}")
                         }
 
-                        refreshOutputOptions()
+                        refreshOutputOptionsSafely("audio encoder selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2124,7 +2146,7 @@ class MainActivity : Activity() {
                     ) {
                         if (suppressOutputCallbacks) return
 
-                        selectedAudioContainer = if (position == 0) {
+                        val selection = if (position == 0) {
                             null
                         } else {
                             audioContainerSpinner.selectedItem
@@ -2132,8 +2154,10 @@ class MainActivity : Activity() {
                                 ?.substringBefore(" (")
                                 ?.lowercase()
                         }
+                        if (selectedAudioContainer == selection) return
+                        selectedAudioContainer = selection
 
-                        refreshOutputOptions()
+                        refreshOutputOptionsSafely("audio container selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2145,7 +2169,7 @@ class MainActivity : Activity() {
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
                         if (suppressOutputCallbacks) return
-                        selectedContainer = if (position == 0) {
+                        val selection = if (position == 0) {
                             null
                         } else {
                             containerSpinner.selectedItem
@@ -2153,10 +2177,12 @@ class MainActivity : Activity() {
                                 ?.substringBefore(" (")
                                 ?.lowercase()
                         }
+                        if (selectedContainer == selection) return
+                        selectedContainer = selection
                         if (selectedContainer != null) {
                             videoSectionCustom = true
                         }
-                        refreshOutputOptions()
+                        refreshOutputOptionsSafely("video container selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2169,9 +2195,11 @@ class MainActivity : Activity() {
                     ) {
                         if (suppressOutputCallbacks) return
                         val selected = resolutionSpinner.selectedItem?.toString() ?: return
-                        selectedResolutionHeight = Regex("^(\\d+)p$").find(selected)
+                        val height = Regex("^(\\d+)p$").find(selected)
                             ?.groupValues?.get(1)?.toInt()
-                        refreshOutputOptions()
+                        if (selectedResolutionHeight == height) return
+                        selectedResolutionHeight = height
+                        refreshOutputOptionsSafely("resolution selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2183,8 +2211,10 @@ class MainActivity : Activity() {
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
                         if (suppressOutputCallbacks) return
-                        qualityUsesCrf = qualityModeSpinner.selectedItem in setOf("CRF", "CQ")
-                        refreshOutputOptions()
+                        val usesCrf = qualityModeSpinner.selectedItem in setOf("CRF", "CQ")
+                        if (qualityUsesCrf == usesCrf) return
+                        qualityUsesCrf = usesCrf
+                        refreshOutputOptionsSafely("quality mode selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2203,7 +2233,7 @@ class MainActivity : Activity() {
 
                         if (selectedCq != value) {
                             selectedCq = value
-                            refreshOutputOptions()
+                            refreshOutputOptionsSafely("CQ selection")
                         }
                     }
 
@@ -2236,7 +2266,7 @@ class MainActivity : Activity() {
                                 setVideoBitrateInput(selected.lowercase())
                             }
                         }
-                        refreshOutputOptionsCallback?.invoke()
+                        refreshOutputOptionsCallback?.invoke("video bitrate preset selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2266,16 +2296,19 @@ class MainActivity : Activity() {
                             displayValue = display
                         )
                         if (row?.isInput == true) {
+                            if (frameRateIsAuto && selectedFrameRate == null) return
                             frameRateIsAuto = true
                             selectedFrameRate = null
                         } else {
-                            frameRateIsAuto = false
-                            selectedFrameRate = frameRateTable.realValueForDisplay(
+                            val selected = frameRateTable.realValueForDisplay(
                                 rows = frameRateRows,
                                 displayValue = display
                             )
+                            if (!frameRateIsAuto && selectedFrameRate == selected) return
+                            frameRateIsAuto = false
+                            selectedFrameRate = selected
                         }
-                        refreshOutputOptionsCallback?.invoke()
+                        refreshOutputOptionsCallback?.invoke("frame-rate selection")
                     }
 
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -2296,14 +2329,14 @@ class MainActivity : Activity() {
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
 
-            refreshOutputOptions()
+            refreshOutputOptionsSafely("initial UI setup")
 
             radioGroup.setOnCheckedChangeListener { _, _ ->
                 getSharedPreferences(prefsName, MODE_PRIVATE).edit {
                     putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
                     putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
                 }
-                refreshOutputOptions()
+                refreshOutputOptionsSafely("processing mode selection")
             }
 
             // ── Merge files placeholder ────────────────────────────────────
@@ -2333,7 +2366,7 @@ class MainActivity : Activity() {
                     putBoolean(keyFrameAccurate, radioSwAccurate.isChecked)
                     putBoolean(keyHwAccurate, radioHwAccurate.isChecked)
                 }
-                refreshOutputOptions()
+                refreshOutputOptionsSafely("processing mode selection")
             }
 
             // Signature
@@ -2633,46 +2666,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun effectiveVideoEncoderName(mode: ExecutionMode): String? {
-        val info = pendingVideoInfo ?: return null
-
-        val preferences = OutputPreferences(
-            videoSectionMode = if (videoSectionCustom) {
-                SectionMode.CUSTOM
-            } else {
-                SectionMode.AUTO
-            },
-            videoCodec = selectedVideoEncoder,
-            qualityMode = if (qualityUsesCrf) {
-                QualityMode.CRF
-            } else {
-                QualityMode.BITRATE
-            }
-        )
-
-        return TranscodePolicy.resolveVideoEncoderForUi(
-            info = info,
-            mode = mode,
-            preferences = preferences,
-            catalog = encoderCatalog,
-            inputFamily = EncoderCatalog.familyForInputCodec(info.videoCodec)
-        )
-    }
-
     private fun currentOutputPreferences(): OutputPreferences {
-        val mode = when {
-            radioHwAccurate.isChecked -> ExecutionMode.HW_ACCURATE
-            radioSwAccurate.isChecked -> ExecutionMode.SW_ACCURATE
-            else -> ExecutionMode.FAST
-        }
-
-        val effectiveEncoder = effectiveVideoEncoderName(mode)
-
-        val supportsCrf = effectiveEncoder in setOf(
-            "libx264",
-            "libx265"
-        )
-
         return OutputPreferences(
             videoSectionMode = if (videoSectionCustom) SectionMode.CUSTOM else SectionMode.AUTO,
             audioSectionMode = if (audioSectionCustom) SectionMode.CUSTOM else SectionMode.AUTO,
@@ -2680,12 +2674,12 @@ class MainActivity : Activity() {
             audioCodec = selectedAudioEncoder,
             container = selectedContainer,
             audioContainer = if (radioAudioOnly.isChecked) selectedAudioContainer else null,
-            qualityMode = if (supportsCrf && qualityUsesCrf) {
+            qualityMode = if (qualityUsesCrf) {
                 QualityMode.CRF
             } else {
                 QualityMode.BITRATE
             },
-            crf = if (effectiveEncoder in setOf("libx264", "libx265")) {
+            crf = if (qualityUsesCrf) {
                 selectedCrf
             } else {
                 null
@@ -2709,21 +2703,39 @@ class MainActivity : Activity() {
     }
 
     private fun inspectSelectedUri(uri: Uri) {
+        val generation = ++inspectionGeneration
+        pendingUri = uri
         getSharedPreferences(prefsName, MODE_PRIVATE).edit {
             putString("sponsorcut_last_input_uri", uri.toString())
         }
+        pendingVideoInfo = null
+        outputResolutionPreview = null
+        updateStreamSelectionAvailability()
+        refreshOutputOptionsCallback?.invoke("input inspection started")
 
         Thread {
+            var inspectionFailure: Exception? = null
             val info = try {
                 val cached = FileResolver.uriToFile(this, uri)
                 FFProbeInspector.inspect(cached)
             } catch (e: Exception) {
                 DiagLog.append("TaskUI", "input inspection failed: ${e.message}")
-                setStatus("Media inspection failed:\n${e.message}")
+                inspectionFailure = e
                 null
             }
 
             runOnUiThread {
+                if (generation != inspectionGeneration || pendingUri != uri) {
+                    DiagLog.append(
+                        "TaskUI",
+                        "Ignoring stale inspection result generation=$generation current=$inspectionGeneration uri=$uri"
+                    )
+                    return@runOnUiThread
+                }
+
+                inspectionFailure?.let {
+                    setStatus("Media inspection failed:\n${it.message}")
+                }
                 pendingVideoInfo = info
 
                 if (info != null) {
@@ -2745,24 +2757,7 @@ class MainActivity : Activity() {
                 selectedVideoBitratePreset = "Input"
                 setVideoBitrateInput("")
 
-                // Temporary post-inspection fault isolation:
-                // identify which UI rebuild stage crashes without losing the
-                // stack trace to an activity-level exception.
-                try {
-                    // Rebuild every output spinner using the real input and encoder
-                    // catalog. This must occur after the audio-bitrate fallback so
-                    // the dropdown immediately reflects "128k - fallback".
-                    refreshOutputOptionsCallback?.invoke()
-                } catch (e: Throwable) {
-                    DiagLog.append(
-                        "TaskUI",
-                        "POST-INSPECT FAILURE in refreshOutputOptions:\n" +
-                                e.stackTraceToString()
-                    )
-                    setStatus(
-                        getString(R.string.media_loaded_output_options_failed, e.message)
-                    )
-                }
+                refreshOutputOptionsCallback?.invoke("post-inspection output refresh")
 
                 try {
                     // Local TXT/JSON segments require the actual media duration for
@@ -3695,6 +3690,8 @@ class MainActivity : Activity() {
     }
 
     private fun startProcessing(uri: Uri, videoId: String) {
+        if (rejectIfBusy(source = "startProcessing")) return
+
         if (!canReadUri(uri)) {
             pendingUri = null
             fileCardState = CardState.PENDING
@@ -3871,7 +3868,26 @@ class MainActivity : Activity() {
             )
         }
 
-        startForegroundService(serviceIntent)
+        // Claim the single processing slot synchronously on the UI thread
+        // before the service is started, so no later refresh or tap can start
+        // a second job while this one is pending.
+        val jobId = ProcessingService.claimJob()
+        if (jobId == null) {
+            rejectIfBusy(source = "startProcessing claim")
+            return
+        }
+        serviceIntent.putExtra(ProcessingService.EXTRA_JOB_ID, jobId)
+        try {
+            startForegroundService(serviceIntent)
+            Log.i("ProcessingJob", "Start requested: job=$jobId uri=$uri")
+            DiagLog.append("Job", "Start requested: job=$jobId")
+        } catch (e: Exception) {
+            Log.e("ProcessingJob", "Start failed: job=$jobId", e)
+            ProcessingService.releaseJob(jobId, "service start failed")
+            clearActiveProcessingSnapshot()
+            setProcessingUi(active = false)
+            setStatus("Failed: could not start processing (${e.message ?: e.javaClass.simpleName})")
+        }
     }
 
     /** Grey out / restore all interactive controls during processing. */
@@ -4481,8 +4497,9 @@ class MainActivity : Activity() {
             else -> {
                 renderSegmentList(segments)
                 renderDetectedCategories()
-                retryButton.isEnabled = true
-                retryButton.alpha = 1f
+                val processingActive = ProcessingService.isProcessingActive
+                retryButton.isEnabled = !processingActive
+                retryButton.alpha = if (processingActive) 0.35f else 1f
                 retryButton.text = getString(R.string.process_with_id_button)
                 val totalCut = segments.sumOf { it.end - it.start }
                 val note = getString(
@@ -5232,9 +5249,16 @@ class MainActivity : Activity() {
 
             val canProcess = mediaReady &&
                     !(segmentationEnabled && hasInvalidSegments)
+            // Segment edits/focus refresh this card; they must never re-enable
+            // processing while a job owns the single processing slot.
+            val processingActive = ProcessingService.isProcessingActive
 
-            retryButton.isEnabled = canProcess
-            retryButton.alpha = if (canProcess) 1f else 0.5f
+            retryButton.isEnabled = canProcess && !processingActive
+            retryButton.alpha = when {
+                processingActive -> 0.35f
+                canProcess -> 1f
+                else -> 0.5f
+            }
             retryButton.text = when {
                 !segmentationEnabled -> "▶ Process without segmentation"
                 localSourceReady -> "▶ Process local segments"
@@ -5422,8 +5446,11 @@ class MainActivity : Activity() {
         runOnUiThread { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
     }
 
-    private fun rejectIfBusy(): Boolean {
+    private fun rejectIfBusy(source: String = "incoming intent"): Boolean {
         if (!ProcessingService.isProcessingActive) return false
+        val activeJobId = ProcessingService.currentJobId
+        Log.w("ProcessingJob", "Start rejected from $source; active job=$activeJobId")
+        DiagLog.append("Job", "Start rejected from $source; active job=$activeJobId")
         // Keep existing job state untouched; reject new incoming share/direct intents.
         val msg = "please wait for current job to conclude and try again..."
         runOnUiThread {
