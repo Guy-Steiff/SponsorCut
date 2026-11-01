@@ -186,9 +186,19 @@ class MainActivity : Activity() {
     private var cachedTitle: String? = null
     private var cachedAuthor: String? = null
     private var cachedFileName: String? = null
+    private var cachedPlatform: String? = null
+    private var cachedMediaSource: MediaSource? = null
+    private val megaCutClient = MegaCutClient()
     private val prefsName = "sponsorcut_prefs"
     private val keyLastVideoId = "last_video_id"
     private val keyLastVideoIdTs = "last_video_id_ts"
+
+    // Shared seven-day memory for the most recently successfully identified source.
+    private val keyLastSourcePlatform = "last_source_platform"
+    private val keyLastSourceExternalId = "last_source_external_id"
+    private val keyLastSourceIdentifierKind = "last_source_identifier_kind"
+    private val keyLastSourceCanonicalUrl = "last_source_canonical_url"
+    private val keyLastSourceTs = "last_source_ts"
     private val keyOutputFolderUri = "output_folder_uri"
     private val keyFrameAccurate = "frame_accurate"
     private val keyHwAccurate = "hw_accurate"
@@ -639,36 +649,32 @@ class MainActivity : Activity() {
                     if (suppressIdTextWatcher) return
 
                     val raw = s?.toString().orEmpty()
-                    val id =
-                        if (raw.length == 11 && raw.all { it.isLetterOrDigit() || it == '_' || it == '-' })
-                            raw else extractId(raw)
+                    val source = megaCutClient.parseMediaSource(raw)
 
                     segmentFetchHandler.removeCallbacksAndMessages(null)
 
-                    if (id.isBlank()) {
+                    if (source == null) {
                         pendingSegmentFetchId = null
                         return
                     }
 
                     clearLocalSegmentSource()
                     updateCards()
-                    statusView.text = getString(R.string.youtube_id_entered_source_discarded)
+                    statusView.text = getString(R.string.media_source_entered_source_discarded)
 
-                    pendingSegmentFetchId = id
+                    val fetchKey = sourceIdentifierKey(source)
+                    pendingSegmentFetchId = fetchKey
+
                     segmentFetchHandler.postDelayed({
-                        val currentId = idInput.text?.toString().orEmpty()
-                        val currentExtracted = if (
-                            currentId.length == 11 &&
-                            currentId.all { it.isLetterOrDigit() || it == '_' || it == '-' }
-                        ) {
-                            currentId
-                        } else {
-                            extractId(currentId)
-                        }
+                        val currentSource = megaCutClient.parseMediaSource(
+                            idInput.text?.toString().orEmpty()
+                        )
 
-                        if (currentExtracted == pendingSegmentFetchId) {
-                            fetchSegmentsForId(
-                                videoId = currentExtracted,
+                        if (currentSource != null &&
+                            sourceIdentifierKey(currentSource) == pendingSegmentFetchId
+                        ) {
+                            fetchSegmentsForMediaSource(
+                                source = currentSource,
                                 force = true,
                                 replaceLocalSourceOnSuccess = true
                             )
@@ -753,7 +759,6 @@ class MainActivity : Activity() {
                     setStatus(getString(R.string.invalid_youtube_url_or_id))
                     return@setOnClickListener
                 }
-                saveId(videoId)
                 startProcessing(uri, videoId)
             }
         }
@@ -1349,29 +1354,77 @@ class MainActivity : Activity() {
                     ?: "No compatible video encoder"
             }
 
-            fun resolvedAudioChoiceLabel(): String {
+            fun resolvedAudioChoiceLabel(
+                effectiveVideoFamily: String?,
+                videoFallbackActive: Boolean
+            ): String {
                 val inputFamily = EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
-                val matching = uiAudioCatalog.firstOrNull { it.codecFamily == inputFamily }
+                val inputMatching = uiAudioCatalog.firstOrNull { it.codecFamily == inputFamily }
 
-                return if (matching != null) {
-                    "${matching.label} - input"
-                } else {
-                    "AAC - fallback"
+                // Mirror TranscodePolicy: once the effective video family changes,
+                // audio Auto must be re-evaluated for the new output target.
+                val effectiveAudioFamily = when (effectiveVideoFamily) {
+                    "H.264", "H.265/HEVC", "AV1", "MPEG-4 Part 2" -> "AAC"
+                    "VP9" -> "Opus"
+                    else -> "AAC"
+                }
+
+                val effectiveMatching = uiAudioCatalog.firstOrNull {
+                    it.codecFamily == effectiveAudioFamily
+                }
+
+                return when {
+                    !videoFallbackActive && inputMatching != null ->
+                        "${inputMatching.label} - input"
+
+                    effectiveMatching != null ->
+                        "${effectiveMatching.label} - fallback"
+
+                    else -> "AAC - fallback"
                 }
             }
 
-            fun resolvedContainerChoiceLabel(): String {
+            fun resolvedContainerChoiceLabel(
+                mode: ExecutionMode,
+                effectiveVideoFamily: String?,
+                videoFallbackActive: Boolean
+            ): String {
                 val summary = pendingVideoInfo?.summaryLine ?: ""
 
+                // A video-codec fallback changes the compatibility target, so the
+                // Auto container must follow the effective video family rather than
+                // merely preserving the input container.
                 return when {
-                    // MPEG-TS output is unsupported for transcoding.
-                    // TS input is automatically planned as MP4 output.
-                    summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
-                    summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
-                    summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
-                    summary.contains("WebM", ignoreCase = true) -> "WebM - input"
-                    summary.contains("AVI", ignoreCase = true) -> "AVI - input"
-                    else -> "MP4 - fallback"
+                    mode == ExecutionMode.FAST -> {
+                        when {
+                            summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
+                            summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
+                            summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
+                            summary.contains("WebM", ignoreCase = true) -> "WebM - input"
+                            summary.contains("AVI", ignoreCase = true) -> "AVI - input"
+                            else -> "MP4 - fallback"
+                        }
+                    }
+
+                    videoFallbackActive -> "MP4 - fallback"
+
+                    effectiveVideoFamily == "VP9" -> {
+                        when {
+                            summary.contains("WebM", ignoreCase = true) -> "WebM - input"
+                            summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
+                            else -> "WebM - fallback"
+                        }
+                    }
+
+                    else -> {
+                        when {
+                            summary.contains("MPEGTS", ignoreCase = true) -> "MP4 - input"
+                            summary.contains("MOV,MP4", ignoreCase = true) -> "MP4 - input"
+                            summary.contains("Matroska", ignoreCase = true) -> "MKV - input"
+                            summary.contains("AVI", ignoreCase = true) -> "AVI - input"
+                            else -> "MP4 - fallback"
+                        }
+                    }
                 }
             }
 
@@ -1424,6 +1477,25 @@ class MainActivity : Activity() {
                 val resolvedVideoLabel = resolvedVideoChoiceLabel(mode)
                 val resolvedVideoBase = resolvedVideoLabel.substringBefore(" - ")
 
+                // Derive the effective video family from the label actually shown
+                // by the video Auto selector. This covers both a successfully
+                // resolved encoder and a fallback selected because no encoder
+                // policy was available for the input family.
+                val effectiveVideoFamily = uiVideoCatalog.firstOrNull {
+                    it.label == resolvedVideoBase
+                }?.codecFamily
+                    ?: EncoderCatalog.familyForInputCodec(
+                        pendingVideoInfo?.videoCodec
+                    )
+
+                val inputVideoFamily = EncoderCatalog.familyForInputCodec(
+                    pendingVideoInfo?.videoCodec
+                )
+
+                val videoFallbackActive =
+                    effectiveVideoFamily != null &&
+                        effectiveVideoFamily != inputVideoFamily
+
                 uiVideoChoices = listOf(null) + videoCatalog.filter {
                     it.label != resolvedVideoBase
                 }
@@ -1447,7 +1519,10 @@ class MainActivity : Activity() {
                     preferredVideo
                 )
 
-                val resolvedAudioLabel = resolvedAudioChoiceLabel()
+                val resolvedAudioLabel = resolvedAudioChoiceLabel(
+                    effectiveVideoFamily,
+                    videoFallbackActive
+                )
                 val resolvedAudioBase = resolvedAudioLabel.substringBefore(" - ")
 
                 uiAudioChoices = listOf(null) + audioCatalog.filter {
@@ -1467,26 +1542,66 @@ class MainActivity : Activity() {
                 } else null
                 setAdapterKeepingSelection(audioCodecSpinner, audioValues, preferredAudio)
 
-                val effectiveAudioName = selectedAudioEncoder
-                    ?: uiAudioCatalog.firstOrNull {
-                        it.codecFamily == EncoderCatalog.familyForInputCodec(
+                val effectiveAudioFamily = when {
+                    videoFallbackActive -> {
+                        when (effectiveVideoFamily) {
+                            "H.264", "H.265/HEVC", "AV1", "MPEG-4 Part 2" -> "AAC"
+                            "VP9" -> "Opus"
+                            else -> "AAC"
+                        }
+                    }
+
+                    else -> {
+                        EncoderCatalog.familyForInputCodec(
                             pendingVideoInfo?.audioCodec
                         )
-                    }?.name
-
-                val effectiveAudioFamily = effectiveAudioName?.let {
-                    EncoderCatalog.find(encoderCatalog, it)?.codecFamily
-                } ?: EncoderCatalog.familyForInputCodec(pendingVideoInfo?.audioCodec)
-
+                    }
+                }
 
                 val inputAudioCodecForContainer =
                     pendingVideoInfo?.audioCodec?.lowercase().orEmpty()
 
-                val resolvedAudioContainerLabel = when {
-                    inputAudioCodecForContainer.contains("aac") -> "M4A - input"
-                    inputAudioCodecForContainer.contains("mp3") -> "MP3 - input"
-                    inputAudioCodecForContainer.contains("opus") -> "OPUS - input"
-                    inputAudioCodecForContainer.contains("vorbis") -> "OGG - input"
+                val resolvedAudioContainerLabel = when (effectiveAudioFamily) {
+                    "AAC" -> {
+                        if (!videoFallbackActive &&
+                            inputAudioCodecForContainer.contains("aac")
+                        ) {
+                            "M4A - input"
+                        } else {
+                            "M4A - fallback"
+                        }
+                    }
+
+                    "MP3" -> {
+                        if (!videoFallbackActive &&
+                            inputAudioCodecForContainer.contains("mp3")
+                        ) {
+                            "MP3 - input"
+                        } else {
+                            "MP3 - fallback"
+                        }
+                    }
+
+                    "Opus" -> {
+                        if (!videoFallbackActive &&
+                            inputAudioCodecForContainer.contains("opus")
+                        ) {
+                            "OPUS - input"
+                        } else {
+                            "OPUS - fallback"
+                        }
+                    }
+
+                    "Vorbis" -> {
+                        if (!videoFallbackActive &&
+                            inputAudioCodecForContainer.contains("vorbis")
+                        ) {
+                            "OGG - input"
+                        } else {
+                            "OGG - fallback"
+                        }
+                    }
+
                     else -> "M4A - fallback"
                 }
 
@@ -1669,7 +1784,11 @@ class MainActivity : Activity() {
                     selectedContainer = null
                 }
 
-                val resolvedContainerLabel = resolvedContainerChoiceLabel()
+                val resolvedContainerLabel = resolvedContainerChoiceLabel(
+                    mode,
+                    effectiveVideoFamily,
+                    videoFallbackActive
+                )
                 val resolvedContainerBase = resolvedContainerLabel.substringBefore(" - ")
 
                 val containerInputSummary = pendingVideoInfo?.summaryLine ?: ""
@@ -1687,11 +1806,6 @@ class MainActivity : Activity() {
                 // unsupported for transcoding; TS inputs are automatically planned
                 // as MP4 output. TS preservation will be re-examined after the
                 // FFmpegKitNext upgrade.
-                val effectiveEncoderName = effectiveVideoEncoderName(mode)
-                val effectiveVideoFamily = effectiveEncoderName?.let { encoderName ->
-                    EncoderCatalog.find(encoderCatalog, encoderName)?.codecFamily
-                }
-
                 val containerValues = when {
                     mode == ExecutionMode.FAST -> listOf(resolvedContainerLabel)
                     effectiveVideoFamily == "H.264" ->
@@ -2461,6 +2575,14 @@ class MainActivity : Activity() {
             runOnUiThread {
                 pendingVideoInfo = info
 
+                if (info != null) {
+                    // Clear the previous file's frame-rate choice so the newly
+                    // accepted probe result can infer the new input rate. Do not
+                    // reset this during ordinary output-option refreshes, where
+                    // the user may have explicitly chosen a non-input rate.
+                    selectedFrameRate = null
+                }
+
                 // Discover encoders now that we know an input is present.
                 encoderCatalog = EncoderCatalog.discover()
 
@@ -2728,6 +2850,11 @@ class MainActivity : Activity() {
                 "Segmentation file TXT/JSON: $name (${localSegmentFileUri})"
             }
 
+            cachedMediaSource != null -> {
+                val source = cachedMediaSource!!
+                "${source.platform.replaceFirstChar { it.uppercase() }}: ${source.externalId}"
+            }
+
             videoId.isNotBlank() -> "YouTube: https://youtu.be/$videoId"
             else -> "ID: Manual"
         }
@@ -2794,18 +2921,72 @@ class MainActivity : Activity() {
                     return
                 }
 
-                // Cold open — restore last remembered ID into the input field if recent enough
+                // Cold open — restore the most recently successfully identified source.
                 val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
-                val savedId = prefs.getString(keyLastVideoId, "").orEmpty()
-                val savedTs = prefs.getLong(keyLastVideoIdTs, 0L)
-                val isRecent = System.currentTimeMillis() - savedTs <= recentIdMaxAgeMs
-                if (savedId.isNotBlank() && isRecent) {
-                    setIdInputProgrammatically(savedId)
+
+                val savedPlatform = prefs.getString(keyLastSourcePlatform, null)
+                val savedExternalId = prefs.getString(keyLastSourceExternalId, null)
+                val savedIdentifierKind =
+                    prefs.getString(keyLastSourceIdentifierKind, null)
+                val savedCanonicalUrl =
+                    prefs.getString(keyLastSourceCanonicalUrl, null)
+                val savedTs = prefs.getLong(keyLastSourceTs, 0L)
+
+                // Backward compatibility with installations containing only YouTube memory.
+                val legacyId = prefs.getString(keyLastVideoId, "").orEmpty()
+                val legacyTs = prefs.getLong(keyLastVideoIdTs, 0L)
+
+                val source = if (
+                    !savedPlatform.isNullOrBlank() &&
+                    !savedExternalId.isNullOrBlank() &&
+                    !savedIdentifierKind.isNullOrBlank()
+                ) {
+                    MediaSource(
+                        platform = savedPlatform,
+                        externalId = savedExternalId,
+                        canonicalUrl = savedCanonicalUrl,
+                        identifierKind = savedIdentifierKind
+                    )
+                } else if (legacyId.isNotBlank()) {
+                    MediaSource(
+                        platform = "youtube",
+                        externalId = legacyId,
+                        canonicalUrl = "https://www.youtube.com/watch?v=$legacyId",
+                        identifierKind = "youtube"
+                    )
+                } else {
+                    null
+                }
+
+                val rememberedTs =
+                    if (source?.platform == "youtube" && savedPlatform.isNullOrBlank()) {
+                        legacyTs
+                    } else {
+                        savedTs
+                    }
+
+                val ageMs = System.currentTimeMillis() - rememberedTs
+                val isRecent = rememberedTs > 0L &&
+                        ageMs in 0..recentIdMaxAgeMs
+
+                if (source != null && isRecent) {
+                    val displayValue = source.canonicalUrl ?: source.externalId
+
+                    setIdInputProgrammatically(displayValue)
                     idCardState = CardState.CHECKING
                     updateCards()
                     restoreLastFileUri()
-                    setStatus("Welcome back — last ID: $savedId\n\nShare or browse a video file to process it.")
-                    fetchSegmentsForId(savedId)
+
+                    setStatus(
+                        "Welcome back — last source: ${source.platform}\n\n" +
+                                "Share or browse a video file to process it."
+                    )
+
+                    if (source.platform == "youtube") {
+                        fetchSegmentsForId(source.externalId)
+                    } else {
+                        fetchSegmentsForMediaSource(source, force = true)
+                    }
                 } else {
                     restoreLastFileUri()
                     setStatus("Paste a YouTube URL or ID above, then browse for your video file.")
@@ -2889,27 +3070,53 @@ class MainActivity : Activity() {
         }
 
         if (uri == null) {
-            val videoId = extractIdFromIntent(intent, Uri.EMPTY)
-            if (videoId.isNotBlank()) {
-                saveId(videoId)  // save now so file-share later will find it
-                runOnUiThread { setIdInputProgrammatically(videoId) }
+            val candidates = listOfNotNull(
+                intent.getStringExtra(Intent.EXTRA_TEXT),
+                intent.getStringExtra(Intent.EXTRA_SUBJECT),
+                intent.getStringExtra(Intent.EXTRA_TITLE),
+                intent.dataString,
+                intent.clipData?.getItemAt(0)?.text?.toString(),
+                intent.clipData?.getItemAt(0)?.uri?.toString()
+            )
+
+            var parsedSource: MediaSource? = null
+            var sourceText = ""
+
+            for (candidate in candidates) {
+                val parsed = megaCutClient.parseMediaSource(candidate)
+                if (parsed != null) {
+                    parsedSource = parsed
+                    sourceText = candidate
+                    break
+                }
+            }
+
+            if (parsedSource != null) {
+                runOnUiThread { setIdInputProgrammatically(sourceText) }
                 idCardState = CardState.CHECKING
                 updateCards()
-                // A shared YouTube URL is an explicit SponsorBlock selection.
-                // Do not reparse the current TXT/JSON share URI; replace it only
-                // if SponsorBlock successfully returns usable segments.
+
                 clearLocalSegmentSource()
                 suppressLocalSegmentReloadOnce = true
                 restoreLastFileUri()
-                setStatus("✓ YouTube ID captured: $videoId\n\nNow browse to your downloaded video file.")
-                fetchSegmentsForId(
-                    videoId = videoId,
+
+                val platformLabel = parsedSource.platform
+                    .replaceFirstChar { it.uppercase() }
+
+                setStatus(
+                    "✓ $platformLabel source captured: ${parsedSource.externalId}\n\n" +
+                            "Now browse to your downloaded media file."
+                )
+
+                fetchSegmentsForMediaSource(
+                    source = parsedSource,
                     force = true,
                     replaceLocalSourceOnSuccess = true
                 )
                 return
             }
-            setStatus("No video file detected. Share a downloaded video file.")
+
+            setStatus("No video file or supported media URL detected. Share a downloaded video file.")
             return
         }
 
@@ -2952,8 +3159,7 @@ class MainActivity : Activity() {
 
         Log.i(tag, "Detected id='$videoId' source=$idSource uri=$uri")
 
-        // Persist any ID we found so it survives Activity recreation (e.g. switching to file manager)
-        if (videoId.isNotBlank()) saveId(videoId)
+        // Source persistence happens only after successful identification.
 
         setIdInputProgrammatically(videoId)
         if (videoId.isBlank()) {
@@ -3060,11 +3266,18 @@ class MainActivity : Activity() {
         cachedSegments = null
         cachedTitle = null
         cachedAuthor = null
+        cachedPlatform = null
+        cachedMediaSource = null
         idCardState = CardState.PENDING
 
         getSharedPreferences(prefsName, MODE_PRIVATE).edit {
             remove(keyLastVideoId)
             remove(keyLastVideoIdTs)
+            remove(keyLastSourcePlatform)
+            remove(keyLastSourceExternalId)
+            remove(keyLastSourceIdentifierKind)
+            remove(keyLastSourceCanonicalUrl)
+            remove(keyLastSourceTs)
         }
     }
 
@@ -3402,6 +3615,17 @@ class MainActivity : Activity() {
         logView.text = ""
         logView.visibility = View.GONE
         val videoHeader = when {
+            cachedPlatform == "youtube" && cachedTitle != null && cachedAuthor != null ->
+                getString(
+                    R.string.video_title_author_platform,
+                    cachedTitle,
+                    cachedAuthor,
+                    "YouTube"
+                )
+
+            cachedPlatform == "youtube" && cachedTitle != null ->
+                getString(R.string.video_title_platform, cachedTitle, "YouTube")
+
             cachedTitle == null -> ""
             cachedAuthor == null -> getString(R.string.video_title_only, cachedTitle)
             else -> getString(R.string.video_title_author, cachedTitle, cachedAuthor)
@@ -3410,10 +3634,14 @@ class MainActivity : Activity() {
             if (removeSegments) {
                 append(
                     getString(
-                        if (localSegments != null) {
-                            R.string.local_segment_removal
-                        } else {
-                            R.string.sponsorblock_removal
+                        when {
+                            localSegments != null &&
+                                    (cachedPlatform == "rumble" || cachedPlatform == "spotify") ->
+                                R.string.megacut_removal
+
+                            localSegments != null -> R.string.local_segment_removal
+
+                            else -> R.string.sponsorblock_removal
                         }
                     )
                 )
@@ -3589,10 +3817,25 @@ class MainActivity : Activity() {
             .sorted()
     }
 
-    private fun saveId(videoId: String) {
+    /**
+     * Remembers the latest successfully identified source for seven-day cold-open restoration.
+     * Segment availability is deliberately not part of this decision.
+     */
+    private fun saveMediaSource(source: MediaSource) {
+        val now = System.currentTimeMillis()
+
         getSharedPreferences(prefsName, MODE_PRIVATE).edit {
-            putString(keyLastVideoId, videoId)
-            putLong(keyLastVideoIdTs, System.currentTimeMillis())
+            putString(keyLastSourcePlatform, source.platform)
+            putString(keyLastSourceExternalId, source.externalId)
+            putString(keyLastSourceIdentifierKind, source.identifierKind)
+            putString(keyLastSourceCanonicalUrl, source.canonicalUrl)
+            putLong(keyLastSourceTs, now)
+
+            // Maintain legacy YouTube preferences for backward compatibility.
+            if (source.platform == "youtube") {
+                putString(keyLastVideoId, source.externalId)
+                putLong(keyLastVideoIdTs, now)
+            }
         }
     }
 
@@ -3736,6 +3979,20 @@ class MainActivity : Activity() {
                 Log.w(tag, "Segment pre-fetch failed: ${e.message}")
                 null
             }
+
+            // A successful title lookup or SponsorBlock response identifies the source.
+            // An empty segment list is still a successful lookup.
+            if (title != null || segments != null) {
+                saveMediaSource(
+                    MediaSource(
+                        platform = "youtube",
+                        externalId = videoId,
+                        canonicalUrl = "https://www.youtube.com/watch?v=$videoId",
+                        identifierKind = "youtube"
+                    )
+                )
+            }
+
             // Only a direct user ID edit that produces a successful, non-empty
             // SponsorBlock response replaces a local TXT/JSON source. Automatic
             // fetches triggered by media or URL shares always preserve it.
@@ -3765,12 +4022,309 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private data class MediaLookupResult(
+        val source: MediaSource,
+        val title: String?,
+        val author: String?,
+        val platform: String,
+        val segments: List<SponsorSegmentInfo>
+    )
+
+    private fun sourceIdentifierKey(source: MediaSource): String {
+        return "${source.platform}:${source.identifierKind}:${source.externalId}"
+    }
+
+    private fun fetchSegmentsForMediaSource(
+        source: MediaSource,
+        force: Boolean = false,
+        replaceLocalSourceOnSuccess: Boolean = false
+    ) {
+        if (ProcessingService.isProcessingActive) return
+
+        val fetchKey = sourceIdentifierKey(source)
+        if (!force && fetchKey == lastFetchedId) return
+
+        lastFetchedId = fetchKey
+        clearCompletedRunState()
+
+        cachedSegments = null
+        cachedTitle = null
+        cachedAuthor = null
+        cachedPlatform = null
+        cachedMediaSource = source
+
+        runOnUiThread {
+            modeHintView.visibility = View.GONE
+            highlightRadio(radioFast, false)
+            highlightRadio(radioSwAccurate, false)
+            idCardState = CardState.CHECKING
+            updateCards()
+
+            retryButton.isEnabled = false
+            retryButton.alpha = 0.5f
+            retryButton.text = getString(R.string.checking_segments)
+        }
+
+        Thread {
+            val result = resolveMediaSourceSegments(source)
+
+            // Non-null means platform identification succeeded.
+            // Save even when SponsorBlock/MegaCut returned no segments.
+            if (result != null) {
+                saveMediaSource(result.source)
+            }
+
+            runOnUiThread {
+                if (replaceLocalSourceOnSuccess) {
+                    clearLocalSegmentSource()
+                }
+
+                if (result == null) {
+                    cachedSegments = null
+                    cachedTitle = null
+                    cachedAuthor = null
+                    cachedPlatform = null
+                    localSegments = null
+                    idCardState = CardState.ERROR
+
+                    applySegmentUiState(
+                        videoId = source.externalId,
+                        segments = null,
+                        title = null,
+                        author = null,
+                        platform = source.platform
+                    )
+
+                    if (source.platform != "youtube") {
+                        statusView.text = getString(
+                            R.string.no_media_source_found,
+                            source.externalId
+                        )
+                    }
+
+                    updateCards()
+                    applyModeRecommendation()
+                    return@runOnUiThread
+                }
+
+                val segments = result.segments
+
+                cachedSegments = segments
+                cachedTitle = result.title
+                cachedAuthor = result.author
+                cachedPlatform = result.platform
+                idCardState = if (segments.isEmpty()) CardState.ERROR else CardState.OK
+
+                if (segments.isEmpty()) {
+                    // The platform oEmbed lookup succeeded, so the source is
+                    // known to exist. MegaCut simply has no usable segment set.
+                    localSegments = null
+                    updateCategoryAvailability(emptyList())
+
+                    val titleLine = when {
+                        result.title == null -> ""
+                        result.author == null ->
+                            getString(
+                                R.string.video_title_platform,
+                                result.title,
+                                result.platform
+                            )
+
+                        else ->
+                            getString(
+                                R.string.video_title_author_platform,
+                                result.title,
+                                result.author,
+                                result.platform
+                            )
+                    }
+
+                    statusView.text = getString(
+                        R.string.status_with_title,
+                        titleLine,
+                        getString(R.string.verified_source_no_segments)
+                    )
+
+                    retryButton.isEnabled = false
+                    retryButton.alpha = 0.4f
+                    retryButton.text = getString(R.string.no_segments_cannot_process)
+                    updateCards()
+                    applyModeRecommendation()
+                    return@runOnUiThread
+                }
+
+                // MegaCut segments use the existing local-segment processing
+                // route. This sends the user's selected visible segments to
+                // ProcessingService and avoids a second MegaCut query there.
+                localSegments = segments
+
+                updateCategoryAvailability(segments)
+                applySegmentUiState(
+                    videoId = source.externalId,
+                    segments = segments,
+                    title = result.title,
+                    author = result.author,
+                    platform = result.platform
+                )
+                updateCards()
+                applyModeRecommendation()
+            }
+        }.start()
+    }
+
+    private fun resolveMediaSourceSegments(source: MediaSource): MediaLookupResult? {
+        return when (source.platform) {
+            "youtube" -> fetchYouTubeCandidate(source)
+            "unknown" -> fetchGenericFallbackSource(source)
+            else -> fetchMegaCutSource(source)
+        }
+    }
+
+    private fun fetchGenericFallbackSource(source: MediaSource): MediaLookupResult? {
+        // Final fallback for input that matched no platform-specific pattern.
+        //
+        // First try the entire input as a Rumble embed ID:
+        // https://rumble.com/embed/<input>/
+        //
+        // Then try it as a Spotify episode ID:
+        // https://open.spotify.com/episode/<input>
+        //
+        // Platform oEmbed must succeed before MegaCut is queried. If neither
+        // platform verifies the input, there is no matching supported source.
+        val rumbleSource = source.copy(
+            platform = "rumble",
+            identifierKind = "rumble-embed",
+            canonicalUrl = "https://rumble.com/embed/${source.externalId}/"
+        )
+
+        fetchMegaCutSource(rumbleSource)?.let { return it }
+
+        val spotifySource = source.copy(
+            platform = "spotify",
+            identifierKind = "episode",
+            canonicalUrl = "https://open.spotify.com/episode/${source.externalId}"
+        )
+
+        return fetchMegaCutSource(spotifySource)
+    }
+
+    private fun fetchYouTubeCandidate(source: MediaSource): MediaLookupResult? {
+        if (source.platform != "youtube") return null
+
+        return try {
+            var title: String? = null
+            var author: String? = null
+
+            try {
+                val url = java.net.URL(
+                    "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${source.externalId}&format=json"
+                )
+                val connection = url.openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+
+                if (connection.responseCode == 200) {
+                    val json = org.json.JSONObject(
+                        connection.inputStream.bufferedReader().readText()
+                    )
+                    title = json.optString("title").ifBlank { null }
+                    author = json.optString("author_name").ifBlank { null }
+                }
+            } catch (e: Exception) {
+                Log.w(tag, "YouTube oEmbed lookup failed: ${e.message}")
+            }
+
+            // If YouTube oEmbed did not verify the source, allow an ambiguous
+            // bare-ID lookup to continue to Rumble/Spotify.
+            if (title == null) return null
+
+            val segments = try {
+                SponsorBlockClient().fetchRich(
+                    source.externalId,
+                    listOf(
+                        "sponsor", "selfpromo", "interaction", "intro", "outro",
+                        "preview", "filler", "music_offtopic", "poi_highlight",
+                        "exclusive_access", "chapter"
+                    )
+                )
+            } catch (e: Exception) {
+                Log.w(tag, "SponsorBlock lookup failed: ${e.message}")
+                emptyList()
+            }
+
+            MediaLookupResult(
+                source = source,
+                title = title,
+                author = author,
+                platform = "youtube",
+                segments = segments
+            )
+        } catch (e: Exception) {
+            Log.w(tag, "YouTube candidate lookup failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun fetchMegaCutSource(source: MediaSource): MediaLookupResult? {
+        if (source.platform == "youtube" || source.platform == "unknown") return null
+
+        return try {
+            // Platform oEmbed verification always precedes any MegaCut query.
+            val verificationUrl = when (source.identifierKind) {
+                "rumble-embed" -> "https://rumble.com/embed/${source.externalId}/"
+                else -> source.canonicalUrl
+            }
+
+            val verified = megaCutClient.verifyOEmbed(source, verificationUrl)
+                ?: return null
+
+            val oEmbedTitle = verified.optString("title").ifBlank { null }
+            val oEmbedAuthor = verified.optString("author_name").ifBlank { null }
+
+            // Retain an oEmbed-derived embed ID when one can be extracted.
+            // This supports records where MegaCut's page and embed IDs differ.
+            val oEmbedExternalId = Regex(
+                "rumble\\.com/embed/(v[A-Za-z0-9]+)",
+                RegexOption.IGNORE_CASE
+            ).find(verified.optString("html").orEmpty())
+                ?.groupValues
+                ?.getOrNull(1)
+
+            val effectiveSource = if (oEmbedExternalId != null) {
+                source.copy(oEmbedExternalId = oEmbedExternalId)
+            } else {
+                source
+            }
+
+            val summary = megaCutClient.findSegmentSetSummary(effectiveSource)
+            val detail = summary?.optString("id")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { megaCutClient.fetchSegmentSetDetail(it) }
+
+            MediaLookupResult(
+                source = effectiveSource,
+                title = detail?.title ?: oEmbedTitle,
+                author = detail?.channelName ?: oEmbedAuthor,
+                platform = detail?.platform ?: source.platform,
+                segments = detail?.segments ?: emptyList()
+            )
+        } catch (e: Exception) {
+            Log.w(tag, "MegaCut source lookup failed: ${e.message}")
+            null
+        }
+    }
+
     private fun applySegmentUiState(
         videoId: String, segments: List<SponsorSegmentInfo>?,
-        title: String? = null, author: String? = null
+        title: String? = null, author: String? = null,
+        platform: String? = null
     ) {
         val titleLine = when {
             title == null -> ""
+            platform != null && author == null ->
+                getString(R.string.video_title_platform, title, platform)
+            platform != null ->
+                getString(R.string.video_title_author_platform, title, author, platform)
             author == null -> getString(R.string.video_title_only, title)
             else -> getString(R.string.video_title_author, title, author)
         }

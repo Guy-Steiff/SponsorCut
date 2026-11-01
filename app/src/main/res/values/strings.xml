@@ -15,7 +15,15 @@
     <string name="file_selected_fetching_segments">File selected ✓\nID: %1$s\nFetching title and segments…</string>
     <string name="youtube_id_entered_source_discarded">YouTube ID entered — previous TXT/JSON segment source discarded.\nChecking SponsorBlock…</string>
     <string name="share_downloaded_video">Share a downloaded YouTube video here from PipePipe/NewPipe.</string>
-    <string name="youtube_url_or_id_hint">Paste YouTube URL or 11-char video ID</string>
+    <string name="youtube_url_or_id_hint">Paste YouTube, Rumble, or Spotify URL/ID</string>
+    <string name="media_source_entered_source_discarded">Previous segments discarded.\nChecking YouTube, Rumble, and Spotify…</string>
+    <string name="checking_segments">Checking YouTube, Rumble, or Spotify segments…</string>
+    <string name="no_database_segments_for_id">\n\n⚠️ No approved MegaCut segments found for this Rumble or Spotify source.</string>
+    <string name="megacut_removal">MegaCut segment removal</string>
+    <string name="no_media_source_found">\n\n⚠️ No matching YouTube, Rumble, or Spotify entry found for ID: %1$s</string>
+    <string name="verified_source_no_segments">\n\n⚠️ Source verified, but no segment set is available yet.</string>
+    <string name="video_title_platform">%1$s\n@ %2$s\n\n</string>
+    <string name="video_title_author_platform">%1$s\nby %2$s @ %3$s\n\n</string>
     <string name="process_with_id">Process with this ID</string>
     <string name="no_shared_video_pending">No shared video is pending.</string>
     <string name="invalid_segment_timestamps">Fix the invalid segment timestamps before processing.</string>
