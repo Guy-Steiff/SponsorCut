@@ -2,11 +2,14 @@
 
 package com.sponsorcut
 
-data class DropdownRow<out T>(
-    val indexAtOrig: Int,
-    val realValue: T,
-    val displayValue: String,
-    val isInput: Boolean = false
+data class SpinnerRow<T>(
+    val id: String,
+    val label: String,
+    val value: T,
+    val enabled: Boolean = true,
+    val isAuto: Boolean = false,
+    val isInput: Boolean = false,
+    val metadata: Map<String, Any?> = emptyMap()
 )
 
 class DropdownTable<T>(
@@ -20,12 +23,12 @@ class DropdownTable<T>(
     fun rowsForInput(
         inputValue: T?,
         inputRealValueOverride: T? = null
-    ): List<DropdownRow<T>> {
-        val originalRows: List<DropdownRow<T>> = originalValues.mapIndexed { index, value ->
-            DropdownRow(
-                indexAtOrig = index,
-                realValue = value,
-                displayValue = displayValue(value)
+    ): List<SpinnerRow<T>> {
+        val originalRows: List<SpinnerRow<T>> = originalValues.map { value ->
+            SpinnerRow(
+                id = valueId(value),
+                value = value,
+                label = displayValue(value)
             )
         }
 
@@ -38,29 +41,30 @@ class DropdownTable<T>(
         val normalizedInput = normalize(effectiveInputValue)
 
         val matchingRow = originalRows.firstOrNull { row ->
-            normalize(row.realValue) == normalizedInput
+            normalize(row.value) == normalizedInput
         }
 
         return when {
             matchingRow != null -> {
-                val inputRow: DropdownRow<T> = matchingRow.copy(
-                    displayValue = "${matchingRow.realValue} - input",
+                val inputRow = matchingRow.copy(
+                    id = inputId(effectiveInputValue),
+                    label = "${matchingRow.value} - input",
                     isInput = true
                 )
-                val remainingRows: List<DropdownRow<T>> = originalRows.filterNot {
-                    it.indexAtOrig == matchingRow.indexAtOrig
+                val remainingRows = originalRows.filterNot {
+                    it.id == matchingRow.id
                 }
-                val result: MutableList<DropdownRow<T>> = mutableListOf(inputRow)
+                val result = mutableListOf(inputRow)
                 result.addAll(remainingRows)
                 result
             }
 
             allowSyntheticInput -> {
                 listOf(
-                    DropdownRow(
-                        indexAtOrig = -1,
-                        realValue = effectiveInputValue,
-                        displayValue = "$effectiveInputValue - input",
+                    SpinnerRow<T>(
+                        id = inputId(effectiveInputValue),
+                        value = effectiveInputValue,
+                        label = "$effectiveInputValue - input",
                         isInput = true
                     )
                 ) + originalRows
@@ -70,30 +74,16 @@ class DropdownTable<T>(
         }
     }
 
-    fun realValueForDisplay(
-        rows: List<DropdownRow<T>>,
-        displayValue: String?
-    ): T? {
+    fun rowForId(
+        rows: List<SpinnerRow<T>>,
+        id: String?
+    ): SpinnerRow<T>? {
         return rows.firstOrNull {
-            it.displayValue == displayValue
-        }?.realValue
-    }
-
-    fun displayForRealValue(
-        rows: List<DropdownRow<T>>,
-        realValue: T?
-    ): String? {
-        return rows.firstOrNull {
-            it.realValue == realValue
-        }?.displayValue
-    }
-
-    fun rowForDisplay(
-        rows: List<DropdownRow<T>>,
-        displayValue: String?
-    ): DropdownRow<T>? {
-        return rows.firstOrNull {
-            it.displayValue == displayValue
+            it.id == id
         }
     }
+
+    fun valueId(value: T): String = "value:${normalize(value)}"
+
+    private fun inputId(value: T): String = "input:${normalize(value)}"
 }

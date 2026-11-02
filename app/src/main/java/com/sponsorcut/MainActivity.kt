@@ -84,8 +84,12 @@ class MainActivity : Activity() {
     private var encoderCatalog: List<EncoderOption> = emptyList()
     private var uiVideoCatalog: List<EncoderOption> = emptyList()
     private var uiAudioCatalog: List<EncoderOption> = emptyList()
-    private var uiVideoChoices: List<EncoderOption?> = emptyList()
-    private var uiAudioChoices: List<EncoderOption?> = emptyList()
+    private var uiVideoChoices: List<SpinnerRow<EncoderOption?>> = emptyList()
+    private var uiAudioChoices: List<SpinnerRow<EncoderOption?>> = emptyList()
+    private var videoSectionRows: List<SpinnerRow<Boolean>> = emptyList()
+    private var audioSectionRows: List<SpinnerRow<Boolean>> = emptyList()
+    private val spinnerRows = mutableMapOf<Spinner, List<SpinnerRow<*>>>()
+    private val expectedSpinnerSelectionIds = mutableMapOf<Spinner, String>()
     private var refreshOutputOptionsCallback: ((String) -> Unit)? = null
     private var inspectionGeneration = 0L
     private val segmentFetchHandler = Handler(Looper.getMainLooper())
@@ -115,6 +119,8 @@ class MainActivity : Activity() {
     private var selectedAudioEncoder: String? = null
     private var selectedAudioContainer: String? = null
     private var selectedContainer: String? = null
+    private var policyPreviewVideoEncoder: String? = null
+    private var policyPreviewAudioEncoder: String? = null
     private var qualityUsesCrf = false
     private var selectedCrf: Int = 23
     private var selectedCq: Int? = null
@@ -144,7 +150,7 @@ class MainActivity : Activity() {
         }
     )
 
-    private var frameRateRows: List<DropdownRow<String>> = emptyList()
+    private var frameRateRows: List<SpinnerRow<String>> = emptyList()
     private var selectedFrameRate: String? = null
     private var frameRateIsAuto = true
     private var videoBitrateIsAuto = true
@@ -592,7 +598,14 @@ class MainActivity : Activity() {
 
     private fun refreshFrameRateDropdown() {
         frameRateRows = if (inputFrameRate == null) {
-            listOf(DropdownRow(-1, "", "Input (unresolved)", isInput = true)) +
+            listOf(
+                SpinnerRow(
+                    id = "input-unresolved",
+                    value = "",
+                    label = "Input (unresolved)",
+                    isInput = true
+                )
+            ) +
                 frameRateTable.rowsForInput(inputValue = null)
         } else {
             frameRateTable.rowsForInput(inputValue = inputFrameRate)
@@ -602,36 +615,65 @@ class MainActivity : Activity() {
             outputResolutionPreview?.inputFrameRateDisplay != null
         ) {
             frameRateRows = frameRateRows.toMutableList().also { rows ->
-                rows[0] = rows[0].copy(
-                    displayValue = "${outputResolutionPreview?.inputFrameRateDisplay} - input"
-                )
+                rows[0] = rows[0].copy(label =
+                    "${outputResolutionPreview?.inputFrameRateDisplay} - input")
             }
         }
 
-        val selectedDisplay = if (frameRateIsAuto) {
-            frameRateRows.first().displayValue
+        val selectedRow = if (frameRateIsAuto) {
+            frameRateRows.first()
         } else {
-            frameRateTable.displayForRealValue(
+            frameRateTable.rowForId(
                 rows = frameRateRows,
-                realValue = selectedFrameRate
-            ) ?: frameRateRows.first().displayValue
+                id = selectedFrameRate?.let(frameRateTable::valueId)
+            ) ?: frameRateRows.first()
         }
 
-        // Keep the selected value synchronized with the row actually shown.
-        // Without this, a stale numeric frame rate can remain in
-        // selectedFrameRate while the spinner visibly falls back to Input.
-        if (!frameRateIsAuto) {
-            selectedFrameRate = frameRateTable.realValueForDisplay(
-                rows = frameRateRows,
-                displayValue = selectedDisplay
-            ) ?: selectedFrameRate
+        if (selectedRow.isInput) {
+            frameRateIsAuto = true
+            selectedFrameRate = null
+        } else {
+            frameRateIsAuto = false
+            selectedFrameRate = selectedRow.value
         }
 
-        setAdapterKeepingSelection(
+        setSpinnerRowsKeepingSelection(
             frameRateSpinner,
-            frameRateRows.map { it.displayValue },
-            selectedDisplay
+            frameRateRows,
+            selectedRow.id
         )
+    }
+
+    private fun <T> setSpinnerRowsKeepingSelection(
+        spinner: Spinner,
+        rows: List<SpinnerRow<T>>,
+        selectedId: String?
+    ) {
+        val currentRows = spinnerRows[spinner]
+        val sameRows = currentRows?.map { it.id to it.label } ==
+            rows.map { it.id to it.label }
+        val labels = rows.map { it.label }
+        val selectedIndex = rows.indexOfFirst { it.id == selectedId }
+            .takeIf { it >= 0 } ?: 0
+
+        expectedSpinnerSelectionIds[spinner] = rows.getOrNull(selectedIndex)?.id.orEmpty()
+        spinnerRows[spinner] = rows
+        if (!sameRows) {
+            suppressOutputCallbacks = true
+            try {
+                spinner.adapter = ArrayAdapter(
+                    this,
+                    android.R.layout.simple_spinner_dropdown_item,
+                    labels
+                )
+            } finally {
+                suppressOutputCallbacks = false
+            }
+        }
+
+        if (spinner.selectedItemPosition != selectedIndex) {
+            spinner.setSelection(selectedIndex, false)
+        }
     }
 
     private fun setAdapterKeepingSelection(
@@ -1483,15 +1525,23 @@ class MainActivity : Activity() {
                     selectedContainer = null
                 }
 
-                setAdapterKeepingSelection(
-                    videoSectionSpinner,
-                    listOf("Auto", "Custom"),
-                    if (videoSectionCustom) "Custom" else "Auto"
+                videoSectionRows = listOf(
+                    SpinnerRow(id = "auto", label = "Auto", value = false, isAuto = true),
+                    SpinnerRow(id = "custom", label = "Custom", value = true)
                 )
-                setAdapterKeepingSelection(
+                audioSectionRows = listOf(
+                    SpinnerRow(id = "auto", label = "Auto", value = false, isAuto = true),
+                    SpinnerRow(id = "custom", label = "Custom", value = true)
+                )
+                setSpinnerRowsKeepingSelection(
+                    videoSectionSpinner,
+                    videoSectionRows,
+                    if (videoSectionCustom) "custom" else "auto"
+                )
+                setSpinnerRowsKeepingSelection(
                     audioSectionSpinner,
-                    listOf("Auto", "Custom"),
-                    if (audioSectionCustom) "Custom" else "Auto"
+                    audioSectionRows,
+                    if (audioSectionCustom) "custom" else "auto"
                 )
 
                 refreshStageName = "policy-preview"
@@ -1510,6 +1560,8 @@ class MainActivity : Activity() {
                         catalog = encoderCatalog
                     )
                 }
+                policyPreviewVideoEncoder = preview?.videoEncoder
+                policyPreviewAudioEncoder = preview?.audioEncoder
                 outputResolutionPreview = preview?.outputResolution
                 val unsupportedDisplayMessage = preview?.unsupportedMessage
                 unsupportedDisplayMessage?.let { message ->
@@ -1539,8 +1591,6 @@ class MainActivity : Activity() {
                         "${encoder?.label ?: preview.videoEncoder} - $suffix"
                     }
                 }
-                val resolvedVideoBase = resolvedVideoLabel.substringBefore(" - ")
-
                 val effectiveVideoFamily = preview?.videoEncoder
                     ?.let { EncoderCatalog.find(encoderCatalog, it)?.codecFamily }
                     ?: EncoderCatalog.familyForInputCodec(previewInfo?.videoCodec)
@@ -1549,29 +1599,49 @@ class MainActivity : Activity() {
                         EncoderCatalog.familyForInputCodec(previewInfo?.videoCodec)
                 } ?: false
 
-                uiVideoChoices = listOf(null) + videoCatalog.filter {
-                    it.label != resolvedVideoBase
+                val resolvedVideoChoice = when {
+                    preview == null -> getString(R.string.auto_unresolved)
+                    mode == ExecutionMode.FAST -> getString(R.string.copy_input_video)
+                    else -> resolvedVideoLabel
+                }
+                val uniqueVideoCatalog = videoCatalog.distinctBy { it.name }
+                val customVideoOptions = if (videoSectionCustom) {
+                    uniqueVideoCatalog
+                } else {
+                    uniqueVideoCatalog.filterNot { it.name == preview?.videoEncoder }
+                }
+                uiVideoChoices = listOf(
+                    SpinnerRow<EncoderOption?>(
+                        id = "auto",
+                        label = if (videoSectionCustom) {
+                            "Auto"
+                        } else {
+                            "Auto — $resolvedVideoChoice"
+                        },
+                        value = null,
+                        isAuto = true
+                    )
+                ) + if (preview != null && mode != ExecutionMode.FAST) {
+                    customVideoOptions.map { encoder ->
+                        SpinnerRow(
+                            id = encoder.name,
+                            label = encoder.label,
+                            value = encoder
+                        )
+                    }
+                } else {
+                    emptyList()
+                }
+                val preferredVideoId = if (videoSectionCustom) {
+                    selectedVideoEncoder
+                } else {
+                    "auto"
                 }
 
-                val videoValues = when {
-                    preview == null -> listOf(getString(R.string.auto_unresolved))
-                    mode == ExecutionMode.FAST -> listOf(getString(R.string.copy_input_video))
-                    else -> {
-                        listOf(resolvedVideoLabel) + uiVideoChoices.drop(1).mapNotNull {
-                            it?.label
-                        }
-                    }
-                }
-                val preferredVideo = if (videoSectionCustom && selectedVideoEncoder != null) {
-                    videoCatalog.firstOrNull { it.name == selectedVideoEncoder }
-                        ?.let { "${it.label}${if (it.available) "" else " — unavailable"}" }
-                } else {
-                    videoValues.firstOrNull()
-                }
-                setAdapterKeepingSelection(
+                setSpinnerRowsKeepingSelection(
                     videoCodecSpinner,
-                    videoValues,
-                    preferredVideo
+                    uiVideoChoices,
+                    preferredVideoId
                 )
 
                 val resolvedAudioLabel = when {
@@ -1590,26 +1660,50 @@ class MainActivity : Activity() {
                         "${encoder?.label ?: preview.audioEncoder} - $suffix"
                     }
                 }
-                val resolvedAudioBase = resolvedAudioLabel.substringBefore(" - ")
-
-                uiAudioChoices = listOf(null) + audioCatalog.filter {
-                    it.label != resolvedAudioBase
+                val resolvedAudioChoice = when {
+                    preview == null -> getString(R.string.auto_unresolved)
+                    mode == ExecutionMode.FAST ->
+                        getString(R.string.copy_compatible_audio)
+                    else -> resolvedAudioLabel
                 }
-
-                val audioValues = when {
-                    preview == null -> listOf(getString(R.string.auto_unresolved))
-                    mode == ExecutionMode.FAST -> listOf(getString(R.string.copy_compatible_audio))
-                    else -> {
-                        listOf(resolvedAudioLabel) + uiAudioChoices.drop(1).mapNotNull {
-                            it?.label
-                        }
+                val uniqueAudioCatalog = audioCatalog.distinctBy { it.name }
+                val customAudioOptions = if (audioSectionCustom) {
+                    uniqueAudioCatalog
+                } else {
+                    uniqueAudioCatalog.filterNot { it.name == preview?.audioEncoder }
+                }
+                uiAudioChoices = listOf(
+                    SpinnerRow<EncoderOption?>(
+                        id = "auto",
+                        label = if (audioSectionCustom) {
+                            "Auto"
+                        } else {
+                            "Auto — $resolvedAudioChoice"
+                        },
+                        value = null,
+                        isAuto = true
+                    )
+                ) + if (preview != null && mode != ExecutionMode.FAST) {
+                    customAudioOptions.map { encoder ->
+                        SpinnerRow(
+                            id = encoder.name,
+                            label = encoder.label,
+                            value = encoder
+                        )
                     }
+                } else {
+                    emptyList()
                 }
-                val preferredAudio = if (audioSectionCustom && selectedAudioEncoder != null) {
-                    audioCatalog.firstOrNull { it.name == selectedAudioEncoder }
-                        ?.let { "${it.label}${if (it.available) "" else " — unavailable"}" }
-                } else null
-                setAdapterKeepingSelection(audioCodecSpinner, audioValues, preferredAudio)
+                val preferredAudioId = if (audioSectionCustom) {
+                    selectedAudioEncoder
+                } else {
+                    "auto"
+                }
+                setSpinnerRowsKeepingSelection(
+                    audioCodecSpinner,
+                    uiAudioChoices,
+                    preferredAudioId
+                )
 
                 val effectiveAudioFamily = preview?.audioEncoder
                     ?.let { EncoderCatalog.find(encoderCatalog, it)?.codecFamily }
@@ -2041,13 +2135,20 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks) return
-                        val custom = position == 1
+                        if (suppressOutputCallbacks ||
+                            position != videoSectionSpinner.selectedItemPosition
+                        ) return
+                        val row = videoSectionRows.getOrNull(position) ?: return
+                        if (expectedSpinnerSelectionIds[videoSectionSpinner] == row.id) return
+                        expectedSpinnerSelectionIds[videoSectionSpinner] = row.id
+                        val custom = row.value
                         if (videoSectionCustom == custom) return
                         videoSectionCustom = custom
                         if (!videoSectionCustom) {
                             selectedVideoEncoder = null
                             selectedContainer = null
+                        } else if (selectedVideoEncoder == null) {
+                            selectedVideoEncoder = policyPreviewVideoEncoder
                         }
                         refreshOutputOptionsSafely("video section selection")
                     }
@@ -2060,22 +2161,20 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks) return
-                        val custom = position == 1
+                        if (suppressOutputCallbacks ||
+                            position != audioSectionSpinner.selectedItemPosition
+                        ) return
+                        val row = audioSectionRows.getOrNull(position) ?: return
+                        if (expectedSpinnerSelectionIds[audioSectionSpinner] == row.id) return
+                        expectedSpinnerSelectionIds[audioSectionSpinner] = row.id
+                        val custom = row.value
                         if (audioSectionCustom == custom) return
                         audioSectionCustom = custom
 
                         if (!audioSectionCustom) {
                             selectedAudioEncoder = null
                         } else if (selectedAudioEncoder == null) {
-                            // The Auto row may display a resolved fallback such as
-                            // "AAC - fallback". Make that effective choice real
-                            // when the user switches to Custom.
-                            selectedAudioEncoder = uiAudioCatalog.firstOrNull {
-                                it.codecFamily == EncoderCatalog.familyForInputCodec(
-                                    pendingVideoInfo?.audioCodec
-                                )
-                            }?.name ?: "aac"
+                            selectedAudioEncoder = policyPreviewAudioEncoder
                         }
 
                         refreshOutputOptionsSafely("audio section selection")
@@ -2089,20 +2188,24 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks) return
+                        if (suppressOutputCallbacks ||
+                            position != videoCodecSpinner.selectedItemPosition
+                        ) return
+                        val row = uiVideoChoices.getOrNull(position) ?: return
+                        if (expectedSpinnerSelectionIds[videoCodecSpinner] == row.id) return
+                        expectedSpinnerSelectionIds[videoCodecSpinner] = row.id
 
-                        val option = uiVideoChoices
-                            .getOrNull(position)
-
-                        if (option == null) {
+                        val option = row.value
+                        if (row.isAuto) {
                             if (!videoSectionCustom && selectedVideoEncoder == null) return
                             selectedVideoEncoder = null
                             videoSectionCustom = false
                         } else {
-                            if (videoSectionCustom && selectedVideoEncoder == option.name) return
-                            selectedVideoEncoder = option.name
+                            val encoder = option ?: return
+                            if (videoSectionCustom && selectedVideoEncoder == encoder.name) return
+                            selectedVideoEncoder = encoder.name
                             videoSectionCustom = true
-                            DiagLog.append("UI", "video codec selected: ${option.name}")
+                            DiagLog.append("UI", "video codec selected: ${encoder.name}")
                         }
 
                         selectedContainer = null
@@ -2117,20 +2220,24 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks) return
+                        if (suppressOutputCallbacks ||
+                            position != audioCodecSpinner.selectedItemPosition
+                        ) return
+                        val row = uiAudioChoices.getOrNull(position) ?: return
+                        if (expectedSpinnerSelectionIds[audioCodecSpinner] == row.id) return
+                        expectedSpinnerSelectionIds[audioCodecSpinner] = row.id
 
-                        val option = uiAudioChoices
-                            .getOrNull(position)
-
-                        if (option == null) {
+                        val option = row.value
+                        if (row.isAuto) {
                             if (!audioSectionCustom && selectedAudioEncoder == null) return
                             selectedAudioEncoder = null
                             audioSectionCustom = false
                         } else {
-                            if (audioSectionCustom && selectedAudioEncoder == option.name) return
-                            selectedAudioEncoder = option.name
+                            val encoder = option ?: return
+                            if (audioSectionCustom && selectedAudioEncoder == encoder.name) return
+                            selectedAudioEncoder = encoder.name
                             audioSectionCustom = true
-                            DiagLog.append("UI", "audio codec selected: ${option.name}")
+                            DiagLog.append("UI", "audio codec selected: ${encoder.name}")
                         }
 
                         refreshOutputOptionsSafely("audio encoder selection")
@@ -2289,21 +2396,18 @@ class MainActivity : Activity() {
                     override fun onItemSelected(
                         parent: AdapterView<*>?, view: View?, position: Int, id: Long
                     ) {
-                        if (suppressOutputCallbacks) return
-                        val display = frameRateSpinner.selectedItem as? String
-                        val row = frameRateTable.rowForDisplay(
-                            rows = frameRateRows,
-                            displayValue = display
-                        )
-                        if (row?.isInput == true) {
+                        if (suppressOutputCallbacks ||
+                            position != frameRateSpinner.selectedItemPosition
+                        ) return
+                        val row = frameRateRows.getOrNull(position) ?: return
+                        if (expectedSpinnerSelectionIds[frameRateSpinner] == row.id) return
+                        expectedSpinnerSelectionIds[frameRateSpinner] = row.id
+                        if (row.isInput) {
                             if (frameRateIsAuto && selectedFrameRate == null) return
                             frameRateIsAuto = true
                             selectedFrameRate = null
                         } else {
-                            val selected = frameRateTable.realValueForDisplay(
-                                rows = frameRateRows,
-                                displayValue = display
-                            )
+                            val selected = row.value
                             if (!frameRateIsAuto && selectedFrameRate == selected) return
                             frameRateIsAuto = false
                             selectedFrameRate = selected
@@ -2711,6 +2815,7 @@ class MainActivity : Activity() {
         pendingVideoInfo = null
         outputResolutionPreview = null
         updateStreamSelectionAvailability()
+        DiagLog.append("ColdOpen", "inspection started uri=$uri")
         refreshOutputOptionsCallback?.invoke("input inspection started")
 
         Thread {
@@ -2737,6 +2842,12 @@ class MainActivity : Activity() {
                     setStatus("Media inspection failed:\n${it.message}")
                 }
                 pendingVideoInfo = info
+                DiagLog.append(
+                    "ColdOpen",
+                    "inspection completed info=${info != null} " +
+                        "summary=${info?.summaryLine} " +
+                        "video=${info?.videoCodec} audio=${info?.audioCodec}"
+                )
 
                 if (info != null) {
                     // Clear the previous file's frame-rate choice so the newly
@@ -2775,7 +2886,15 @@ class MainActivity : Activity() {
                 }
 
                 try {
+                    DiagLog.append(
+                        "ColdOpen",
+                        "before stream UI refresh mediaLoaded=${pendingVideoInfo != null}"
+                    )
                     updateStreamSelectionAvailability()
+                    DiagLog.append(
+                        "ColdOpen",
+                        "after stream UI refresh mediaLoaded=${pendingVideoInfo != null}"
+                    )
                 } catch (e: Throwable) {
                     DiagLog.append(
                         "TaskUI",
@@ -3021,6 +3140,7 @@ class MainActivity : Activity() {
                 // While a job is active, never run cold-open restore/fetch logic.
                 // This avoids re-fetching segments when returning from background.
                 if (ProcessingService.isProcessingActive) {
+                    DiagLog.append("ColdOpen", "handle: processing active; restore snapshot")
                     restoreActiveProcessingSnapshotIfNeeded()
                     setProcessingUi(active = true)
                     return
@@ -3033,7 +3153,15 @@ class MainActivity : Activity() {
                     pendingUri != null &&
                             (localSegments != null || idCardState == CardState.OK)
 
+                DiagLog.append(
+                    "ColdOpen",
+                    "handle: default branch pendingUri=$pendingUri " +
+                        "localSegments=${localSegments != null} " +
+                        "idCardState=$idCardState sessionAlreadyReady=$sessionAlreadyReady"
+                )
+
                 if (sessionAlreadyReady) {
+                    DiagLog.append("ColdOpen", "handle: session already ready; returning")
                     return
                 }
 
@@ -3985,18 +4113,33 @@ class MainActivity : Activity() {
 
     /** Restores last known file URI from prefs if pendingUri is still null. Shows it with a note. */
     private fun restoreLastFileUri() {
-        if (pendingUri != null) return  // already have a file, don't overwrite
+        DiagLog.append(
+            "ColdOpen",
+            "restoreLastFileUri entered pendingUri=$pendingUri"
+        )
+        if (pendingUri != null) {
+            DiagLog.append("ColdOpen", "restoreLastFileUri: pendingUri already set; returning")
+            return
+        }
         val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
-        val uriString = prefs.getString(keyLastFileUri, null) ?: return
+        val uriString = prefs.getString(keyLastFileUri, null)
+        DiagLog.append(
+            "ColdOpen",
+            "restoreLastFileUri: savedUri=${uriString != null}"
+        )
+        if (uriString == null) return
         val fileName = prefs.getString(keyLastFileName, null) ?: "previous file"
         val uri = uriString.toUri()
         if (!canReadUri(uri)) {
+            DiagLog.append("ColdOpen", "restoreLastFileUri: saved URI unreadable; clearing")
             prefs.edit {
                 remove(keyLastFileUri)
                 remove(keyLastFileName)
             }
             return
         }
+
+        DiagLog.append("ColdOpen", "restoreLastFileUri: saved URI readable; inspecting")
         pendingUri = uri
         fileCardState = CardState.OK
         runOnUiThread {
@@ -4004,6 +4147,8 @@ class MainActivity : Activity() {
             browseFileButton.text = getString(R.string.change_file)
             updateCards()
         }
+
+        inspectSelectedUri(uri)
     }
 
     /** Returns true if the URI is an image (e.g. share-sheet preview JPG) — should be ignored as a file input. */
