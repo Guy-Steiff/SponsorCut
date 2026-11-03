@@ -1,6 +1,6 @@
 # SponsorCut Architecture
 
-Last reviewed: 2026-11-01
+Last reviewed: 2026-11-03
 
 This document describes the current implementation. The source code is authoritative where behavior changes.
 
@@ -18,6 +18,7 @@ Media picker / share or view intent
        -> FFProbeInspector.inspect()
        -> TranscodePolicy.plan()
        -> FfmpegEngine.process()
+           -> mode-specific FFmpeg command and progress callbacks
        -> FileResolver writes final output
        -> completion summary and notification
 ```
@@ -33,6 +34,26 @@ Media picker / share or view intent
 After inspection and whenever relevant output controls change, it asks `TranscodePolicy.resolveForUi()` for a preview. The preview uses the same policy planning path as processing and supplies resolved values and provenance for Auto controls. Explicit selections remain represented in `OutputPreferences`; display text is not used as an Auto request.
 
 The activity supports SponsorBlock-backed segments and local TXT/JSON segment files. Users can select categories and individual segments, add or edit entries, and export the current segment list. A saved output-folder URI is used when available.
+
+#### Output spinner rows and UI restrictions
+
+Output spinners use `SpinnerRow<T>` from `DropdownTable.kt`. A row keeps its stable ID and original typed value separate from its display label, enabled state, metadata, and original catalog index. Refreshes can therefore reorder options and add input/fallback/selected suffixes without parsing labels or treating a decorated duplicate as a different codec/container. Auto and Custom are independent section-level choices; codec rows represent actual encoder identities, not another Auto choice.
+
+The resolved codec/container row is moved to the top when applicable and decorated in place. The other catalog/preset rows remain unique. Video container rows are based on canonical MP4, MKV, MOV, AVI, and WebM identities; container availability is represented by row enablement rather than removing an option when the current choice changes. Explicit selection is kept separate from the input-aware Auto container, so switching away from Auto does not erase the other container entries.
+
+Conceptually, a spinner refresh transforms a dataframe-like view rather than rebuilding the option identity:
+
+| original index | original value/name | spinner label |
+|---:|---|---|
+| 0 | MPEG-4 Part 2 | MPEG-4 Part 2 |
+| 1 | H.264 MediaCodec | H.264 MediaCodec - input |
+| 2 | HEVC MediaCodec | HEVC MediaCodec |
+
+The H.264 row retains its ID, encoder value, and original index while moving to the top and receiving the input suffix. Fallback follows the same rule. Container rows similarly keep canonical values present; the policy-default container keeps its input/fallback label when a different explicit container is selected, while the explicit choice is moved to the top and labeled selected.
+
+FAST is stream-copy/remux mode. Controls that affect encoding—codec, quality, bitrate, preset, frame rate, resolution, and audio sample rate—are disabled, while a compatible container choice can remain available. Audio-only/video-only stream selection further gates the irrelevant stream form. When processing is active, the activity disables the output controls and input/job options, including the audio bitrate preset; cancellation remains enabled. Refreshing stream availability reapplies the active-job and FAST-mode restrictions so a UI refresh cannot accidentally re-enable controls.
+
+Progress labels derive from execution mode in the engine and are shared between segmentless and segment-removal operations. The underlying operations remain distinct: segmentless processing handles the full selected stream, while segment removal builds and processes keep ranges (or a policy-selected single-pass filter). The service uses explicit segmentless processing state for its elapsed-time notification instead of recognizing operation state by comparing progress-label strings.
 
 ### ProcessingService
 
@@ -98,6 +119,8 @@ Encoder discovery is performed by `EncoderCatalog`. Policy chooses compatible en
 
 The engine adds compatibility options for encoders that require them. If a configured recovery profile succeeds, the result records whether AAC recovery audio arguments were used so the completion report can distinguish recovery from the planned target.
 
+Execution-mode progress labels are shared by the segmentless and segment-removal paths. Segmentless full-stream operations do not emit segment counters; segmented operations report part/merge progress while using the same mode label for their encoding phase.
+
 ### FileResolver
 
 `FileResolver` converts selected content URIs into cached local files and writes output to an appropriate destination. Destinations may be a user-selected SAF tree, a writable source-adjacent location, or a platform storage fallback. Temporary outputs are deleted on failure or cancellation.
@@ -153,3 +176,50 @@ Audio completion reporting distinguishes:
 8. Rational frame-rate metadata is retained internally; display text does not decide timing behavior.
 9. Input summaries describe probed media, while output controls describe resolved Auto values or explicit requests.
 10. The engine executes the plan; it does not silently reinterpret Auto policy.
+11. Spinner identity and policy values never depend on display text or row position; reordered rows retain stable IDs and original indexes.
+12. Unavailable settings remain represented as disabled rows where retaining the choice is useful; UI refresh must not silently discard a user's stored selection.
+13. FAST-mode and active-job control restrictions are reapplied after stream/output refreshes.
+
+## Project structure
+
+```text
+.
+├── README.md
+├── ARCHITECTURE.md
+├── TRANSCODEPOLICY_ARCHITECTURE.md
+├── build.gradle.kts
+├── settings.gradle.kts
+├── gradle/
+│   ├── wrapper/
+│   └── gradle-daemon-jvm.properties
+└── app/
+    ├── build.gradle.kts
+    ├── libs/ffmpeg-kit.aar
+    └── src/main/
+        ├── AndroidManifest.xml
+        ├── assets/                 bundled artwork and third-party notices
+        ├── res/                    strings and launcher resources
+        └── java/com/sponsorcut/
+            ├── MainActivity.kt
+            ├── ProcessingService.kt
+            ├── SponsorCutApp.kt
+            ├── FFProbeInspector.kt
+            ├── TranscodePolicy.kt
+            ├── FfmpegEngine.kt
+            ├── EncoderCatalog.kt
+            ├── DropdownTable.kt
+            ├── FileResolver.kt
+            ├── SegmentParser.kt
+            ├── PolicyModels.kt
+            ├── DiagLog.kt
+            ├── SponsorBlockClient.kt
+            ├── MegaCutClient.kt
+            ├── model/SponsorSegment.kt
+            └── core/model/JobModels.kt
+```
+
+## Future 2.0 direction
+
+For a future Kotlin 2.0 architecture refresh, use Google's **Now in Android (NIA)** sample and the official Android app-architecture guidance as references; NIA is a reference implementation, not a drop-in app template. The target scheme is unidirectional data flow (UDF): immutable UI state exposed by `ViewModel`, UI events flowing back to the state holder, and lifecycle-aware collection of `StateFlow`. Use Kotlin coroutines with structured concurrency for asynchronous work, repositories to isolate data access, and explicit UI state instead of Activity-owned raw threads, mutable spinner locks, and ad hoc enable/disable coordination.
+
+Long-running user-visible media work should remain owned by an Android foreground service; the 2.0 design can use coroutine-based job execution and cancellation within that lifecycle rather than moving lengthy processing onto an unscoped thread. Choose a current Android Studio Kotlin starter template for the intended UI toolkit (Views or Compose), then adopt the NIA/Android guidance patterns incrementally. This is a future roadmap, not a description of the current Views-based activity and foreground-service implementation.

@@ -2,14 +2,15 @@
 
 package com.sponsorcut
 
-data class SpinnerRow<T>(
+data class SpinnerRow<out T>(
     val id: String,
     val label: String,
     val value: T,
     val enabled: Boolean = true,
     val isAuto: Boolean = false,
     val isInput: Boolean = false,
-    val metadata: Map<String, Any?> = emptyMap()
+    val metadata: Map<String, Any?> = emptyMap(),
+    val originalIndex: Int? = null
 )
 
 class DropdownTable<T>(
@@ -18,8 +19,6 @@ class DropdownTable<T>(
     private val normalize: (T) -> String = { it.toString().trim() },
     private val allowSyntheticInput: Boolean = true
 ) {
-    val original: List<T> = originalValues.toList()
-
     fun rowsForInput(
         inputValue: T?,
         inputRealValueOverride: T? = null
@@ -51,11 +50,8 @@ class DropdownTable<T>(
                     label = "${matchingRow.value} - input",
                     isInput = true
                 )
-                val remainingRows = originalRows.filterNot {
-                    it.id == matchingRow.id
-                }
                 val result = mutableListOf(inputRow)
-                result.addAll(remainingRows)
+                result.addAll(originalRows.filterNot { it.id == matchingRow.id })
                 result
             }
 

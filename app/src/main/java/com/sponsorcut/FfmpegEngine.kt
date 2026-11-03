@@ -7,6 +7,12 @@ import com.arthenica.ffmpegkit.ReturnCode
 import android.util.Log
 import java.io.File
 
+private fun ExecutionMode.processingProgressLabel(): String = when (this) {
+    ExecutionMode.HW_ACCURATE -> "HW - Accurate Processing"
+    ExecutionMode.SW_ACCURATE -> "SW - Accurate processing"
+    ExecutionMode.FAST -> "Fast copy Processing"
+}
+
 /**
  * Execution layer only.
  * Receives a ProcessingPlan from TranscodePolicy and carries it out.
@@ -471,7 +477,12 @@ object FfmpegEngine {
         val command = args.joinToString(" ")
         Log.i(TAG, "Processing media args: $command")
         DiagLog.append("Engine", "Processing media args: $command")
-        onProgress?.invoke("Processing media…")
+        val progressLabel = when (plan.streamSelection) {
+            StreamSelection.AUDIO_ONLY -> "Extracting audio"
+            StreamSelection.VIDEO_ONLY -> "Extracting video"
+            StreamSelection.BOTH -> plan.executionMode.processingProgressLabel()
+        }
+        onProgress?.invoke(progressLabel)
 
         val session = FFmpegKit.execute(command)
         val rc = session.returnCode
@@ -488,7 +499,6 @@ object FfmpegEngine {
                 error("Processing media failed (rc=$rcValue)")
             }
             else -> {
-                onProgress?.invoke("Processing media complete")
             }
         }
     }
@@ -752,18 +762,14 @@ private fun processSinglePass(
         onProgressNumeric?.invoke(0, 1)
 
         // Ticker: elapsed only — no ETA for a single opaque ffmpeg call
-        val modeLabel = when (plan.executionMode) {
-            ExecutionMode.HW_ACCURATE -> "HW"
-            ExecutionMode.SW_ACCURATE -> "SW"
-            ExecutionMode.FAST -> "Fast"
-        }
+        val modeLabel = plan.executionMode.processingProgressLabel()
         val tickerActive = java.util.concurrent.atomic.AtomicBoolean(true)
         val tickerThread = Thread {
             while (tickerActive.get()) {
                 try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
                 if (!tickerActive.get()) break
                 val elapsed = System.currentTimeMillis() - jobStartMs
-                onProgress?.invoke("$modeLabel single-pass encoding…\n${formatDuration(elapsed)} elapsed")
+                onProgress?.invoke("$modeLabel…\n${formatDuration(elapsed)} elapsed")
             }
         }
         tickerThread.isDaemon = true

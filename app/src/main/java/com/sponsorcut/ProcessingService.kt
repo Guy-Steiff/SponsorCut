@@ -137,6 +137,9 @@ class ProcessingService : Service() {
     @Volatile
     private var lastProgressText = "Starting…"
 
+    @Volatile
+    private var segmentlessProcessingActive = false
+
     /** Job ID attached to every broadcast from this service instance. */
     @Volatile
     private var broadcastJobId: String? = null
@@ -209,6 +212,7 @@ class ProcessingService : Service() {
         broadcastJobId = jobId
         pendingTerminalIntent = null
         lastProgressText = "Starting…"
+        segmentlessProcessingActive = false
         ensureForeground()
         Log.i(JOB_TAG, "Start accepted: job=$jobId startId=$startId")
 
@@ -324,23 +328,27 @@ class ProcessingService : Service() {
                 DiagLog.append("Service", "Output container: .$outputExt muxer=${processingPlan.outputMuxer ?: "auto"}")
 
                 if (!removeSegments) {
-                    val label = when (streamSelection) {
-                        StreamSelection.AUDIO_ONLY -> "Extracting audio"
-                        StreamSelection.VIDEO_ONLY -> "Extracting video"
-                        StreamSelection.BOTH -> "Processing media"
+                    when (streamSelection) {
+                        StreamSelection.AUDIO_ONLY -> progress("Extracting audio")
+                        StreamSelection.VIDEO_ONLY -> progress("Extracting video")
+                        StreamSelection.BOTH -> Unit
                     }
-                    progress(label)
 
                     val encodeStartMs = System.currentTimeMillis()
-                    val processingResult = FfmpegEngine.process(
-                        input = inputFile,
-                        output = tempOutput,
-                        segments = emptyList(),
-                        cacheDir = cacheDir,
-                        plan = processingPlan,
-                        fileDurationSec = videoInfo.durationSec,
-                        onProgress = { step -> progress(step) }
-                    )
+                    segmentlessProcessingActive = streamSelection == StreamSelection.BOTH
+                    val processingResult = try {
+                        FfmpegEngine.process(
+                            input = inputFile,
+                            output = tempOutput,
+                            segments = emptyList(),
+                            cacheDir = cacheDir,
+                            plan = processingPlan,
+                            fileDurationSec = videoInfo.durationSec,
+                            onProgress = { step -> progress(step) }
+                        )
+                    } finally {
+                        segmentlessProcessingActive = false
+                    }
                     val elapsedSeconds = (System.currentTimeMillis() - encodeStartMs) / 1000.0
 
                     progress("Saving output…")
@@ -392,7 +400,12 @@ class ProcessingService : Service() {
                         }
                     } else null
 
-                    val result = "✓ $label complete\n\n" +
+                    val completedActionLabel = when (streamSelection) {
+                        StreamSelection.AUDIO_ONLY -> "Extracting audio"
+                        StreamSelection.VIDEO_ONLY -> "Extracting video"
+                        StreamSelection.BOTH -> "Processing media"
+                    }
+                    val result = "✓ $completedActionLabel complete\n\n" +
                         "Media: ${videoInfo.summaryLine}\n" +
                         "Mode: ${executionMode.name.replace('_', ' ')}\n" +
                         "Streams: $streamNote\n" +
@@ -742,7 +755,7 @@ class ProcessingService : Service() {
             override fun run() {
                 if (!isProcessingActive) return
 
-                val body = if (lastProgressText == "Processing media…") {
+                val body = if (segmentlessProcessingActive) {
                     val elapsedSeconds =
                         (SystemClock.elapsedRealtime() - jobStartElapsedRealtime) / 1000.0
                     "$lastProgressText\nElapsed: ${formatElapsedHms(elapsedSeconds)}"
