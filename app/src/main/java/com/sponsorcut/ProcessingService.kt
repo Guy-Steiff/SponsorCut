@@ -22,6 +22,7 @@ import android.os.PowerManager
 import android.util.Log
 import com.sponsorcut.core.model.StreamSelection
 import java.io.File
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
@@ -51,6 +52,8 @@ class ProcessingService : Service() {
         const val EXTRA_PROGRESS_TEXT = "progress_text"
         const val EXTRA_PROGRESS_CURRENT = "progress_current"
         const val EXTRA_PROGRESS_TOTAL = "progress_total"
+    const val EXTRA_PROGRESS_DISPLAY_TEXT = "progress_display_text"
+    const val EXTRA_PROGRESS_ELAPSED_SECONDS = "progress_elapsed_seconds"
         const val EXTRA_DONE = "done"
         const val EXTRA_ERROR = "error"
         const val EXTRA_CANCELLED = "cancelled"
@@ -818,10 +821,92 @@ class ProcessingService : Service() {
         }
     }
 
-    private fun progress(text: String) {
+    private fun progress(
+        text: String,
+        current: Int? = null,
+        total: Int? = null
+    ) {
+        emitProgress(
+            text = text,
+            current = current,
+            total = total
+        )
+    }
+
+    private fun currentElapsedSeconds(): Double? =
+        jobStartElapsedRealtime
+            .takeIf { it > 0L }
+            ?.let { (SystemClock.elapsedRealtime() - it) / 1000.0 }
+
+    private fun formatProgressText(
+        text: String,
+        elapsedSeconds: Double?
+    ): String {
+        val normalizedText = text
+            .lines()
+            .filterNot { line ->
+                val trimmed = line.trim()
+
+                trimmed.startsWith("Elapsed:", ignoreCase = true) ||
+                        trimmed.endsWith("elapsed", ignoreCase = true)
+            }
+            .joinToString("\n")
+            .trim()
+
+        return elapsedSeconds
+            ?.let { "$normalizedText\nElapsed: ${formatElapsedHms(it)}" }
+            ?: normalizedText
+    }
+
+    private fun emitProgress(
+        text: String,
+        current: Int? = null,
+        total: Int? = null
+    ) {
         lastProgressText = text
-        nm.notify(NOTIF_ID, buildNotification(text))
-        broadcast(text = text)
+        val elapsedSeconds = currentElapsedSeconds()
+        val displayText = formatProgressText(text, elapsedSeconds)
+
+        runCatching {
+            nm.notify(NOTIF_ID, buildNotification(displayText))
+        }
+
+        broadcastProgress(
+            text = text,
+            displayText = displayText,
+            elapsedSeconds = elapsedSeconds,
+            current = current,
+            total = total
+        )
+    }
+
+    private fun broadcastProgress(
+        text: String,
+        displayText: String,
+        elapsedSeconds: Double?,
+        current: Int?,
+        total: Int?
+    ) {
+        val intent = Intent(BROADCAST_PROGRESS).apply {
+            `package` = packageName
+            putExtra(EXTRA_PROGRESS_TEXT, text)
+            putExtra(EXTRA_PROGRESS_DISPLAY_TEXT, displayText)
+            elapsedSeconds?.let {
+                putExtra(EXTRA_PROGRESS_ELAPSED_SECONDS, it)
+            }
+            current?.takeIf { it >= 0 }?.let {
+                putExtra(EXTRA_PROGRESS_CURRENT, it)
+            }
+            total?.takeIf { it > 0 }?.let {
+                putExtra(EXTRA_PROGRESS_TOTAL, it)
+            }
+            putExtra(EXTRA_DONE, false)
+            putExtra(EXTRA_ERROR, false)
+            putExtra(EXTRA_CANCELLED, false)
+            putExtra(EXTRA_JOB_ID, broadcastJobId)
+        }
+
+        sendBroadcast(intent)
     }
 
     private fun startElapsedUpdates() {
@@ -831,20 +916,7 @@ class ProcessingService : Service() {
             override fun run() {
                 if (!isProcessingActive) return
 
-                val body = if (segmentlessProcessingActive) {
-                    val elapsedSeconds =
-                        (SystemClock.elapsedRealtime() - jobStartElapsedRealtime) / 1000.0
-                    "$lastProgressText\nElapsed: ${formatElapsedHms(elapsedSeconds)}"
-                } else {
-                    lastProgressText
-                }
-
-                runCatching {
-                    nm.notify(
-                        NOTIF_ID,
-                        buildNotification(body)
-                    )
-                }
+                emitProgress(lastProgressText)
 
                 elapsedHandler.postDelayed(this, 1_000L)
             }
@@ -1054,6 +1126,13 @@ class ProcessingService : Service() {
         val h = total / 3600
         val m = (total % 3600) / 60
         val s = total % 60
-        return "${h}h${m}m${s}s"
+
+        return String.format(
+            Locale.US,
+            "%02d:%02d:%02d",
+            h,
+            m,
+            s
+        )
     }
 }

@@ -47,6 +47,7 @@ import android.text.style.URLSpan
 import com.sponsorcut.core.model.ExecutionMode
 import com.sponsorcut.core.model.StreamSelection
 import java.util.Locale
+import kotlin.math.roundToLong
 //note:
 //a solution that I gave for that problem for other spinners was:
 //for the available codecs list
@@ -214,6 +215,7 @@ class MainActivity : Activity() {
     private lateinit var fileCardIcon: TextView
     private lateinit var fileCardLabel: TextView
     private lateinit var processWithoutSegmentsCheckBox: CheckBox
+    private lateinit var selectedSegmentsTotalView: TextView
 
     private enum class CardState { PENDING, CHECKING, OK, ERROR }
 
@@ -284,39 +286,68 @@ class MainActivity : Activity() {
 
     private val progressReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val current = intent?.getIntExtra(ProcessingService.EXTRA_PROGRESS_CURRENT, -1) ?: -1
-            val total = intent?.getIntExtra(ProcessingService.EXTRA_PROGRESS_TOTAL, -1) ?: -1
-            if (current >= 0 && total > 0) {
-                runOnUiThread {
-                    progressBar.visibility = View.VISIBLE
-                    progressBar.max = total
-                    progressBar.progress = current
-                }
-                return
-            }
-            val text = intent?.getStringExtra(ProcessingService.EXTRA_PROGRESS_TEXT) ?: return
-            val done = intent.getBooleanExtra(ProcessingService.EXTRA_DONE, false)
-            val error = intent.getBooleanExtra(ProcessingService.EXTRA_ERROR, false)
-            val cancelled = intent.getBooleanExtra(ProcessingService.EXTRA_CANCELLED, false)
+            val receivedIntent = intent ?: return
+
+            val current = receivedIntent.getIntExtra(
+                ProcessingService.EXTRA_PROGRESS_CURRENT,
+                -1
+            )
+            val total = receivedIntent.getIntExtra(
+                ProcessingService.EXTRA_PROGRESS_TOTAL,
+                -1
+            )
+            val text = receivedIntent.getStringExtra(
+                ProcessingService.EXTRA_PROGRESS_TEXT
+            ) ?: return
+            val done = receivedIntent.getBooleanExtra(
+                ProcessingService.EXTRA_DONE,
+                false
+            )
+            val error = receivedIntent.getBooleanExtra(
+                ProcessingService.EXTRA_ERROR,
+                false
+            )
+            val cancelled = receivedIntent.getBooleanExtra(
+                ProcessingService.EXTRA_CANCELLED,
+                false
+            )
+
             if (done || error || cancelled) {
-                val terminalJobId = intent.getStringExtra(ProcessingService.EXTRA_JOB_ID)
+                val terminalJobId = receivedIntent.getStringExtra(
+                    ProcessingService.EXTRA_JOB_ID
+                )
                 val activeJobId = ProcessingService.currentJobId
+
                 if (activeJobId != null && activeJobId != terminalJobId) {
-                    // A stale terminal result must never unlock a different running job.
+                    // A stale terminal result must never unlock a different
+                    // running job.
                     Log.w(
                         "ProcessingJob",
-                        "Ignoring terminal broadcast for job=$terminalJobId; active job=$activeJobId"
+                        "Ignoring terminal broadcast for job=$terminalJobId; " +
+                            "active job=$activeJobId"
                     )
                     DiagLog.append(
                         "Job",
-                        "UI ignored stale terminal broadcast job=$terminalJobId active job=$activeJobId"
+                        "UI ignored stale terminal broadcast " +
+                            "job=$terminalJobId active job=$activeJobId"
                     )
                     return
                 }
-                Log.i("ProcessingJob", "UI received terminal broadcast for job=$terminalJobId")
-                val finalStatus = if (cancelled) "⏹ Cancelled." else text
+
+                Log.i(
+                    "ProcessingJob",
+                    "UI received terminal broadcast for job=$terminalJobId"
+                )
+
+                val finalStatus = if (cancelled) {
+                    "⏹ Cancelled."
+                } else {
+                    text
+                }
+
                 saveCompletedRunState(finalStatus, DiagLog.get())
                 clearActiveProcessingSnapshot()
+
                 if (error && isUriAccessError(text)) {
                     pendingUri = null
                     fileCardState = CardState.PENDING
@@ -325,17 +356,36 @@ class MainActivity : Activity() {
                         browseFileButton.text = getString(R.string.browse_video_file)
                     }
                 }
+
                 setStatus(finalStatus)
                 runOnUiThread {
                     setProcessingUi(active = false)
                     logButton.visibility = View.VISIBLE
                     saveLogButton.visibility = View.VISIBLE
+
                     if (done && !error && !cancelled) {
                         donationView.visibility = View.VISIBLE
                     }
                 }
-            } else {
-                runOnUiThread { startDotAnim(text) }
+
+                return
+            }
+
+            // One rendering path for every active-job update. The service sends
+            // a preformatted display string so segmented and non-segmented jobs
+            // cannot diverge.
+            val displayText = receivedIntent.getStringExtra(
+                ProcessingService.EXTRA_PROGRESS_DISPLAY_TEXT
+            ) ?: text
+
+            runOnUiThread {
+                if (current >= 0 && total > 0) {
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.max = total
+                    progressBar.progress = current
+                }
+
+                startDotAnim(displayText)
             }
         }
     }
@@ -1015,6 +1065,15 @@ class MainActivity : Activity() {
             }
             addView(megaCutVariantSpinner, lp)
 
+            // ── Selected segment total ────────────────────────────────
+            selectedSegmentsTotalView = TextView(context).apply {
+                text = "Selected segments: 00:00:00.00"
+                textSize = 13f
+                setPadding(0, p / 2, 0, p / 4)
+                visibility = View.GONE
+            }
+            addView(selectedSegmentsTotalView, lp)
+
             // ── Individual segment rundown ─────────────────────────────
             segmentListContainer = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1077,6 +1136,7 @@ class MainActivity : Activity() {
                             putBoolean(keyUseSegmentation, checked)
                         }
                         updateCards()
+                        updateSelectedSegmentTotal()
                     }
                 }
                 idCardIcon = TextView(context).apply {
@@ -3010,6 +3070,8 @@ class MainActivity : Activity() {
                             }
                         }
                     }
+
+                    updateSelectedSegmentTotal()
                 }
             }
             dynamicCategoryCheckboxes[category] = checkbox
@@ -4164,11 +4226,33 @@ class MainActivity : Activity() {
         audioContainerSpinner.alpha = if (audioContainerEnabled) 1f else 0.35f
 
         if (radioFast.isChecked) {
+            // Disable the controls themselves. Disabling only the parent row
+            // leaves Spinners and EditTexts interactive.
+            listOf(
+                videoSectionSpinner,
+                audioSectionSpinner,
+                videoCodecSpinner,
+                audioCodecSpinner,
+                qualityModeSpinner,
+                crfSpinner,
+                cqSpinner,
+                bitrateInput,
+                bitratePresetSpinner,
+                presetSpinner,
+                frameRateSpinner,
+                resolutionSpinner,
+                audioSampleRateSpinner,
+                audioBitrateInput,
+                audioBitratePresetSpinner
+            ).forEach { control ->
+                control.isEnabled = false
+                control.alpha = 0.35f
+            }
+
             listOf(
                 row(videoSectionSpinner),
                 row(audioSectionSpinner),
                 row(videoCodecSpinner),
-                row(audioCodecSpinner),
                 row(qualityModeSpinner),
                 row(crfSpinner),
                 row(cqSpinner),
@@ -4184,6 +4268,18 @@ class MainActivity : Activity() {
                 view.isEnabled = false
                 view.alpha = 0.35f
             }
+
+            // Container remains user-selectable in Fast mode.
+            containerSpinner.isEnabled =
+                mediaLoaded && hasVideo && !processingActive
+            containerSpinner.alpha =
+                if (containerSpinner.isEnabled) 1f else 0.35f
+
+            // Audio container remains selectable for Fast audio-only jobs.
+            audioContainerSpinner.isEnabled =
+                selectedAudioOnly && mediaLoaded && hasAudio && !processingActive
+            audioContainerSpinner.alpha =
+                if (audioContainerSpinner.isEnabled) 1f else 0.35f
         }
     }
 
@@ -5180,6 +5276,67 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun updateSelectedSegmentTotal() {
+        if (!::selectedSegmentsTotalView.isInitialized ||
+            !::processWithoutSegmentsCheckBox.isInitialized
+        ) {
+            return
+        }
+
+        val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
+        val selectedSegments = currentSegments.filterIndexed { index, _ ->
+            index in selectedSegmentIndexes
+        }
+        val mediaDuration = pendingVideoInfo?.durationSec
+
+        val hasUnresolvedOpenEnded = selectedSegments.any { segment ->
+            segment.endIsOpen && mediaDuration == null
+        }
+
+        val totalSeconds = selectedSegments.sumOf { segment ->
+            val end = if (segment.endIsOpen) {
+                mediaDuration ?: segment.start
+            } else {
+                segment.end
+            }
+
+            (end - segment.start).coerceAtLeast(0.0)
+        }
+
+        selectedSegmentsTotalView.visibility =
+            if (segmentationEnabled && currentSegments.isNotEmpty()) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+
+        selectedSegmentsTotalView.text = buildString {
+            append("Selected segments: ")
+            append(formatSegmentTotal(totalSeconds))
+
+            if (hasUnresolvedOpenEnded) {
+                append(" (+open-ended)")
+            }
+        }
+    }
+
+    private fun formatSegmentTotal(totalSeconds: Double): String {
+        val totalMillis = (totalSeconds * 1000).roundToLong()
+        val hours = totalMillis / 3_600_000
+        val minutes = (totalMillis / 60_000) % 60
+        val seconds = (totalMillis / 1_000) % 60
+        val centiseconds = (totalMillis % 1_000) / 10
+
+        return String.format(
+            Locale.US,
+            "%02d:%02d:%02d.%02d",
+            hours,
+            minutes,
+            seconds,
+            centiseconds
+        )
+    }
+
     private fun renderSegmentList(
         segments: List<SponsorSegmentInfo>,
         preserveSelection: Boolean = false
@@ -5194,6 +5351,7 @@ class MainActivity : Activity() {
 
         if (segments.isEmpty()) {
             selectedSegmentIndexes.clear()
+            updateSelectedSegmentTotal()
             return
         }
 
@@ -5220,6 +5378,8 @@ class MainActivity : Activity() {
                 buildCompactSegmentRow(index, segment, index == lastIndex)
             )
         }
+
+        updateSelectedSegmentTotal()
     }
 
     private fun isSegmentRowValid(segment: SponsorSegmentInfo): Boolean {
@@ -5298,6 +5458,8 @@ class MainActivity : Activity() {
                 suppressCategoryCallbacks = true
                 syncCategoryCheckbox(segment.category)
                 suppressCategoryCallbacks = false
+
+                updateSelectedSegmentTotal()
             }
         }
         segmentCheckboxes[index] = checkbox
@@ -5839,6 +6001,7 @@ class MainActivity : Activity() {
             applyCardState(fileCardView, fileCardIcon, fileCardState)
 
             val segmentationEnabled = processWithoutSegmentsCheckBox.isChecked
+            updateSelectedSegmentTotal()
 
             if (!segmentationEnabled) {
                 val greyShape = android.graphics.drawable.GradientDrawable().apply {
