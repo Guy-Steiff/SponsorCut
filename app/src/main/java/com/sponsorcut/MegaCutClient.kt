@@ -30,6 +30,19 @@ data class MegaCutSegmentSet(
     val segments: List<SponsorSegmentInfo>
 )
 
+data class MegaCutVariant(
+    val id: String,
+    val platform: String,
+    val externalId: String,
+    val variant: Int,
+    val variantDescription: String?,
+    val segmentCount: Int,
+    val durationSeconds: Double?,
+    val segmentedDurationSeconds: Double?,
+    val status: String,
+    val createdAt: String?
+)
+
 /**
  * Client for the MegaCut Web segment-set database.
  *
@@ -37,7 +50,7 @@ data class MegaCutSegmentSet(
  * It must not become a user-editable UI field or a frontend-visible setting.
  */
 class MegaCutClient(
-    private val baseUrl: String = "http://192.168.212.86:8787/api"
+    private val baseUrl: String = "http://192.168.239.86:8787/api"
 ) {
 
     private val client = OkHttpClient()
@@ -172,6 +185,83 @@ class MegaCutClient(
 
             val body = response.body?.string() ?: return null
             return runCatching { JSONObject(body) }.getOrNull()
+        }
+    }
+
+    /**
+     * Returns every approved variant for one logical MegaCut source.
+     *
+     * MegaCut groups variants by platform plus externalId and returns them in
+     * ascending variant order. An empty array means no approved variants.
+     */
+    fun fetchMegaCutVariants(
+        platform: String,
+        externalId: String
+    ): List<MegaCutVariant> {
+        val url = baseUrl.toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addPathSegment("segment-sets")
+            ?.addPathSegment("variants")
+            ?.addQueryParameter("platform", platform)
+            ?.addQueryParameter("externalId", externalId)
+            ?.build()
+            ?: return emptyList()
+
+        val request = Request.Builder().url(url).build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(
+                        tag,
+                        "MegaCut variants failed: code=${response.code}"
+                    )
+                    return emptyList()
+                }
+
+                val body = response.body?.string() ?: return emptyList()
+                val root = runCatching { JSONArray(body) }.getOrNull()
+                    ?: return emptyList()
+
+                val variants = mutableListOf<MegaCutVariant>()
+
+                for (i in 0 until root.length()) {
+                    val item = root.optJSONObject(i) ?: continue
+                    val id = item.optString("id")
+
+                    if (id.isBlank()) continue
+
+                    variants += MegaCutVariant(
+                        id = id,
+                        platform = item.optString("platform"),
+                        externalId = item.optString("externalId"),
+                        variant = item.optInt("variant", 1),
+                        variantDescription = item
+                            .optString("variantDescription")
+                            .ifBlank { null },
+                        segmentCount = item.optInt("segmentCount", 0),
+                        durationSeconds = if (item.isNull("durationSeconds")) {
+                            null
+                        } else {
+                            item.optDouble("durationSeconds")
+                        },
+                        segmentedDurationSeconds = if (
+                            item.isNull("segmentedDurationSeconds")
+                        ) {
+                            null
+                        } else {
+                            item.optDouble("segmentedDurationSeconds")
+                        },
+                        status = item.optString("status", "approved"),
+                        createdAt = item.optString("createdAt").ifBlank { null }
+                    )
+                }
+
+                variants
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "MegaCut variants lookup failed: ${e.message}")
+            emptyList()
         }
     }
 

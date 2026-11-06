@@ -98,6 +98,7 @@ class MainActivity : Activity() {
     private lateinit var audioInputInfoView: TextView
     private lateinit var segmentCategoryContainer: LinearLayout
     private lateinit var segmentListContainer: LinearLayout
+    private lateinit var megaCutVariantSpinner: Spinner
 
     private var encoderCatalog: List<EncoderOption> = emptyList()
     private var uiVideoChoices: List<SpinnerRow<EncoderOption?>> = emptyList()
@@ -124,6 +125,10 @@ class MainActivity : Activity() {
     private val dynamicCategoryCheckboxes = mutableMapOf<String, CheckBox>()
     private val selectedSegmentIndexes = mutableSetOf<Int>()
     private val segmentCheckboxes = mutableMapOf<Int, CheckBox>()
+    private var megaCutVariants: List<MegaCutVariant> = emptyList()
+    private var selectedMegaCutVariantId: String? = null
+    private var suppressMegaCutVariantSelection = false
+    private var activeMegaCutLookup: MediaLookupResult? = null
     private var currentSegments: List<SponsorSegmentInfo> = emptyList()
     private val invalidSegmentIndexes = mutableSetOf<Int>()
     private var hasManualSegmentEdits = false
@@ -222,6 +227,8 @@ class MainActivity : Activity() {
     private var pendingUri: Uri? = null
     private var cachedSegments: List<SponsorSegmentInfo>? = null  // null=not fetched yet
     private var lastFetchedId: String = ""
+    private var mediaLookupGeneration = 0L
+    private var activeMediaLookupKey: String? = null
     private var cachedTitle: String? = null
     private var cachedAuthor: String? = null
     private var cachedFileName: String? = null
@@ -975,6 +982,38 @@ class MainActivity : Activity() {
                 setPadding(p * 2, p / 4, p, p / 4)
             }
             addView(segmentCategoryContainer, lp)
+
+            // ── MegaCut variant selector ───────────────────────────────
+            megaCutVariantSpinner = Spinner(context).apply {
+                visibility = View.GONE
+
+                onItemSelectedListener =
+                    object : AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(
+                            parent: AdapterView<*>,
+                            view: View?,
+                            position: Int,
+                            id: Long
+                        ) {
+                            if (suppressMegaCutVariantSelection) return
+
+                            val variant = megaCutVariants
+                                .getOrNull(position)
+                                ?: return
+
+                            if (variant.id == selectedMegaCutVariantId) return
+
+                            loadMegaCutVariant(variant)
+                        }
+
+                        override fun onNothingSelected(
+                            parent: AdapterView<*>?
+                        ) {
+                            // Retain the currently displayed variant.
+                        }
+                    }
+            }
+            addView(megaCutVariantSpinner, lp)
 
             // ── Individual segment rundown ─────────────────────────────
             segmentListContainer = LinearLayout(context).apply {
@@ -4642,7 +4681,8 @@ class MainActivity : Activity() {
         val title: String?,
         val author: String?,
         val platform: String,
-        val segments: List<SponsorSegmentInfo>
+        val segments: List<SponsorSegmentInfo>,
+        val variants: List<MegaCutVariant> = emptyList()
     )
 
     private fun sourceIdentifierKey(source: MediaSource): String {
@@ -4659,6 +4699,11 @@ class MainActivity : Activity() {
         val fetchKey = sourceIdentifierKey(source)
         if (!force && fetchKey == lastFetchedId) return
 
+        // Each user-initiated lookup supersedes any older background lookup.
+        // This prevents a delayed cold-open restoration result from replacing
+        // a newer successful Rumble/Spotify/MegaCut result.
+        val lookupGeneration = ++mediaLookupGeneration
+        activeMediaLookupKey = fetchKey
         lastFetchedId = fetchKey
         clearCompletedRunState()
 
@@ -4675,6 +4720,9 @@ class MainActivity : Activity() {
             idCardState = CardState.CHECKING
             updateCards()
 
+            activeMegaCutLookup = null
+            resetMegaCutVariantUi()
+
             retryButton.isEnabled = false
             retryButton.alpha = 0.5f
             retryButton.text = getString(R.string.checking_segments)
@@ -4683,13 +4731,22 @@ class MainActivity : Activity() {
         Thread {
             val result = resolveMediaSourceSegments(source)
 
-            // Non-null means platform identification succeeded.
-            // Save even when SponsorBlock/MegaCut returned no segments.
-            if (result != null) {
-                saveMediaSource(result.source)
-            }
-
             runOnUiThread {
+                // A newer lookup supersedes this one.
+                if (lookupGeneration != mediaLookupGeneration) {
+                    return@runOnUiThread
+                }
+
+                if (activeMediaLookupKey == fetchKey) {
+                    activeMediaLookupKey = null
+                }
+
+                // Non-null means platform identification succeeded.
+                // Save even when SponsorBlock/MegaCut returned no segments.
+                if (result != null) {
+                    saveMediaSource(result.source)
+                }
+
                 if (replaceLocalSourceOnSuccess) {
                     clearLocalSegmentSource()
                 }
@@ -4728,6 +4785,8 @@ class MainActivity : Activity() {
                 cachedTitle = result.title
                 cachedAuthor = result.author
                 cachedPlatform = result.platform
+                activeMegaCutLookup = result
+                applyMegaCutVariantChoices(result)
                 idCardState = if (segments.isEmpty()) CardState.ERROR else CardState.OK
 
                 if (segments.isEmpty()) {
@@ -4913,8 +4972,17 @@ class MainActivity : Activity() {
                 source
             }
 
-            val summary = megaCutClient.findSegmentSetSummary(effectiveSource)
-            val detail = summary?.optString("id")
+            // MegaCut identifies a Rumble logical source by its embed ID.
+            // For a Rumble page URL, oEmbed supplies that embed ID.
+            val variantExternalId = oEmbedExternalId ?: source.externalId
+
+            val variants = megaCutClient.fetchMegaCutVariants(
+                platform = source.platform,
+                externalId = variantExternalId
+            )
+
+            val selectedVariant = variants.firstOrNull()
+            val detail = selectedVariant?.id
                 ?.takeIf { it.isNotBlank() }
                 ?.let { megaCutClient.fetchSegmentSetDetail(it) }
 
@@ -4923,12 +4991,109 @@ class MainActivity : Activity() {
                 title = detail?.title ?: oEmbedTitle,
                 author = detail?.channelName ?: oEmbedAuthor,
                 platform = detail?.platform ?: source.platform,
-                segments = detail?.segments ?: emptyList()
+                segments = detail?.segments ?: emptyList(),
+                variants = variants
             )
         } catch (e: Exception) {
             Log.w(tag, "MegaCut source lookup failed: ${e.message}")
             null
         }
+    }
+
+    private fun resetMegaCutVariantUi() {
+        megaCutVariants = emptyList()
+        selectedMegaCutVariantId = null
+        activeMegaCutLookup = null
+        suppressMegaCutVariantSelection = true
+
+        megaCutVariantSpinner.adapter = null
+        megaCutVariantSpinner.visibility = View.GONE
+        megaCutVariantSpinner.setSelection(0, false)
+
+        megaCutVariantSpinner.post {
+            suppressMegaCutVariantSelection = false
+        }
+    }
+
+    private fun applyMegaCutVariantChoices(result: MediaLookupResult) {
+        megaCutVariants = result.variants
+        selectedMegaCutVariantId = result.variants.firstOrNull()?.id
+
+        if (result.variants.size < 2) {
+            suppressMegaCutVariantSelection = true
+            megaCutVariantSpinner.adapter = null
+            megaCutVariantSpinner.visibility = View.GONE
+            megaCutVariantSpinner.setSelection(0, false)
+
+            megaCutVariantSpinner.post {
+                suppressMegaCutVariantSelection = false
+            }
+
+            return
+        }
+
+        val labels = result.variants.map(::megaCutVariantLabel)
+
+        suppressMegaCutVariantSelection = true
+        megaCutVariantSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            labels
+        ).apply {
+            setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item
+            )
+        }
+
+        megaCutVariantSpinner.setSelection(0, false)
+        megaCutVariantSpinner.visibility = View.VISIBLE
+
+        megaCutVariantSpinner.post {
+            suppressMegaCutVariantSelection = false
+        }
+    }
+
+    private fun megaCutVariantLabel(variant: MegaCutVariant): String {
+        val segmentText = "(${variant.segmentCount} segments)"
+        val description = variant.variantDescription
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+        return if (description == null) {
+            "Variant ${variant.variant} $segmentText"
+        } else {
+            "Variant ${variant.variant} — $description $segmentText"
+        }
+    }
+
+    private fun loadMegaCutVariant(variant: MegaCutVariant) {
+        val lookup = activeMegaCutLookup ?: return
+        selectedMegaCutVariantId = variant.id
+
+        Thread {
+            val detail = megaCutClient.fetchSegmentSetDetail(variant.id)
+
+            runOnUiThread {
+                if (selectedMegaCutVariantId != variant.id) {
+                    return@runOnUiThread
+                }
+
+                if (detail == null) {
+                    statusView.text = "MegaCut variant could not be loaded."
+                    return@runOnUiThread
+                }
+
+                val segments = detail.segments
+
+                cachedSegments = segments
+                localSegments = segments
+
+                updateCategoryAvailability(segments)
+                renderSegmentList(segments)
+                updateCards()
+                applyModeRecommendation()
+            }
+        }.start()
     }
 
     private fun applySegmentUiState(

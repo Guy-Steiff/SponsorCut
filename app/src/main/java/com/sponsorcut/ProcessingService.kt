@@ -312,9 +312,85 @@ class ProcessingService : Service() {
 
                 // Force output container from FFprobe-driven policy, not input file naming.
                 val outputExt = processingPlan.outputExtension
-                val sourceBase = sourceName.substringBeforeLast('.', sourceName)
-                val baseSourceName = "$sourceBase.$outputExt"
-                val outputFileName = FileResolver.outputFileNameFromSource(baseSourceName)
+
+                val outputMethod = when (processingPlan.executionMode) {
+                    com.sponsorcut.core.model.ExecutionMode.FAST -> "fast"
+                    com.sponsorcut.core.model.ExecutionMode.HW_ACCURATE -> "hw"
+                    com.sponsorcut.core.model.ExecutionMode.SW_ACCURATE -> "sw"
+                }
+
+                val outputCatalog = EncoderCatalog.discover()
+
+                fun codecSlug(value: String?): String {
+                    val normalized = value?.trim()?.lowercase().orEmpty()
+
+                    return when {
+                        normalized.isEmpty() -> "unknown"
+                        normalized == "h.264" || normalized == "h264" -> "h264"
+                        normalized == "h.265/hevc" ||
+                                normalized == "h.265" ||
+                                normalized == "hevc" ||
+                                normalized == "h265" -> "hevc"
+                        normalized == "mpeg-4 part 2" -> "mpeg4"
+                        else -> normalized
+                            .replace(Regex("[^a-z0-9]+"), "-")
+                            .trim('-')
+                            .ifBlank { "unknown" }
+                    }
+                }
+
+                fun codecComponent(
+                    encoderName: String?,
+                    inputCodec: String?
+                ): String {
+                    val encoder = outputCatalog.firstOrNull {
+                        it.name == encoderName
+                    }
+
+                    return codecSlug(
+                        encoder?.codecFamily
+                            ?: inputCodec
+                            ?: "unknown"
+                    )
+                }
+
+                val outputCodecComponent = when {
+                    processingPlan.dropVideo -> codecComponent(
+                        encoderName = processingPlan.audioEncoder,
+                        inputCodec = videoInfo.audioCodec
+                    )
+
+                    processingPlan.dropAudio -> codecComponent(
+                        encoderName = processingPlan.videoEncoder,
+                        inputCodec = videoInfo.videoCodec
+                    )
+
+                    else -> {
+                        val videoCodec = codecComponent(
+                            encoderName = processingPlan.videoEncoder,
+                            inputCodec = videoInfo.videoCodec
+                        )
+
+                        val audioCodec = codecComponent(
+                            encoderName = processingPlan.audioEncoder,
+                            inputCodec = videoInfo.audioCodec
+                        )
+
+                        "${videoCodec}_${audioCodec}"
+                    }
+                }
+
+                val outputStage = if (removeSegments) {
+                    "clean"
+                } else {
+                    "processed"
+                }
+
+                val outputFileName = FileResolver.outputFileNameFromSource(
+                    sourceName = sourceName,
+                    descriptor = "${outputMethod}_${outputCodecComponent}",
+                    stage = outputStage
+                )
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit {
                     putString(KEY_LAST_OUTPUT_FILE_NAME, outputFileName)
                 }

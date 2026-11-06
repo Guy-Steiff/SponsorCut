@@ -314,6 +314,14 @@ object TranscodePolicy {
                 copiedAudio = canCopy
             )
 
+            // ADTS is a raw AAC stream. Use Android's canonical `.aac`
+            // filename extension; FFmpeg selects its ADTS muxer from it.
+            val outputExtension = if (container.equals("adts", ignoreCase = true)) {
+                "aac"
+            } else {
+                container
+            }
+
             return ProcessingPlan(
                 canCopyVideo = false,
                 canCopyAudio = canCopy,
@@ -322,7 +330,7 @@ object TranscodePolicy {
                 hwDecoderArgs = empty,
                 audioEncoderArgs = audioEncoding.args,
                 fallbackAudioEncoderArgs = listOf("-c:a", "aac", "-b:a", "128k"),
-                outputExtension = container,
+                outputExtension = outputExtension,
                 outputMuxer = muxerForContainer(container),
                 complexity = ComplexityTier.LOW,
                 rationale = reasons.joinToString("; ").ifBlank { "audio extraction" },

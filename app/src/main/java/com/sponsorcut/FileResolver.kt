@@ -47,12 +47,28 @@ object FileResolver {
         return uri.lastPathSegment ?: "video.mp4"
     }
 
-    fun outputFileNameFromSource(sourceName: String): String {
+    fun outputFileNameFromSource(
+        sourceName: String,
+        descriptor: String? = null,
+        stage: String = "clean"
+    ): String {
         val dot = sourceName.lastIndexOf('.')
         val base = if (dot > 0) sourceName.substring(0, dot) else sourceName
         val ext = if (dot > 0) sourceName.substring(dot) else ".mp4"
         val ts = System.currentTimeMillis() / 1000
-        return "${base}_clean_${ts}${ext}"
+
+        val descriptorPart = descriptor
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { value ->
+                value.replace(Regex("[^A-Za-z0-9_-]+"), "-")
+                    .trim('-')
+                    .takeIf { it.isNotBlank() }
+                    ?.let { "${it}_" }
+            }
+            ?: ""
+
+        return "${base}_${descriptorPart}${stage}_${ts}${ext}"
     }
 
     private fun mimeTypeFor(fileName: String): String = when {
@@ -63,6 +79,7 @@ object FileResolver {
         fileName.endsWith(".webm", ignoreCase = true) -> "video/webm"
         fileName.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
         fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+        fileName.endsWith(".adts", ignoreCase = true) -> "audio/aac"
         fileName.endsWith(".aac", ignoreCase = true) -> "audio/aac"
         fileName.endsWith(".opus", ignoreCase = true) -> "audio/ogg"
         fileName.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
