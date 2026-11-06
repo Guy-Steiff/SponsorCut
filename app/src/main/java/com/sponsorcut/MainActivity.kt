@@ -124,6 +124,8 @@ class MainActivity : Activity() {
     private var pendingSegmentFetchId: String? = null
     private var detectedCategories: List<String> = emptyList()
     private val dynamicCategoryCheckboxes = mutableMapOf<String, CheckBox>()
+
+    private var segmentEditingLocked = false
     private val selectedSegmentIndexes = mutableSetOf<Int>()
     private val segmentCheckboxes = mutableMapOf<Int, CheckBox>()
     private var megaCutVariants: List<MegaCutVariant> = emptyList()
@@ -563,6 +565,13 @@ class MainActivity : Activity() {
         handle(intent)
     }
 
+
+    private fun showSavedToast(message: String) {
+        runOnUiThread {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == pickFolderRequestCode && resultCode == RESULT_OK) {
@@ -594,7 +603,8 @@ class MainActivity : Activity() {
             try {
                 contentResolver.openOutputStream(uri)?.use { stream ->
                     stream.write(content.toByteArray())
-                }
+                
+            showSavedToast("${format} segmentation saved to home folder")}
                 setStatus(getString(R.string.segments_saved, uri))
             } catch (e: Exception) {
                 setStatus(getString(R.string.segments_save_failed, e.message))
@@ -3077,7 +3087,9 @@ class MainActivity : Activity() {
             dynamicCategoryCheckboxes[category] = checkbox
             segmentCategoryContainer.addView(checkbox)
         }
-    }
+    
+        applySegmentEditingState()
+}
 
     private fun categoryLabel(category: String): String = when (category) {
         "sponsor" -> "Sponsor"
@@ -4485,7 +4497,35 @@ class MainActivity : Activity() {
     }
 
     /** Grey out / restore all interactive controls during processing. */
+
+    private fun setSegmentEditingLocked(locked: Boolean) {
+        segmentEditingLocked = locked
+        applySegmentEditingState()
+    }
+
+    private fun applySegmentEditingState() {
+        val enabled = !segmentEditingLocked
+        val alpha = if (enabled) 1f else 0.45f
+
+        segmentListContainer.alpha = alpha
+        segmentCategoryContainer.alpha = alpha
+
+        setViewTreeEnabled(segmentListContainer, enabled)
+        setViewTreeEnabled(segmentCategoryContainer, enabled)
+    }
+
+    private fun setViewTreeEnabled(view: android.view.View, enabled: Boolean) {
+        view.isEnabled = enabled
+
+        if (view is android.view.ViewGroup) {
+            for (index in 0 until view.childCount) {
+                setViewTreeEnabled(view.getChildAt(index), enabled)
+            }
+        }
+    }
+
     private fun setProcessingUi(active: Boolean) {
+        setSegmentEditingLocked(active)
         runOnUiThread {
             // Keep screen on while processing, release when done
             if (active) {
@@ -4518,6 +4558,8 @@ class MainActivity : Activity() {
             progressBar.visibility = if (active) View.VISIBLE else View.GONE
             loadSegmentsButton.isEnabled = !active
             loadSegmentsButton.alpha = if (active) 0.5f else 1f
+            addSegmentButton?.isEnabled = !active
+            addSegmentButton?.alpha = if (active) 0.45f else 1f
             if (!active) {
                 progressBar.progress = 0
                 // Re-enable controls; retryButton state managed by updateCards()
@@ -5380,7 +5422,9 @@ class MainActivity : Activity() {
         }
 
         updateSelectedSegmentTotal()
-    }
+    
+        applySegmentEditingState()
+}
 
     private fun isSegmentRowValid(segment: SponsorSegmentInfo): Boolean {
         if (segment.endIsOpen) {
@@ -5861,7 +5905,8 @@ class MainActivity : Activity() {
                 if (documentUri != null) {
                     contentResolver.openOutputStream(documentUri)?.use { stream ->
                         stream.write(content.toByteArray())
-                    }
+                    
+            showSavedToast("${format} segmentation saved to home folder")}
 
                     setStatus("Segments saved:\n$documentUri")
                     return
@@ -6244,6 +6289,7 @@ class MainActivity : Activity() {
                 fileName = logFileName,
                 text = logText
             )
+            showSavedToast("Log saved to home folder")
             setStatus("Diagnostic log saved:\n$logFileName")
         } catch (e: Exception) {
             setStatus("Failed to save diagnostic log:\n${e.message}")
