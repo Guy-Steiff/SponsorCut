@@ -21,6 +21,11 @@ import android.text.TextWatcher
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.GridLayout
+import android.widget.ImageView
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -126,6 +131,8 @@ class MainActivity : Activity() {
     private val dynamicCategoryCheckboxes = mutableMapOf<String, CheckBox>()
 
     private var segmentEditingLocked = false
+    private var aboutArticleVisible = false
+    private var aboutBackAction: (() -> Unit)? = null
     private val selectedSegmentIndexes = mutableSetOf<Int>()
     private val segmentCheckboxes = mutableMapOf<Int, CheckBox>()
     private var megaCutVariants: List<MegaCutVariant> = emptyList()
@@ -215,14 +222,19 @@ class MainActivity : Activity() {
     private lateinit var databaseAdvancedButton: Button
     private lateinit var databaseAdvancedPanel: LinearLayout
     private lateinit var databasePlatformSpinner: Spinner
-    private lateinit var databaseVariantInput: EditText
+    private lateinit var databaseVariantSpinner: Spinner
     private lateinit var databaseDateFromInput: EditText
     private lateinit var databaseDateToInput: EditText
     private lateinit var databaseResultsContainer: LinearLayout
-    private lateinit var databaseLoadMoreButton: Button
+    private lateinit var databasePreviousPageButton: Button
+    private lateinit var databasePageLabel: TextView
+    private lateinit var databaseNextPageButton: Button
     private var databaseNextOffset = 0
     private var databaseIsLoading = false
+    private var databaseCurrentPage = 0
+    private var databaseHasNextPage = false
     private var showProcessScreen: (() -> Unit)? = null
+    private var currentDestination = 0
     private lateinit var modeHintView: TextView
     private lateinit var idCardView: LinearLayout
     private lateinit var idCardIcon: TextView
@@ -3062,8 +3074,7 @@ class MainActivity : Activity() {
         databaseSearchButton = Button(this@MainActivity).apply {
             text = "Search"
             setOnClickListener {
-                databaseNextOffset = 0
-                loadDatabasePage()
+                goToDatabasePage(0)
             }
         }
 
@@ -3121,14 +3132,21 @@ class MainActivity : Activity() {
                 }
             )
 
-            databaseVariantInput = EditText(this@MainActivity).apply {
-                hint = "Variant, e.g. 1"
-                maxLines = 1
-                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            databaseVariantSpinner = Spinner(this@MainActivity).apply {
+                adapter = ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_spinner_item,
+                    listOf("All") + (1..10).map { it.toString() }
+                ).also {
+                    it.setDropDownViewResource(
+                        android.R.layout.simple_spinner_dropdown_item
+                    )
+                }
+                setSelection(0, false)
             }
 
             addView(
-                databaseVariantInput,
+                databaseVariantSpinner,
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -3195,7 +3213,6 @@ class MainActivity : Activity() {
             databaseDateFromInput = EditText(this@MainActivity).apply {
                 hint = "YYYY-MM-DD"
                 maxLines = 1
-                setText(formatDate(fromDate))
             }
 
             val fromDateRow = LinearLayout(this@MainActivity).apply {
@@ -3208,6 +3225,20 @@ class MainActivity : Activity() {
                         0,
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         1f
+                    )
+                )
+
+                addView(
+                    Button(this@MainActivity).apply {
+                        text = "-∞"
+                        setOnClickListener {
+                            databaseDateFromInput.setText("")
+                            goToDatabasePage(0)
+                        }
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
                     )
                 )
 
@@ -3239,8 +3270,10 @@ class MainActivity : Activity() {
             databaseDateToInput = EditText(this@MainActivity).apply {
                 hint = "YYYY-MM-DD"
                 maxLines = 1
-                setText(formatDate(today))
             }
+
+            attachDateMask(databaseDateFromInput)
+            attachDateMask(databaseDateToInput)
 
             val toDateRow = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -3252,6 +3285,20 @@ class MainActivity : Activity() {
                         0,
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         1f
+                    )
+                )
+
+                addView(
+                    Button(this@MainActivity).apply {
+                        text = "Now"
+                        setOnClickListener {
+                            databaseDateToInput.setText("")
+                            goToDatabasePage(0)
+                        }
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
                     )
                 )
 
@@ -3281,12 +3328,59 @@ class MainActivity : Activity() {
             addView(databaseResultsContainer)
         }
 
-        databaseLoadMoreButton = Button(this@MainActivity).apply {
-            text = "Load more"
-            visibility = View.GONE
+        databasePreviousPageButton = Button(this@MainActivity).apply {
+            text = "← Previous"
+            isEnabled = false
             setOnClickListener {
-                loadDatabasePage()
+                goToDatabasePage(databaseCurrentPage - 1)
             }
+        }
+
+        databasePageLabel = TextView(this@MainActivity).apply {
+            text = "Page 1"
+            textSize = 14f
+            gravity = android.view.Gravity.CENTER
+            setPadding(8, 12, 8, 12)
+        }
+
+        databaseNextPageButton = Button(this@MainActivity).apply {
+            text = "Next →"
+            isEnabled = false
+            setOnClickListener {
+                goToDatabasePage(databaseCurrentPage + 1)
+            }
+        }
+
+        val databasePagerRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+
+            addView(
+                databasePreviousPageButton,
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+
+            addView(
+                databasePageLabel,
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+
+            addView(
+                databaseNextPageButton,
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
         }
 
         val databaseContainer = LinearLayout(this).apply {
@@ -3337,7 +3431,7 @@ class MainActivity : Activity() {
                 )
             )
             addView(
-                databaseLoadMoreButton,
+                databasePagerRow,
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -3345,17 +3439,132 @@ class MainActivity : Activity() {
             )
         }
 
+        // About page: lightweight, native, offline-readable articles.
         val aboutContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = android.view.Gravity.CENTER
-            visibility = View.GONE
+        }
 
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = getString(R.string.about_placeholder)
-                    textSize = 15f
-                    setPadding(32, 32, 32, 32)
-                    gravity = android.view.Gravity.CENTER
+        val aboutContent = FrameLayout(this)
+        aboutContainer.addView(
+            aboutContent,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val aboutLanding = ScrollView(this)
+        val aboutLandingContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20, 20, 20, 28)
+        }
+
+        aboutLanding.addView(aboutLandingContent)
+
+        val aboutArticlePage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
+        val aboutArticleContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20, 8, 20, 28)
+        }
+
+        val aboutArticleScroll = ScrollView(this).apply {
+            addView(aboutArticleContent)
+        }
+
+        val aboutArticleTitle = TextView(this).apply {
+            textSize = 22f
+            setPadding(16, 12, 16, 12)
+        }
+
+        fun returnToAboutLanding() {
+            aboutArticleVisible = false
+            aboutArticlePage.visibility = View.GONE
+            aboutLanding.visibility = View.VISIBLE
+        }
+
+        aboutBackAction = {
+            returnToAboutLanding()
+        }
+
+        val aboutBackButton = Button(this).apply {
+            text = "← Back to About"
+            setOnClickListener {
+                returnToAboutLanding()
+            }
+        }
+
+        aboutArticlePage.addView(
+            aboutBackButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        aboutArticlePage.addView(
+            aboutArticleTitle,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        aboutArticlePage.addView(
+            aboutArticleScroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        aboutContent.addView(
+            aboutLanding,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        aboutContent.addView(
+            aboutArticlePage,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        fun openAboutUrl(url: String) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            } catch (_: ActivityNotFoundException) {
+                Toast.makeText(
+                    this,
+                    "No application available to open this link.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+
+        fun addAboutText(
+            parent: LinearLayout,
+            text: String,
+            size: Float = 15f,
+            bold: Boolean = false
+        ) {
+            parent.addView(
+                TextView(this).apply {
+                    this.text = text
+                    textSize = size
+                    if (bold) {
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                    }
+                    setPadding(4, 9, 4, 9)
+                    setTextIsSelectable(true)
                 },
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3363,6 +3572,468 @@ class MainActivity : Activity() {
                 )
             )
         }
+
+        fun showAboutArticle(
+            title: String,
+            body: String,
+            actions: List<Pair<String, () -> Unit>> = emptyList()
+        ) {
+            aboutArticleTitle.text = title
+            aboutArticleContent.removeAllViews()
+
+            addAboutText(aboutArticleContent, body)
+
+            actions.forEach { (label, action) ->
+                aboutArticleContent.addView(
+                    Button(this).apply {
+                        text = label
+                        isAllCaps = false
+                        setOnClickListener { action() }
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        topMargin = 8
+                    }
+                )
+            }
+
+            aboutArticleVisible = true
+            aboutLanding.visibility = View.GONE
+            aboutArticlePage.visibility = View.VISIBLE
+            aboutArticleScroll.scrollTo(0, 0)
+        }
+
+        addAboutText(
+            aboutLandingContent,
+            "SponsorCut",
+            27f,
+            true
+        )
+
+        addAboutText(
+            aboutLandingContent,
+            "Offline media processing with community-powered segment removal."
+        )
+
+        val websiteLink = TextView(this).apply {
+            text = "Visit the MegaCut website"
+            textSize = 15f
+            setTextColor(0xFF64B5F6.toInt())
+            paint.isUnderlineText = true
+            setPadding(4, 14, 4, 14)
+            setOnClickListener {
+                openAboutUrl("https://megacut.onrender.com")
+            }
+        }
+
+        aboutLandingContent.addView(
+            websiteLink,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val tileIconSize = (46 * resources.displayMetrics.density).toInt()
+        val tileMinimumHeight = (118 * resources.displayMetrics.density).toInt()
+
+        fun addAboutTile(
+            title: String,
+            description: String,
+            iconResource: Int,
+            action: () -> Unit
+        ): LinearLayout {
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                setBackgroundColor(0xFF1A1A2E.toInt())
+                setPadding(16, 20, 16, 20)
+                minimumHeight = tileMinimumHeight
+                isClickable = true
+                isFocusable = true
+
+                addView(
+                    ImageView(this@MainActivity).apply {
+                        setImageResource(iconResource)
+                        setColorFilter(0xFF64B5F6.toInt())
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    },
+                    LinearLayout.LayoutParams(
+                        tileIconSize,
+                        tileIconSize
+                    ).apply {
+                        bottomMargin = 10
+                    }
+                )
+
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = title
+                        textSize = 16f
+                        setTextColor(0xFFFFFFFF.toInt())
+                        gravity = android.view.Gravity.CENTER
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = description
+                        textSize = 12f
+                        setTextColor(0xFFCCCCCC.toInt())
+                        gravity = android.view.Gravity.CENTER
+                        setPadding(0, 4, 0, 0)
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+
+                setOnClickListener {
+                    action()
+                }
+            }
+        }
+
+        fun addAboutTileRow(
+            firstTile: LinearLayout?,
+            secondTile: LinearLayout?
+        ) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+
+            fun addTile(tile: LinearLayout?) {
+                val params = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                ).apply {
+                    setMargins(5, 5, 5, 5)
+                }
+
+                if (tile == null) {
+                    row.addView(
+                        View(this),
+                        params
+                    )
+                } else {
+                    row.addView(
+                        tile,
+                        params
+                    )
+                }
+            }
+
+            addTile(firstTile)
+            addTile(secondTile)
+
+            aboutLandingContent.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        val quickStartTile = addAboutTile(
+            "Quick Start",
+            "A step-by-step guide to using SponsorCut.",
+            R.drawable.ic_about_quick_start
+        ) {
+            showAboutArticle(
+                "Quick Start",
+                """
+1. Pick a default results folder
+
+Choose the folder where SponsorCut should save completed media files.
+
+2. Share a YouTube link with segments
+
+Go to a YouTube video that has SponsorBlock segments, then share its link with SponsorCut.
+
+The segments requirement is now satisfied.
+
+3. Provide the downloaded media file
+
+Browse to your downloaded YouTube media file, or share it from your file manager into SponsorCut.
+
+Both the segments and media requirements are now satisfied.
+
+4. Choose a cutting mode
+
+Fast mode
+
+Done in seconds, but may miss precise cuts by up to two seconds. Nearly perfect for audio-only files and very good for video, although a little unwanted segment noise may remain around cuts.
+
+HW-Accurate
+
+Lengthy processing using the device's hardware codec. Produces precise cuts without unwanted segment noise.
+
+SW-Accurate
+
+Lengthy processing using the CPU. Produces precise cuts without unwanted segment noise, although fewer codecs may be available.
+
+5. Press “Process with this ID”
+
+Once the YouTube ID, segments, and media file are ready, press Process with this ID to begin.
+
+6. Wait for the completion notification
+
+SponsorCut processes the file in the background. Wait for the completion notification before opening or moving the output file.
+
+7. Enjoy your segment-free media
+
+Open, share, or move the completed media from your selected results folder.
+                """.trimIndent()
+            )
+        }
+
+        val supportTile = addAboutTile(
+            "☕ Support development",
+            "Donations and other ways to support the project.",
+            R.drawable.ic_about_support
+        ) {
+            val btcAddress = "bc1qqz6dxwc38lrhmp6u9880alkvretwv2d6ds5had"
+            val btcUri = "bitcoin:$btcAddress?label=SponsorCut%20Donation"
+
+            showAboutArticle(
+                "Support development",
+                """
+SponsorCut and MegaCut are independently maintained open-source projects.
+
+If these tools are useful to you, you can support ongoing development through Buy Me a Coffee or Bitcoin.
+
+Sharing SponsorCut, reporting issues, contributing segment files, or integrating MegaCut Core are equally valuable ways to support the project.
+                """.trimIndent(),
+                listOf(
+                    getString(R.string.buy_me_a_coffee) to {
+                        openAboutUrl("https://buymeacoffee.com/steiff")
+                    },
+                    getString(R.string.donate_with_bitcoin) to {
+                        try {
+                            startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    btcUri.toUri()
+                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (_: ActivityNotFoundException) {
+                            val clipboard = getSystemService(CLIPBOARD_SERVICE)
+                                    as ClipboardManager
+
+                            clipboard.setPrimaryClip(
+                                ClipData.newPlainText(
+                                    getString(R.string.bitcoin_address_copied),
+                                    btcAddress
+                                )
+                            )
+
+                            Toast.makeText(
+                                this,
+                                getString(R.string.bitcoin_wallet_missing_copied),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                )
+            )
+
+            aboutArticleContent.addView(
+                TextView(this).apply {
+                    text = getString(R.string.bitcoin_address, btcAddress)
+                    textSize = 11f
+                    setTextColor(0xFFAAAAAA.toInt())
+                    setTextIsSelectable(true)
+                    setPadding(0, 12, 0, 0)
+                    typeface = android.graphics.Typeface.MONOSPACE
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        val developerTile = addAboutTile(
+            "About the Developer",
+            "Background, contact, and professional availability.",
+            R.drawable.ic_about_developer
+        ) {
+            showAboutArticle(
+                "About the Developer",
+                """
+Last updated 4 November 2026
+
+Guy Steiff is an electrical engineer with around nine years of industrial experience and the sole developer of MegaCut and SponsorCut.
+
+He builds offline, privacy-respecting media-processing tools, including SponsorCut for removing selected sponsor segments from local video and audio, and MegaCut Core for FFmpeg-oriented integration into other applications and infrastructure.
+
+He is available for remote and flexible work involving:
+
+• Signal processing
+• ADC/DAC characterization
+• High-speed I/O measurement
+• Test automation
+• Media encoding and transcoding
+• FFmpeg integration
+• MegaCut Core integration
+
+Contact:
+guy.steiff-megacuthire@bytz.me
+                """.trimIndent(),
+                listOf(
+                    "Contact the developer" to {
+                        openAboutUrl(
+                            "mailto:guy.steiff-megacuthire@bytz.me"
+                        )
+                    },
+                    getString(R.string.buy_me_a_coffee) to {
+                        openAboutUrl("https://buymeacoffee.com/steiff")
+                    }
+                )
+            )
+        }
+
+        val licenseTile = addAboutTile(
+            "License",
+            "Licensing information for SponsorCut and MegaCut.",
+            R.drawable.ic_about_license
+        ) {
+            showAboutArticle(
+                "License",
+                """
+Last updated 4 November 2026
+
+IMPORTANT: SponsorCut releases have different historical licenses.
+
+SponsorCut 1.0.3 and earlier
+
+These releases are distributed under the MIT License. Their original licensing remains unchanged.
+
+SponsorCut 1.1.0 and subsequent releases
+
+These releases are licensed under the GNU General Public License version 3.0 or later (GPL-3.0-or-later).
+
+You may use, study, modify, and redistribute the GPL-licensed application under the terms of that license.
+
+MegaCut
+
+The future MegaCut end-user application is intended to use GPL-3.0-or-later.
+
+MegaCut Core
+
+The reusable local-first media-processing platform is intended to use GPL-3.0-or-later.
+
+MegaCut Web
+
+The web platform, including its server-side code, APIs, editorial infrastructure, and database schema, is intended to use AGPL-3.0-or-later.
+
+FFmpeg and media libraries
+
+FFmpeg, FFmpegKit, FFmpegKitNext, and other third-party components retain their own licenses. The obligations applicable to a distributed build depend on its actual components and configuration.
+
+Commercial integration
+
+Closed-source commercial integration opportunities are welcome through a separate specialized agreement.
+
+Such an agreement cannot override the license obligations of GPL-covered SponsorCut or MegaCut code, AGPL-covered MegaCut Web code, or separately licensed third-party components.
+
+This page is an overview, not a replacement for the complete license texts accompanying a particular release.
+                """.trimIndent(),
+                listOf(
+                    "GNU GPL version 3" to {
+                        openAboutUrl("https://www.gnu.org/licenses/gpl-3.0.html")
+                    }
+                )
+            )
+        }
+
+        val thirdPartyTile = addAboutTile(
+            "Third-Party Notices",
+            "Libraries, external services, and their licenses.",
+            R.drawable.ic_about_notices
+        ) {
+            showAboutArticle(
+                "Third-Party Notices",
+                """
+Last updated 4 November 2026
+
+FFmpeg and FFmpegKit
+
+SponsorCut uses FFmpeg n6.0 for local video and audio processing through FFmpegKit.
+
+The pinned FFmpegKit LTS source revision is:
+
+efd648489598efdc65e2e2f06ae69e065e257077
+
+The Android build configuration uses:
+
+--lts
+--enable-android-media-codec
+--enable-android-zlib
+--disable-x86
+--disable-arm-v7a
+--disable-arm-v7a-neon
+
+This build does not enable GPL or nonfree components.
+
+The FFmpegKit distribution also includes OpenSSL, cpu-features, and GMP. Each component retains its own copyright notices and license terms.
+
+SponsorBlock
+
+SponsorCut uses the external SponsorBlock community API and database to retrieve community-submitted segment information for supported YouTube media.
+
+SponsorCut does not incorporate SponsorBlock source code.
+
+PostgreSQL and Neon
+
+MegaCut's community segment database for Rumble and Spotify uses PostgreSQL hosted by Neon.
+
+These are server-side components of MegaCut Web, not libraries distributed inside the SponsorCut Android application.
+
+Other software
+
+The wider MegaCut ecosystem also uses or plans to use Android MediaCodec, React, React Router, Vite, Tailwind CSS, and Frappe Gantt.
+
+Each third-party project retains its own licensing terms.
+
+License notices and source availability
+
+Complete license texts, copyright notices, and applicable source materials accompany or are referenced by the relevant project releases and build materials.
+
+This summary does not replace those notices or the license terms of individual components.
+                """.trimIndent()
+            )
+        }
+
+        addAboutTileRow(
+            quickStartTile,
+            supportTile
+        )
+
+        addAboutTileRow(
+            developerTile,
+            licenseTile
+        )
+
+        aboutLandingContent.addView(
+            thirdPartyTile,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(5, 5, 5, 5)
+            }
+        )
 
         val processButton = Button(this).apply {
             text = getString(R.string.nav_process)
@@ -3384,28 +4055,120 @@ class MainActivity : Activity() {
 
         val navigationButtons = listOf(processButton, databaseButton, aboutButton)
 
-        fun selectDestination(selected: Int) {
-            scroll.visibility = if (selected == 0) View.VISIBLE else View.GONE
-            databaseContainer.visibility = if (selected == 1) View.VISIBLE else View.GONE
-            aboutContainer.visibility = if (selected == 2) View.VISIBLE else View.GONE
+        // Keep all three existing screens alive inside the pager.
+        // No screen contents are reconstructed during navigation.
+        val pageViews = listOf(
+            scroll,
+            databaseContainer,
+            aboutContainer
+        )
 
+        pageViews.forEach {
+            it.visibility = View.VISIBLE
+        }
+
+        val pager = ViewPager2(this).apply {
+            orientation = ViewPager2.ORIENTATION_HORIZONTAL
+
+            adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+                override fun getItemCount(): Int = pageViews.size
+
+                override fun onCreateViewHolder(
+                    parent: ViewGroup,
+                    viewType: Int
+                ): RecyclerView.ViewHolder {
+                    val frame = FrameLayout(parent.context)
+
+                    frame.layoutParams = RecyclerView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+
+                    return object : RecyclerView.ViewHolder(frame) {}
+                }
+
+                override fun onBindViewHolder(
+                    holder: RecyclerView.ViewHolder,
+                    position: Int
+                ) {
+                    val page = pageViews[position]
+                    val container = holder.itemView as FrameLayout
+
+                    // Safely transfer the existing page view into
+                    // its pager container without recreating it.
+                    container.removeAllViews()
+                    (page.parent as? ViewGroup)?.removeView(page)
+
+                    container.addView(
+                        page,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                    )
+                }
+            }
+
+            // Three pages total: retain both neighbouring pages.
+            offscreenPageLimit = 2
+        }
+
+        fun updateNavigationButtons(selected: Int) {
             navigationButtons.forEachIndexed { index, button ->
                 button.setBackgroundColor(
-                    if (index == selected) 0xFF2E7D32.toInt() else 0xFF1A1A2E.toInt()
+                    if (index == selected) 0xFF2E7D32.toInt()
+                    else 0xFF1A1A2E.toInt()
                 )
             }
         }
 
-        showProcessScreen = { selectDestination(0) }
+        fun selectDestination(selected: Int) {
+            val destination = selected.coerceIn(0, 2)
 
-        processButton.setOnClickListener { selectDestination(0) }
+            updateNavigationButtons(destination)
+
+            if (destination == currentDestination) {
+                if (destination == 1 && databaseNextOffset == 0) {
+                    loadDatabasePage()
+                }
+                return
+            }
+
+            // ViewPager2 handles the actual smooth transition.
+            pager.setCurrentItem(destination, true)
+        }
+
+        pager.registerOnPageChangeCallback(
+            object : ViewPager2.OnPageChangeCallback() {
+
+                override fun onPageSelected(position: Int) {
+                    currentDestination = position
+                    updateNavigationButtons(position)
+
+                    // Preserve existing database lazy loading.
+                    if (position == 1 && databaseNextOffset == 0) {
+                        loadDatabasePage()
+                    }
+                }
+            }
+        )
+
+        showProcessScreen = {
+            selectDestination(0)
+        }
+
+        processButton.setOnClickListener {
+            selectDestination(0)
+        }
+
         databaseButton.setOnClickListener {
             selectDestination(1)
-            if (databaseNextOffset == 0) {
-                loadDatabasePage()
-            }
         }
-        aboutButton.setOnClickListener { selectDestination(2) }
+
+        aboutButton.setOnClickListener {
+            selectDestination(2)
+        }
 
         val bottomNavigation = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -3423,17 +4186,18 @@ class MainActivity : Activity() {
             )
         }
 
-        val screenLayoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            0,
-            1f
-        )
-
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(scroll, screenLayoutParams)
-            addView(databaseContainer, screenLayoutParams)
-            addView(aboutContainer, screenLayoutParams)
+
+            addView(
+                pager,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            )
+
             addView(
                 bottomNavigation,
                 LinearLayout.LayoutParams(
@@ -3443,8 +4207,23 @@ class MainActivity : Activity() {
             )
         }
 
-        selectDestination(0)
+        currentDestination = 0
+        updateNavigationButtons(0)
+
         setContentView(rootLayout)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        val backAction = aboutBackAction
+
+        if (aboutArticleVisible && backAction != null) {
+            aboutArticleVisible = false
+            backAction()
+            return
+        }
+
+        super.onBackPressed()
     }
 
     private var pendingVideoInfo: FFProbeInspector.VideoInfo? = null
@@ -5429,18 +6208,131 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun attachDateMask(editor: EditText) {
+        var suppressUpdate = false
+        var targetDigitIndex = 0
+
+        fun formattedDate(digits: String): String {
+            if (digits.isEmpty()) return ""
+
+            val padded = digits.padEnd(8, '0')
+
+            return "${padded.substring(0, 4)}-" +
+                    "${padded.substring(4, 6)}-" +
+                    padded.substring(6, 8)
+        }
+
+        fun displayPosition(digitIndex: Int): Int {
+            return when {
+                digitIndex <= 3 -> digitIndex
+                digitIndex <= 5 -> digitIndex + 1
+                else -> digitIndex + 2
+            }.coerceIn(0, 10)
+        }
+
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(
+                s: CharSequence?,
+                start: Int,
+                count: Int,
+                after: Int
+            ) {
+                val selection = editor.selectionStart.coerceAtLeast(0)
+                val text = s?.toString().orEmpty()
+                val digitsBefore = text.take(selection).count { it.isDigit() }
+
+                targetDigitIndex = if (after > 0) {
+                    digitsBefore + after
+                } else {
+                    digitsBefore
+                }
+            }
+
+            override fun onTextChanged(
+                s: CharSequence?,
+                start: Int,
+                before: Int,
+                count: Int
+            ) {}
+
+            override fun afterTextChanged(editable: Editable?) {
+                if (suppressUpdate) return
+
+                val current = editable ?: return
+                val digits = current.toString()
+                    .filter { it.isDigit() }
+                    .take(8)
+                val formatted = formattedDate(digits)
+
+                if (formatted != current.toString()) {
+                    suppressUpdate = true
+                    current.replace(0, current.length, formatted)
+                    suppressUpdate = false
+                }
+
+                val cursor = if (digits.isEmpty()) {
+                    0
+                } else {
+                    displayPosition(
+                        targetDigitIndex.coerceIn(0, digits.length)
+                    )
+                }
+
+                editor.setSelection(cursor)
+            }
+        }
+
+        editor.apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            isSingleLine = true
+
+            val existingDigits = text.toString()
+                .filter { it.isDigit() }
+                .take(8)
+
+            setText(formattedDate(existingDigits))
+            addTextChangedListener(watcher)
+        }
+    }
+
+    private fun isValidDatabaseDate(value: String): Boolean {
+        return try {
+            val formatter = java.text.SimpleDateFormat(
+                "yyyy-MM-dd",
+                Locale.US
+            ).apply {
+                isLenient = false
+            }
+
+            formatter.parse(value)?.let {
+                formatter.format(it) == value
+            } ?: false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun goToDatabasePage(page: Int) {
+        val targetPage = page.coerceAtLeast(0)
+
+        databaseCurrentPage = targetPage
+        databaseNextOffset = targetPage * 20
+
+        loadDatabasePage()
+    }
+
     private fun loadDatabasePage() {
         if (databaseIsLoading) return
 
         databaseIsLoading = true
-        databaseLoadMoreButton.isEnabled = false
+        databasePreviousPageButton.isEnabled = false
+        databaseNextPageButton.isEnabled = false
 
         val requestedOffset = databaseNextOffset
 
-        if (requestedOffset == 0) {
-            databaseResultsContainer.removeAllViews()
-            databaseStatusView.text = "Loading MegaCut entries…"
-        }
+        databaseResultsContainer.removeAllViews()
+        databaseStatusView.text = "Loading MegaCut entries…"
 
         val searchQuery = databaseSearchInput.text?.toString()?.trim().orEmpty()
 
@@ -5450,9 +6342,8 @@ class MainActivity : Activity() {
             else -> ""
         }
 
-        val variantChoice = databaseVariantInput.text?.toString()
-            ?.trim()
-            ?.toIntOrNull()
+        val variantChoice = databaseVariantSpinner.selectedItemPosition
+            .takeIf { it > 0 }
 
         val dateFromChoice = databaseDateFromInput.text?.toString()
             ?.trim()
@@ -5461,6 +6352,24 @@ class MainActivity : Activity() {
         val dateToChoice = databaseDateToInput.text?.toString()
             ?.trim()
             ?.ifBlank { null }
+
+        if (
+            (dateFromChoice != null && !isValidDatabaseDate(dateFromChoice)) ||
+            (dateToChoice != null && !isValidDatabaseDate(dateToChoice)) ||
+            (dateFromChoice != null && dateToChoice != null &&
+                dateFromChoice > dateToChoice)
+        ) {
+            Toast.makeText(
+                this,
+                "Please enter valid submission dates and ensure From is not after To.",
+                Toast.LENGTH_LONG
+            ).show()
+
+            databaseIsLoading = false
+            databasePreviousPageButton.isEnabled = databaseCurrentPage > 0
+            databaseNextPageButton.isEnabled = databaseHasNextPage
+            return
+        }
 
         Thread {
             val response = megaCutClient.fetchRecentSegmentSummaries(
@@ -5483,7 +6392,8 @@ class MainActivity : Activity() {
                             "Could not load MegaCut Web entries.\n\nCheck that the local MegaCut API is running."
                     }
 
-                    databaseLoadMoreButton.isEnabled = true
+                    databasePreviousPageButton.isEnabled = databaseCurrentPage > 0
+                    databaseNextPageButton.isEnabled = databaseHasNextPage
                     return@runOnUiThread
                 }
 
@@ -5633,22 +6543,23 @@ class MainActivity : Activity() {
                     )
                 }
 
-                databaseNextOffset = requestedOffset + count
+                databaseCurrentPage = requestedOffset / 20
+                databaseHasNextPage = count == 20
+
+                databasePageLabel.text = "Page ${databaseCurrentPage + 1}"
+                databasePreviousPageButton.isEnabled = databaseCurrentPage > 0
+                databaseNextPageButton.isEnabled = databaseHasNextPage
 
                 databaseStatusView.text = when {
                     databaseResultsContainer.childCount == 0 ->
                         "No approved MegaCut entries found."
 
-                    count < 20 ->
-                        "Loaded ${databaseResultsContainer.childCount} entr${if (databaseResultsContainer.childCount == 1) "y" else "ies"}. No more results."
+                    databaseHasNextPage ->
+                        "Page ${databaseCurrentPage + 1} — showing the latest ${databaseResultsContainer.childCount} entries."
 
                     else ->
-                        "Loaded ${databaseResultsContainer.childCount} entr${if (databaseResultsContainer.childCount == 1) "y" else "ies"}."
+                        "Page ${databaseCurrentPage + 1} — showing ${databaseResultsContainer.childCount} entr${if (databaseResultsContainer.childCount == 1) "y" else "ies"}. No more results."
                 }
-
-                databaseLoadMoreButton.visibility =
-                    if (count < 20) View.GONE else View.VISIBLE
-                databaseLoadMoreButton.isEnabled = true
             }
         }.start()
     }

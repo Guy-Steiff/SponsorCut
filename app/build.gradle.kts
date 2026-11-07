@@ -11,8 +11,8 @@ android {
         applicationId = "com.sponsorcut"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.1.0"
 
         ndkVersion = "30.0.14904198"
     }
@@ -73,6 +73,7 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
