@@ -50,11 +50,20 @@ object FileResolver {
     fun outputFileNameFromSource(
         sourceName: String,
         descriptor: String? = null,
-        stage: String = "clean"
+        stage: String = "clean",
+        outputExtension: String? = null
     ): String {
         val dot = sourceName.lastIndexOf('.')
         val base = if (dot > 0) sourceName.substring(0, dot) else sourceName
-        val ext = if (dot > 0) sourceName.substring(dot) else ".mp4"
+
+        val normalizedOutputExtension = outputExtension
+            ?.trim()
+            ?.removePrefix(".")
+            ?.takeIf { it.isNotBlank() }
+
+        val ext = normalizedOutputExtension
+            ?.let { ".$it" }
+            ?: if (dot > 0) sourceName.substring(dot) else ".mp4"
         val ts = System.currentTimeMillis() / 1000
 
         val descriptorPart = descriptor

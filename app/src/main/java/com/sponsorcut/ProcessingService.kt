@@ -392,7 +392,8 @@ class ProcessingService : Service() {
                 val outputFileName = FileResolver.outputFileNameFromSource(
                     sourceName = sourceName,
                     descriptor = "${outputMethod}_${outputCodecComponent}",
-                    stage = outputStage
+                    stage = outputStage,
+                    outputExtension = outputExt
                 )
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit {
                     putString(KEY_LAST_OUTPUT_FILE_NAME, outputFileName)

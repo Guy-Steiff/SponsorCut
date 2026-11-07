@@ -129,4 +129,9 @@
     <string name="segment_file_loaded_ignored">Segment file loaded but ignored: %1$s</string>
     <string name="animated_status">%1$s\n\n%2$s %3$s</string>
     <string name="background_processing">Processing in background…</string>
+    <string name="nav_process">Process</string>
+    <string name="nav_database">Database</string>
+    <string name="nav_about">About</string>
+    <string name="database_placeholder">MegaCut Web database search will appear here.</string>
+    <string name="about_placeholder">SponsorCut information will appear here.</string>
 </resources>

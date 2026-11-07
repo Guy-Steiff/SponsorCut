@@ -209,6 +209,20 @@ class MainActivity : Activity() {
     private lateinit var saveLogButton: Button
     private lateinit var logView: TextView
     private lateinit var donationView: LinearLayout
+    private lateinit var databaseStatusView: TextView
+    private lateinit var databaseSearchInput: EditText
+    private lateinit var databaseSearchButton: Button
+    private lateinit var databaseAdvancedButton: Button
+    private lateinit var databaseAdvancedPanel: LinearLayout
+    private lateinit var databasePlatformSpinner: Spinner
+    private lateinit var databaseVariantInput: EditText
+    private lateinit var databaseDateFromInput: EditText
+    private lateinit var databaseDateToInput: EditText
+    private lateinit var databaseResultsContainer: LinearLayout
+    private lateinit var databaseLoadMoreButton: Button
+    private var databaseNextOffset = 0
+    private var databaseIsLoading = false
+    private var showProcessScreen: (() -> Unit)? = null
     private lateinit var modeHintView: TextView
     private lateinit var idCardView: LinearLayout
     private lateinit var idCardIcon: TextView
@@ -646,6 +660,11 @@ class MainActivity : Activity() {
 
         if (requestCode == browseFileRequestCode && resultCode == RESULT_OK) {
             val fileUri = data?.data ?: return
+
+            // Returning from the file picker must always reveal the Process
+            // screen, even if the user was on Database or About.
+            showProcessScreen?.invoke()
+
             try {
                 contentResolver.takePersistableUriPermission(
                     fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -3029,7 +3048,403 @@ class MainActivity : Activity() {
             addView(scrollContent)
         }
 
-        setContentView(scroll)
+        databaseStatusView = TextView(this@MainActivity).apply {
+            textSize = 14f
+            setPadding(16, 16, 16, 8)
+        }
+
+        databaseSearchInput = EditText(this@MainActivity).apply {
+            hint = "Search MegaCut entries"
+            maxLines = 1
+            setPadding(16, 12, 16, 12)
+        }
+
+        databaseSearchButton = Button(this@MainActivity).apply {
+            text = "Search"
+            setOnClickListener {
+                databaseNextOffset = 0
+                loadDatabasePage()
+            }
+        }
+
+        databaseAdvancedButton = Button(this@MainActivity).apply {
+            text = "Advanced search"
+            setOnClickListener {
+                databaseAdvancedPanel.visibility =
+                    if (databaseAdvancedPanel.visibility == View.VISIBLE) {
+                        View.GONE
+                    } else {
+                        View.VISIBLE
+                    }
+            }
+        }
+
+        databaseAdvancedPanel = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(16, 8, 16, 8)
+            setBackgroundColor(0xFF22223A.toInt())
+
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Platform"
+                    textSize = 12f
+                    setTextColor(0xFFCCCCCC.toInt())
+                }
+            )
+
+            databasePlatformSpinner = Spinner(this@MainActivity).apply {
+                adapter = ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_spinner_item,
+                    listOf("Any", "Rumble", "Spotify")
+                ).also {
+                    it.setDropDownViewResource(
+                        android.R.layout.simple_spinner_dropdown_item
+                    )
+                }
+            }
+
+            addView(
+                databasePlatformSpinner,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Variant"
+                    textSize = 12f
+                    setTextColor(0xFFCCCCCC.toInt())
+                }
+            )
+
+            databaseVariantInput = EditText(this@MainActivity).apply {
+                hint = "Variant, e.g. 1"
+                maxLines = 1
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            }
+
+            addView(
+                databaseVariantInput,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+
+            fun datePickerButton(field: EditText): Button {
+                return Button(this@MainActivity).apply {
+                    text = "📅"
+                    setOnClickListener {
+                        val parts = field.text?.toString()?.split("-")
+                        val today = java.util.Calendar.getInstance()
+
+                        val year = parts?.getOrNull(0)?.toIntOrNull()
+                            ?: today.get(java.util.Calendar.YEAR)
+                        val month = parts?.getOrNull(1)?.toIntOrNull()?.minus(1)
+                            ?: today.get(java.util.Calendar.MONTH)
+                        val day = parts?.getOrNull(2)?.toIntOrNull()
+                            ?: today.get(java.util.Calendar.DAY_OF_MONTH)
+
+                        android.app.DatePickerDialog(
+                            this@MainActivity,
+                            { _, selectedYear, selectedMonth, selectedDay ->
+                                field.setText(
+                                    String.format(
+                                        java.util.Locale.US,
+                                        "%04d-%02d-%02d",
+                                        selectedYear,
+                                        selectedMonth + 1,
+                                        selectedDay
+                                    )
+                                )
+                            },
+                            year,
+                            month,
+                            day
+                        ).show()
+                    }
+                }
+            }
+
+            val today = java.util.Calendar.getInstance()
+            val fromDate = today.clone() as java.util.Calendar
+            fromDate.add(java.util.Calendar.DAY_OF_YEAR, -2)
+
+            fun formatDate(calendar: java.util.Calendar): String {
+                return String.format(
+                    java.util.Locale.US,
+                    "%04d-%02d-%02d",
+                    calendar.get(java.util.Calendar.YEAR),
+                    calendar.get(java.util.Calendar.MONTH) + 1,
+                    calendar.get(java.util.Calendar.DAY_OF_MONTH)
+                )
+            }
+
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Submission date from"
+                    textSize = 12f
+                    setTextColor(0xFFCCCCCC.toInt())
+                }
+            )
+
+            databaseDateFromInput = EditText(this@MainActivity).apply {
+                hint = "YYYY-MM-DD"
+                maxLines = 1
+                setText(formatDate(fromDate))
+            }
+
+            val fromDateRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+
+                addView(
+                    databaseDateFromInput,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f
+                    )
+                )
+
+                addView(
+                    datePickerButton(databaseDateFromInput),
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+
+            addView(
+                fromDateRow,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Submission date to"
+                    textSize = 12f
+                    setTextColor(0xFFCCCCCC.toInt())
+                }
+            )
+
+            databaseDateToInput = EditText(this@MainActivity).apply {
+                hint = "YYYY-MM-DD"
+                maxLines = 1
+                setText(formatDate(today))
+            }
+
+            val toDateRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+
+                addView(
+                    databaseDateToInput,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f
+                    )
+                )
+
+                addView(
+                    datePickerButton(databaseDateToInput),
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+
+            addView(
+                toDateRow,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        databaseResultsContainer = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        val databaseScroll = ScrollView(this@MainActivity).apply {
+            addView(databaseResultsContainer)
+        }
+
+        databaseLoadMoreButton = Button(this@MainActivity).apply {
+            text = "Load more"
+            visibility = View.GONE
+            setOnClickListener {
+                loadDatabasePage()
+            }
+        }
+
+        val databaseContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+
+            addView(
+                databaseStatusView,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            addView(
+                databaseSearchInput,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            addView(
+                databaseSearchButton,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            addView(
+                databaseAdvancedButton,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            addView(
+                databaseAdvancedPanel,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            addView(
+                databaseScroll,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            )
+            addView(
+                databaseLoadMoreButton,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        val aboutContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            visibility = View.GONE
+
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = getString(R.string.about_placeholder)
+                    textSize = 15f
+                    setPadding(32, 32, 32, 32)
+                    gravity = android.view.Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        val processButton = Button(this).apply {
+            text = getString(R.string.nav_process)
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF2E7D32.toInt())
+        }
+
+        val databaseButton = Button(this).apply {
+            text = getString(R.string.nav_database)
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF1A1A2E.toInt())
+        }
+
+        val aboutButton = Button(this).apply {
+            text = getString(R.string.nav_about)
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF1A1A2E.toInt())
+        }
+
+        val navigationButtons = listOf(processButton, databaseButton, aboutButton)
+
+        fun selectDestination(selected: Int) {
+            scroll.visibility = if (selected == 0) View.VISIBLE else View.GONE
+            databaseContainer.visibility = if (selected == 1) View.VISIBLE else View.GONE
+            aboutContainer.visibility = if (selected == 2) View.VISIBLE else View.GONE
+
+            navigationButtons.forEachIndexed { index, button ->
+                button.setBackgroundColor(
+                    if (index == selected) 0xFF2E7D32.toInt() else 0xFF1A1A2E.toInt()
+                )
+            }
+        }
+
+        showProcessScreen = { selectDestination(0) }
+
+        processButton.setOnClickListener { selectDestination(0) }
+        databaseButton.setOnClickListener {
+            selectDestination(1)
+            if (databaseNextOffset == 0) {
+                loadDatabasePage()
+            }
+        }
+        aboutButton.setOnClickListener { selectDestination(2) }
+
+        val bottomNavigation = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0xFF1A1A2E.toInt())
+        }
+
+        navigationButtons.forEach { button ->
+            bottomNavigation.addView(
+                button,
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+        }
+
+        val screenLayoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        )
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(scroll, screenLayoutParams)
+            addView(databaseContainer, screenLayoutParams)
+            addView(aboutContainer, screenLayoutParams)
+            addView(
+                bottomNavigation,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        selectDestination(0)
+        setContentView(rootLayout)
     }
 
     private var pendingVideoInfo: FFProbeInspector.VideoInfo? = null
@@ -3701,6 +4116,10 @@ class MainActivity : Activity() {
 
     private fun handleShareIntent(intent: Intent) {
         if (rejectIfBusy()) return
+
+        // A share intent must always return the user to the Process screen,
+        // even if the app was previously showing Database or About.
+        showProcessScreen?.invoke()
         Log.d(
             tag, "handleShareIntent: action=${intent.action} type=${intent.type} " +
                     "EXTRA_TEXT=${intent.getStringExtra(Intent.EXTRA_TEXT)?.take(80)} " +
@@ -3764,8 +4183,13 @@ class MainActivity : Activity() {
                 val platformLabel = parsedSource.platform
                     .replaceFirstChar { it.uppercase() }
 
+                val capturedIdentifierLabel = when (parsedSource.identifierKind) {
+                    "rumble-page" -> "Rumble page"
+                    else -> platformLabel
+                }
+
                 setStatus(
-                    "✓ $platformLabel source captured: ${parsedSource.externalId}\n\n" +
+                    "✓ $capturedIdentifierLabel captured: ${parsedSource.externalId}\n\n" +
                             "Now browse to your downloaded media file."
                 )
 
@@ -3840,6 +4264,9 @@ class MainActivity : Activity() {
         setStatus("Open-with intent received.\nURI: ${intent.data}\nType: ${intent.type}")
         if (rejectIfBusy()) return
 
+        // An Open With intent must always reveal the Process screen.
+        showProcessScreen?.invoke()
+
         val uri = intent.data ?: run {
             setStatus("Open-with intent received, but no file URI was provided.")
             return
@@ -3860,6 +4287,21 @@ class MainActivity : Activity() {
         }
 
         saveFileUri(uri, fileName)
+
+        // Open With replaces the status text with file-selection information.
+        // If a segment source is already loaded, restore its metadata and
+        // segment summary without refetching or clearing the active segments.
+        if (cachedSegments != null) {
+            applySegmentUiState(
+                videoId = lastFetchedId,
+                segments = cachedSegments,
+                title = cachedTitle,
+                author = cachedAuthor,
+                platform = cachedPlatform,
+                preserveSelection = true
+            )
+        }
+
         updateCards()
     }
 
@@ -3912,6 +4354,7 @@ class MainActivity : Activity() {
 
         cachedSegments = null
         currentSegments = emptyList()
+        invalidSegmentIndexes.clear()
         hasManualSegmentEdits = false
         selectedSegmentIndexes.clear()
         segmentCheckboxes.clear()
@@ -4925,12 +5368,17 @@ class MainActivity : Activity() {
                 cachedPlatform = result.platform
                 activeMegaCutLookup = result
                 applyMegaCutVariantChoices(result)
-                idCardState = if (segments.isEmpty()) CardState.ERROR else CardState.OK
+
+                // A successful source lookup with no MegaCut segments is not an
+                // ID failure. Keep the file card authoritative: the user may
+                // still process the loaded media without segmentation.
+                idCardState = CardState.OK
 
                 if (segments.isEmpty()) {
                     // The platform oEmbed lookup succeeded, so the source is
                     // known to exist. MegaCut simply has no usable segment set.
                     localSegments = null
+                    renderSegmentList(emptyList())
                     updateCategoryAvailability(emptyList())
 
                     val titleLine = when {
@@ -4957,9 +5405,6 @@ class MainActivity : Activity() {
                         getString(R.string.verified_source_no_segments)
                     )
 
-                    retryButton.isEnabled = false
-                    retryButton.alpha = 0.4f
-                    retryButton.text = getString(R.string.no_segments_cannot_process)
                     updateCards()
                     applyModeRecommendation()
                     return@runOnUiThread
@@ -4980,6 +5425,327 @@ class MainActivity : Activity() {
                 )
                 updateCards()
                 applyModeRecommendation()
+            }
+        }.start()
+    }
+
+    private fun loadDatabasePage() {
+        if (databaseIsLoading) return
+
+        databaseIsLoading = true
+        databaseLoadMoreButton.isEnabled = false
+
+        val requestedOffset = databaseNextOffset
+
+        if (requestedOffset == 0) {
+            databaseResultsContainer.removeAllViews()
+            databaseStatusView.text = "Loading MegaCut entries…"
+        }
+
+        val searchQuery = databaseSearchInput.text?.toString()?.trim().orEmpty()
+
+        val platformChoice = when (databasePlatformSpinner.selectedItemPosition) {
+            1 -> "rumble"
+            2 -> "spotify"
+            else -> ""
+        }
+
+        val variantChoice = databaseVariantInput.text?.toString()
+            ?.trim()
+            ?.toIntOrNull()
+
+        val dateFromChoice = databaseDateFromInput.text?.toString()
+            ?.trim()
+            ?.ifBlank { null }
+
+        val dateToChoice = databaseDateToInput.text?.toString()
+            ?.trim()
+            ?.ifBlank { null }
+
+        Thread {
+            val response = megaCutClient.fetchRecentSegmentSummaries(
+                limit = 20,
+                offset = requestedOffset,
+                query = searchQuery.ifBlank { null },
+                platform = platformChoice.ifBlank { null },
+                variant = variantChoice,
+                submittedFrom = dateFromChoice,
+                submittedTo = dateToChoice
+            )
+
+            runOnUiThread {
+                databaseIsLoading = false
+
+                if (response == null) {
+                    if (requestedOffset == 0) {
+                        databaseResultsContainer.removeAllViews()
+                        databaseStatusView.text =
+                            "Could not load MegaCut Web entries.\n\nCheck that the local MegaCut API is running."
+                    }
+
+                    databaseLoadMoreButton.isEnabled = true
+                    return@runOnUiThread
+                }
+
+                val count = response.length()
+                val density = resources.displayMetrics.density
+
+                for (index in 0 until count) {
+                    val item = response.optJSONObject(index) ?: continue
+
+                    val title = item.optString("title").ifBlank { "Untitled entry" }
+                    val platform = item.optString("platform").ifBlank { "unknown" }
+                    val variant = item.optInt("variant", 0)
+                    val segmentCount = item.optInt("segmentCount", 0)
+                    val createdAt = item.optString("createdAt").ifBlank { "" }
+                    val sourceUrl = item.optString("sourceUrl").ifBlank { "" }
+                    val thumbnailUrl = item.optString("thumbnailUrl").ifBlank { "" }
+
+                    val row = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(16, 12, 16, 16)
+                        setBackgroundColor(0xFF22223A.toInt())
+                        isClickable = true
+                        setOnClickListener {
+                            openDatabaseEntryInProcess(item)
+                        }
+                    }
+
+                    val headerRow = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                    }
+
+                    if (thumbnailUrl.isNotBlank()) {
+                        val thumbnail = android.widget.ImageView(this@MainActivity).apply {
+                            layoutParams = LinearLayout.LayoutParams(
+                                (120 * density).toInt(),
+                                (68 * density).toInt()
+                            ).also {
+                                it.rightMargin = (12 * density).toInt()
+                            }
+                            scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                            setBackgroundColor(0xFF333333.toInt())
+                        }
+
+                        headerRow.addView(thumbnail)
+                        loadDatabaseThumbnail(thumbnailUrl, thumbnail)
+                    }
+
+                    val actionRow = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = android.view.Gravity.CENTER
+                    }
+
+                    actionRow.addView(
+                        Button(this@MainActivity).apply {
+                            text = "Open link"
+                            textSize = 12f
+                            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                                android.R.drawable.ic_menu_send,
+                                0,
+                                0,
+                                0
+                            )
+                            setOnClickListener {
+                                openDatabaseSourceUrl(sourceUrl)
+                            }
+                        }
+                    )
+
+                    actionRow.addView(
+                        Button(this@MainActivity).apply {
+                            text = "Share"
+                            textSize = 12f
+                            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                                android.R.drawable.ic_menu_share,
+                                0,
+                                0,
+                                0
+                            )
+                            setOnClickListener {
+                                shareDatabaseSourceUrl(sourceUrl)
+                            }
+                        }
+                    )
+
+                    headerRow.addView(
+                        actionRow,
+                        LinearLayout.LayoutParams(
+                            0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            1f
+                        )
+                    )
+
+                    if (headerRow.childCount > 0) {
+                        row.addView(headerRow)
+                    }
+
+                    row.addView(
+                        TextView(this@MainActivity).apply {
+                            text = title
+                            textSize = 15f
+                            setTextColor(0xFFFFFFFF.toInt())
+                            setPadding(0, 8, 0, 0)
+                            setOnClickListener {
+                                openDatabaseEntryInProcess(item)
+                            }
+                        }
+                    )
+
+                    row.addView(
+                        TextView(this@MainActivity).apply {
+                            text = buildString {
+                                append(platform.replaceFirstChar { it.uppercase() })
+                                if (variant > 0) append(" · Variant $variant")
+                                append(" · $segmentCount segment(s)")
+                                if (createdAt.isNotBlank()) append(" · $createdAt")
+                            }
+                            textSize = 12f
+                            setTextColor(0xFFCCCCCC.toInt())
+                            setPadding(0, 4, 0, 0)
+                            setOnClickListener {
+                                openDatabaseEntryInProcess(item)
+                            }
+                        }
+                    )
+
+                    row.addView(
+                        TextView(this@MainActivity).apply {
+                            text = sourceUrl
+                            textSize = 11f
+                            setTextColor(0xFF99AABB.toInt())
+                            setPadding(0, 4, 0, 0)
+                            setOnClickListener {
+                                openDatabaseEntryInProcess(item)
+                            }
+                        }
+                    )
+
+                    databaseResultsContainer.addView(
+                        row,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            setMargins(0, 0, 0, (16 * density).toInt())
+                        }
+                    )
+                }
+
+                databaseNextOffset = requestedOffset + count
+
+                databaseStatusView.text = when {
+                    databaseResultsContainer.childCount == 0 ->
+                        "No approved MegaCut entries found."
+
+                    count < 20 ->
+                        "Loaded ${databaseResultsContainer.childCount} entr${if (databaseResultsContainer.childCount == 1) "y" else "ies"}. No more results."
+
+                    else ->
+                        "Loaded ${databaseResultsContainer.childCount} entr${if (databaseResultsContainer.childCount == 1) "y" else "ies"}."
+                }
+
+                databaseLoadMoreButton.visibility =
+                    if (count < 20) View.GONE else View.VISIBLE
+                databaseLoadMoreButton.isEnabled = true
+            }
+        }.start()
+    }
+
+    private fun openDatabaseEntryInProcess(item: org.json.JSONObject) {
+        val sourceUrl = item.optString("sourceUrl").ifBlank { "" }
+        val externalId = item.optString("externalId").ifBlank { "" }
+        val sourceText = sourceUrl.ifBlank { externalId }
+
+        if (sourceText.isBlank()) {
+            databaseStatusView.text =
+                "This entry does not provide a usable source link."
+            return
+        }
+
+        val parsed = megaCutClient.parseMediaSource(sourceText)
+
+        if (parsed == null) {
+            databaseStatusView.text =
+                "Could not recognize the selected source."
+            return
+        }
+
+        showProcessScreen?.invoke()
+        setIdInputProgrammatically(sourceText)
+        clearLocalSegmentSource()
+        suppressLocalSegmentReloadOnce = true
+        restoreLastFileUri()
+
+        idCardState = CardState.CHECKING
+        updateCards()
+
+        val platformLabel = parsed.platform
+            .replaceFirstChar { it.uppercase() }
+
+        setStatus(
+            "✓ $platformLabel source captured: ${parsed.externalId}\n\n" +
+                    "Now browse to your downloaded media file."
+        )
+
+        fetchSegmentsForMediaSource(
+            source = parsed,
+            force = true,
+            replaceLocalSourceOnSuccess = true
+        )
+    }
+
+    private fun openDatabaseSourceUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "No browser available.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private fun shareDatabaseSourceUrl(url: String) {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+
+        startActivity(
+            Intent.createChooser(
+                sendIntent,
+                "Share source link"
+            )
+        )
+    }
+
+    private fun loadDatabaseThumbnail(
+        url: String,
+        imageView: android.widget.ImageView
+    ) {
+        Thread {
+            val bitmap = try {
+                val connection = java.net.URL(url).openConnection()
+                        as java.net.HttpURLConnection
+
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+
+                connection.inputStream.use { stream ->
+                    android.graphics.BitmapFactory.decodeStream(stream)
+                }
+            } catch (e: Exception) {
+                Log.w(tag, "Thumbnail load failed: ${e.message}")
+                null
+            }
+
+            if (bitmap != null) {
+                runOnUiThread {
+                    imageView.setImageBitmap(bitmap)
+                }
             }
         }.start()
     }
@@ -5110,6 +5876,22 @@ class MainActivity : Activity() {
                 source
             }
 
+            // The oEmbed response has resolved the canonical Rumble embed ID.
+            // Replace the preliminary page-identifier status before the
+            // MegaCut variant/detail lookup continues.
+            val resolvedIdentifier = oEmbedExternalId ?: source.externalId
+            val resolvedSourceLabel = when (source.identifierKind) {
+                "rumble-page" -> "Rumble source"
+                else -> source.platform.replaceFirstChar { it.uppercase() }
+            }
+
+            runOnUiThread {
+                setStatus(
+                    "✓ $resolvedSourceLabel captured: $resolvedIdentifier\n\n" +
+                            "Now browse to your downloaded media file."
+                )
+            }
+
             // MegaCut identifies a Rumble logical source by its embed ID.
             // For a Rumble page URL, oEmbed supplies that embed ID.
             val variantExternalId = oEmbedExternalId ?: source.externalId
@@ -5237,7 +6019,8 @@ class MainActivity : Activity() {
     private fun applySegmentUiState(
         videoId: String, segments: List<SponsorSegmentInfo>?,
         title: String? = null, author: String? = null,
-        platform: String? = null
+        platform: String? = null,
+        preserveSelection: Boolean = false
     ) {
         val titleLine = when {
             title == null -> ""
@@ -5278,7 +6061,7 @@ class MainActivity : Activity() {
             }
 
             else -> {
-                renderSegmentList(segments)
+                renderSegmentList(segments, preserveSelection = preserveSelection)
                 renderDetectedCategories()
                 val processingActive = ProcessingService.isProcessingActive
                 retryButton.isEnabled = !processingActive
@@ -5389,7 +6172,7 @@ class MainActivity : Activity() {
         segmentListContainer.removeAllViews()
         segmentCheckboxes.clear()
         currentSegments = segments
-        invalidSegmentIndexes.clear()
+        invalidSegmentIndexes.retainAll(segments.indices.toSet())
 
         if (segments.isEmpty()) {
             selectedSegmentIndexes.clear()

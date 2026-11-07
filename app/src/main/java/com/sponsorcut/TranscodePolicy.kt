@@ -297,6 +297,20 @@ object TranscodePolicy {
                 }
                 ?: audioContainerFor(encoder ?: info.audioCodec)
 
+            // TEMPORARY DIAGNOSTIC: identify why Fast audio-only extraction
+            // can produce an MP4 extension despite the UI preview showing M4A.
+            DiagLog.append(
+                "AudioExtractionPolicy",
+                "mode=$mode " +
+                        "canCopy=$canCopy " +
+                        "inputAudioCodec=${info.audioCodec} " +
+                        "resolvedEncoder=$encoder " +
+                        "audioContainer=${preferences.audioContainer} " +
+                        "videoContainer=${preferences.container} " +
+                        "audioSectionMode=${preferences.audioSectionMode} " +
+                        "resolvedContainer=$container"
+            )
+
             val audioEncoding = buildAudioArgs(
                 encoder,
                 info,

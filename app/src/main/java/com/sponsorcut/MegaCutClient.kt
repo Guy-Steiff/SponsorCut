@@ -50,7 +50,7 @@ data class MegaCutVariant(
  * It must not become a user-editable UI field or a frontend-visible setting.
  */
 class MegaCutClient(
-    private val baseUrl: String = "http://192.168.239.86:8787/api"
+    private val baseUrl: String = "http://192.168.231.86:8787/api"
 ) {
 
     private val client = OkHttpClient()
@@ -262,6 +262,74 @@ class MegaCutClient(
         } catch (e: Exception) {
             Log.w(tag, "MegaCut variants lookup failed: ${e.message}")
             emptyList()
+        }
+    }
+
+    /**
+     * Fetches a page of approved segment-set summaries for the Database tab.
+     *
+     * The API returns a JSON array rather than a pagination envelope. An
+     * array shorter than the requested limit indicates the final page.
+     */
+    fun fetchRecentSegmentSummaries(
+        limit: Int = 20,
+        offset: Int = 0,
+        query: String? = null,
+        platform: String? = null,
+        variant: Int? = null,
+        submittedFrom: String? = null,
+        submittedTo: String? = null
+    ): JSONArray? {
+        val urlBuilder = baseUrl.toHttpUrlOrNull()?.newBuilder() ?: return null
+
+        urlBuilder.addPathSegment("segment-sets")
+        urlBuilder.addQueryParameter("limit", limit.toString())
+        urlBuilder.addQueryParameter("offset", offset.toString())
+
+        val normalizedQuery = query?.trim().orEmpty()
+        if (normalizedQuery.isNotEmpty()) {
+            urlBuilder.addQueryParameter("q", normalizedQuery)
+        }
+
+        val normalizedPlatform = platform?.trim().orEmpty()
+        if (normalizedPlatform.isNotEmpty()) {
+            urlBuilder.addQueryParameter("platform", normalizedPlatform)
+        }
+
+        if (variant != null) {
+            urlBuilder.addQueryParameter("variant", variant.toString())
+        }
+
+        val normalizedFrom = submittedFrom?.trim().orEmpty()
+        if (normalizedFrom.isNotEmpty()) {
+            urlBuilder.addQueryParameter("submittedFrom", normalizedFrom)
+        }
+
+        val normalizedTo = submittedTo?.trim().orEmpty()
+        if (normalizedTo.isNotEmpty()) {
+            urlBuilder.addQueryParameter("submittedTo", normalizedTo)
+        }
+
+        val url = urlBuilder.build()
+
+        val request = Request.Builder().url(url).build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(
+                        tag,
+                        "MegaCut recent summaries failed: code=${response.code}"
+                    )
+                    return null
+                }
+
+                val body = response.body?.string() ?: return null
+                runCatching { JSONArray(body) }.getOrNull()
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "MegaCut recent summaries lookup failed: ${e.message}")
+            null
         }
     }
 
