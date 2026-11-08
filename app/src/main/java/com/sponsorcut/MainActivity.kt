@@ -166,6 +166,7 @@ class MainActivity : Activity() {
     private var selectedCrf: Int = 23
     private var selectedCq: Int? = null
     private var selectedPreset: String = "medium"
+    private var presetControlAvailable = false
     private var inputFrameRate: String? = null
 
     private val frameRateTable = DropdownTable(
@@ -2046,9 +2047,15 @@ class MainActivity : Activity() {
                     "h264_mediacodec",
                     "hevc_mediacodec"
                 )
-                val supportsQuality = isSoftwareX264X265 || isMediaCodec
+                // MediaCodec CQ is intentionally unavailable in the current
+                // FFmpegKit path. Earlier testing found the CQ flags
+                // non-operational with FFmpegKit. Keep the capability probe
+                // available for a future FFmpegKitNext investigation, but do
+                // not expose CQ in the active UI until that path is
+                // implemented and validated.
+                val supportsQuality = isSoftwareX264X265
 
-                val qualityLabel = if (isMediaCodec) "CQ" else "CRF"
+                val qualityLabel = "CRF"
 
                 qualityModeRows = buildList {
                     if (supportsQuality) {
@@ -2091,9 +2098,12 @@ class MainActivity : Activity() {
                     supportsQuality && qualityUsesCrf && isSoftwareX264X265
                 ) View.VISIBLE else View.GONE
 
-                cqSpinner.visibility = if (
-                    supportsQuality && qualityUsesCrf && isMediaCodec
-                ) View.VISIBLE else View.GONE
+                // MediaCodec CQ is intentionally unavailable in the current
+                // FFmpegKit path. It previously produced errors when the CQ
+                // flags were supplied, and FFmpegKit complained when they were
+                // omitted. Do not expose CQ until FFmpegKitNext CQ support is
+                // implemented and validated.
+                cqSpinner.visibility = View.GONE
 
                 bitrateInput.visibility = if (supportsQuality && qualityUsesCrf) {
                     View.GONE
@@ -2218,9 +2228,11 @@ class MainActivity : Activity() {
                     "preset:$selectedPreset"
                 )
 
-                presetSpinner.isEnabled = isSoftwareX264X265 &&
+                presetControlAvailable = isSoftwareX264X265 &&
                         mode == ExecutionMode.SW_ACCURATE
-                presetSpinner.alpha = if (presetSpinner.isEnabled) 1f else 0.4f
+
+                presetSpinner.isEnabled = presetControlAvailable
+                presetSpinner.alpha = if (presetControlAvailable) 1f else 0.35f
 
                 val inputHeight = pendingVideoInfo?.height
                 val allHeights = listOf(2160, 1440, 1080, 720, 480, 360, 240, 144)
@@ -4378,7 +4390,11 @@ This summary does not replace those notices or the license terms of individual c
             } else {
                 parseBitrateBps(bitrateInput.text?.toString())
             },
-            preset = if (presetSpinner.isEnabled) selectedPreset else null,
+            // Preset is meaningful only for libx264/libx265 in SW-Accurate.
+            // Decouple the serialized request from the Spinner's transient
+            // enabled state so a UI-state bug cannot leak a preset into an
+            // unsupported encoder path.
+            preset = if (presetControlAvailable) selectedPreset else null,
             videoFrameRate = if (frameRateIsAuto) null else selectedFrameRate,
             audioSampleRate = selectedAudioSampleRate,
             audioBitrate = if (audioBitrateIsAuto) {
@@ -5329,6 +5345,9 @@ This summary does not replace those notices or the license terms of individual c
             row(audioSectionSpinner)
         ) ?: return
 
+        // Preset is managed separately below. The generic stream-state
+        // recursion must not re-enable it after the encoder-specific
+        // gray-out has been applied.
         val videoViews = listOf(
             row(videoSectionSpinner),
             videoInputInfoView,
@@ -5339,7 +5358,6 @@ This summary does not replace those notices or the license terms of individual c
             row(cqSpinner),
             row(bitrateInput),
             row(bitratePresetSpinner),
-            row(presetSpinner),
             row(frameRateSpinner),
             row(resolutionSpinner)
         )
@@ -5452,6 +5470,20 @@ This summary does not replace those notices or the license terms of individual c
                 setFormState(audioViews, mediaLoaded && hasAudio && !processingActive)
             }
         }
+
+        // Preset is meaningful only for libx264/libx265 in SW-Accurate.
+        // Apply the same disabled-state technique to both its row and control,
+        // after the generic stream-state recursion has completed.
+        val presetRow = row(presetSpinner)
+        val presetEnabled = mediaLoaded &&
+                hasVideo &&
+                !processingActive &&
+                presetControlAvailable
+
+        presetRow.isEnabled = presetEnabled
+        presetRow.alpha = if (presetEnabled) 1f else 0.35f
+        presetSpinner.isEnabled = presetEnabled
+        presetSpinner.alpha = if (presetEnabled) 1f else 0.35f
 
         // The Audio container is meaningful only when the output is audio-only.
         // It must remain disabled for Keep-both and Video-only jobs.
@@ -5765,7 +5797,7 @@ This summary does not replace those notices or the license terms of individual c
                 containerSpinner, videoCodecSpinner, audioCodecSpinner,
                 audioContainerSpinner,
                 qualityModeSpinner, crfSpinner, cqSpinner,
-                bitrateInput, bitratePresetSpinner, presetSpinner,
+                bitrateInput, bitratePresetSpinner,
                 frameRateSpinner, resolutionSpinner, audioSampleRateSpinner
             ) +
                     categoryCheckboxes.values.toList()
@@ -5773,6 +5805,12 @@ This summary does not replace those notices or the license terms of individual c
                 v.isEnabled = !active
                 v.alpha = if (active) 0.35f else 1f
             }
+
+            // Preset is meaningful only for libx264/libx265 in SW-Accurate.
+            // Do not let the generic processing-state loop re-enable it for
+            // MPEG-4 Part 2 or MediaCodec encoders.
+            presetSpinner.isEnabled = !active && presetControlAvailable
+            presetSpinner.alpha = if (presetSpinner.isEnabled) 1f else 0.35f
             cancelButton.visibility = if (active) View.VISIBLE else View.GONE
             cancelButton.isEnabled = active
             cancelButton.alpha = 1f

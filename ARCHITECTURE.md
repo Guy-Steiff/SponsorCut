@@ -87,7 +87,61 @@ Probe failure returns a minimal `VideoInfo` with unknown codecs and missing meta
 - The estimate and fallback are policy decisions. In particular, a stream value and container-minus-audio estimate both below 64,000 bps legitimately lead to the resolution fallback.
 - Bitrates remain integer bps through preference parsing, policy, and FFmpeg `-b:v` arguments.
 
-When CRF is active for a supported software encoder, bitrate resolution is not used for the normal encoder arguments. Hardware CQ and encoder availability are resolved by policy and the encoder catalog.
+When CRF is active for `libx264` or `libx265` in SW-Accurate mode, bitrate resolution is not used for the normal encoder arguments. MediaCodec CQ is intentionally unavailable in the current FFmpegKit path; MediaCodec encoders use bitrate-based quality control instead.
+
+#### CQ and hardware quality control
+
+CQ is not operational in the current FFmpegKit path.
+
+Attempting CQ produced an FFmpeg error. The policy and argument-generation code exist, but CQ is not exposed as a working user-facing path. It will be retried after an FFmpegKitNext upgrade.
+
+For `h264_mediacodec` and `hevc_mediacodec`, the intended arguments were:
+
+```text
+-c:v <encoder>
+-bitrate_mode cq
+-global_quality <cq>
+-g <gop>
+```
+
+The GOP size was computed as the requested frame rate rounded to an integer, with a minimum of 30. If no requested frame rate was available, the GOP was 120.
+
+The GOP guard existed because MediaCodec derives its i-frame interval from GOP size and frame rate. If the rounded interval became zero, encoder configuration could fail.
+
+CRF is not available on MediaCodec H.264 or HEVC encoders. CRF is available for `libx264` and `libx265`; policy intentionally restricts CRF to those encoders.
+
+An attempt was made to implement CQ for HEVC MediaCodec. FFmpeg rejected it.
+
+Therefore:
+
+- H.264 MediaCodec CQ: code exists, not operational.
+- HEVC MediaCodec CQ: code exists, not operational.
+- CRF on MediaCodec: unsupported.
+- Current reliable Accurate quality control: bitrate-based.
+
+This is a known FFmpegKit limitation, not a SponsorCut policy-design failure.
+
+#### CQ experiment recovery status
+
+The surviving architecture and investigation notes establish the following verified facts:
+
+- CQ was attempted for HEVC MediaCodec.
+- FFmpeg rejected the attempt.
+- The policy and argument-generation path contained CQ support for `h264_mediacodec` and `hevc_mediacodec`.
+- The intended encoder arguments were `-bitrate_mode cq`, `-global_quality <cq>`, and a GOP guard.
+- The GOP guard used the requested frame rate rounded to an integer, with a minimum of 30; absent a requested rate, it used 120.
+- CQ was not exposed as a working user-facing path.
+- Retesting was deferred until FFmpegKitNext.
+
+The following experiment details remain unrecovered and must not be inferred:
+
+- The exact FFmpeg error message or diagnostic-log excerpt.
+- The exact FFmpeg command submitted during the failed attempt.
+- The FFmpegKit build or revision used.
+- The device model, Android/API level, and MediaCodec codec implementation details.
+- Whether the failure occurred during argument validation, encoder configuration, or a later encode stage.
+
+Until those artifacts are recovered, the documented conclusion remains: CQ is non-operational in the current FFmpegKit path, and Accurate mode uses bitrate-based quality control.
 
 #### Audio bitrate
 
