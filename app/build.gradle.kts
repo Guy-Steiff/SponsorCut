@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -60,14 +59,6 @@ android {
             )
             signingConfig = signingConfigs.getByName("release")
         }
-    }
-}
-
-kotlin {
-    jvmToolchain(21)
-
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
     }
 }
 

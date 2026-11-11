@@ -10,19 +10,19 @@ object EncoderCatalog {
     private const val TAG = "EncoderCatalog"
 
     private val RELEVANT = listOf(
-        EncoderOption("libx264", "H.264 / AVC", "H.264", "video", false, false),
-        EncoderOption("libx265", "H.265 / HEVC", "H.265/HEVC", "video", false, false),
-        EncoderOption("libvpx-vp9", "VP9", "VP9", "video", false, false),
-        EncoderOption("libsvtav1", "AV1 (SVT)", "AV1", "video", false, false),
-        EncoderOption("libaom-av1", "AV1 (AOM)", "AV1", "video", false, false),
-        EncoderOption("mpeg4", "MPEG-4 Part 2", "MPEG-4 Part 2", "video", false, false),
-        EncoderOption("h264_mediacodec", "H.264 MediaCodec", "H.264", "video", true, false),
-        EncoderOption("hevc_mediacodec", "HEVC MediaCodec", "H.265/HEVC", "video", true, false),
-        EncoderOption("aac", "AAC", "AAC", "audio", false, false),
-        EncoderOption("opus", "Opus", "Opus", "audio", false, false),
-        EncoderOption("libmp3lame", "MP3", "MP3", "audio", false, false),
-        EncoderOption("vorbis", "Vorbis", "Vorbis", "audio", false, false),
-        EncoderOption("flac", "FLAC", "FLAC", "audio", false, false)
+        EncoderOption("libx264", "H.264 / AVC", "H.264", "video", hardware = false, available = false),
+        EncoderOption("libx265", "H.265 / HEVC", "H.265/HEVC", "video", hardware = false, available = false),
+        EncoderOption("libvpx-vp9", "VP9", "VP9", "video", hardware = false, available = false),
+        EncoderOption("libsvtav1", "AV1 (SVT)", "AV1", "video", hardware = false, available = false),
+        EncoderOption("libaom-av1", "AV1 (AOM)", "AV1", "video", hardware = false, available = false),
+        EncoderOption("mpeg4", "MPEG-4 Part 2", "MPEG-4 Part 2", "video", hardware = false, available = false),
+        EncoderOption("h264_mediacodec", "H.264 MediaCodec", "H.264", "video", hardware = true, available = false),
+        EncoderOption("hevc_mediacodec", "HEVC MediaCodec", "H.265/HEVC", "video", hardware = true, available = false),
+        EncoderOption("aac", "AAC", "AAC", "audio", hardware = false, available = false),
+        EncoderOption("opus", "Opus", "Opus", "audio", hardware = false, available = false),
+        EncoderOption("libmp3lame", "MP3", "MP3", "audio", hardware = false, available = false),
+        EncoderOption("vorbis", "Vorbis", "Vorbis", "audio", hardware = false, available = false),
+        EncoderOption("flac", "FLAC", "FLAC", "audio", hardware = false, available = false)
     )
 
     private val FAMILY_BY_INPUT_CODEC = mapOf(
@@ -65,10 +65,10 @@ object EncoderCatalog {
             DiagLog.append("ffkit", output.takeLast(12000))
             DiagLog.append("ffkit", "--- end encoder discovery ---")
 
-            for (option in RELEVANT) {
-                val pattern = Regex("\\b${Regex.escape(option.name)}\\b")
+            for ((name, _, _, _, _, _) in RELEVANT) {
+                val pattern = Regex("\\b${Regex.escape(name)}\\b")
                 if (pattern.containsMatchIn(output)) {
-                    availableNames += option.name
+                    availableNames += name
                 }
             }
 
@@ -115,13 +115,4 @@ object EncoderCatalog {
 
     fun find(catalog: List<EncoderOption>, name: String?): EncoderOption? =
         catalog.firstOrNull { it.name == name }
-
-    fun firstAvailable(
-        catalog: List<EncoderOption>,
-        family: String,
-        mode: ExecutionMode
-    ): EncoderOption? =
-        videoOptions(catalog, mode).firstOrNull {
-            it.available && it.codecFamily == family
-        }
 }

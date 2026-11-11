@@ -1,3 +1,5 @@
+//java/com/sponsorcut/TranscodePolicy.kt
+
 package com.sponsorcut
 
 import com.sponsorcut.core.model.ExecutionMode
@@ -95,9 +97,7 @@ object TranscodePolicy {
         val canCopyAudio: Boolean,
         val unsupportedMessage: String? = null,
         val failureStackTrace: String? = null
-    ) {
-        val isSupported: Boolean get() = unsupportedMessage == null
-    }
+    )
 
     private data class AudioEncoding(
         val args: List<String>,
@@ -863,20 +863,20 @@ object TranscodePolicy {
         )
     }
 
-    private const val minPlausibleAudioBitrate = 32_000L
-    private const val fallbackAudioBitrate = 128_000L
+    private const val MIN_PLAUSIBLE_AUDIO_BITRATE = 32_000L
+    private const val FALLBACK_AUDIO_BITRATE = 128_000L
 
     private fun effectiveAudioBitrate(info: FFProbeInspector.VideoInfo): Long {
         return resolveAudioBitrate(info, requestedBitrate = null).bitrateBps
     }
 
-    private const val minPlausibleVideoBitrate = 64_000L
+    private const val MIN_PLAUSIBLE_VIDEO_BITRATE = 64_000L
 
     private fun effectiveVideoBitrate(
         info: FFProbeInspector.VideoInfo
     ): VideoBitrateResolution? {
         val streamBitrate = info.videoBitrate
-        if (streamBitrate != null && streamBitrate >= minPlausibleVideoBitrate) {
+        if (streamBitrate != null && streamBitrate >= MIN_PLAUSIBLE_VIDEO_BITRATE) {
             return VideoBitrateResolution(
                 streamBitrate,
                 VideoBitrateProvenance.INPUT_STREAM
@@ -885,7 +885,7 @@ object TranscodePolicy {
 
         val audioBitrate = effectiveAudioBitrate(info)
         val inferred = info.containerBitrate?.minus(audioBitrate)
-        if (inferred != null && inferred >= minPlausibleVideoBitrate) {
+        if (inferred != null && inferred >= MIN_PLAUSIBLE_VIDEO_BITRATE) {
             DiagLog.append(
                 "VideoPolicy",
                 "Stream video bitrate ${streamBitrate ?: "missing"} is missing or implausible; " +
@@ -922,7 +922,7 @@ object TranscodePolicy {
             kotlin.math.abs(nominal.value - average.value) > 0.000001
         val inputDisplay = when {
             isVariable ->
-                "avg ${average!!.decimal(3)} fps; nominal ${nominal!!.decimal(3)} fps"
+                "avg ${average.decimal(3)} fps; nominal ${nominal.decimal(3)} fps"
             info.preferredFrameRate != null ->
                 "${info.preferredFrameRate.decimal(3)} fps"
             sourceDisplay != null -> "$sourceDisplay fps"
@@ -1050,7 +1050,7 @@ object TranscodePolicy {
         info: FFProbeInspector.VideoInfo,
         requestedBitrate: Long?
     ): AudioBitrateResolution {
-        if (requestedBitrate != null && requestedBitrate >= minPlausibleAudioBitrate) {
+        if (requestedBitrate != null && requestedBitrate >= MIN_PLAUSIBLE_AUDIO_BITRATE) {
             return AudioBitrateResolution(
                 requestedBitrate,
                 AudioBitrateProvenance.EXPLICIT
@@ -1062,12 +1062,12 @@ object TranscodePolicy {
             DiagLog.append(
                 "AudioPolicy",
                 "Requested audio bitrate $requestedBitrate bps is below " +
-                    "$minPlausibleAudioBitrate bps; using source policy"
+                    "$MIN_PLAUSIBLE_AUDIO_BITRATE bps; using source policy"
             )
         }
 
         val sourceBitrate = info.audioBitrate
-        if (sourceBitrate != null && sourceBitrate >= minPlausibleAudioBitrate) {
+        if (sourceBitrate != null && sourceBitrate >= MIN_PLAUSIBLE_AUDIO_BITRATE) {
             return AudioBitrateResolution(
                 sourceBitrate,
                 if (explicitBelowMinimum) {
@@ -1081,10 +1081,10 @@ object TranscodePolicy {
         DiagLog.append(
             "AudioPolicy",
             "Source audio bitrate ${sourceBitrate ?: "missing"} is missing or below " +
-                "${minPlausibleAudioBitrate}bps; using ${fallbackAudioBitrate}bps"
+                "${MIN_PLAUSIBLE_AUDIO_BITRATE}bps; using ${FALLBACK_AUDIO_BITRATE}bps"
         )
         return AudioBitrateResolution(
-            fallbackAudioBitrate,
+            FALLBACK_AUDIO_BITRATE,
             if (explicitBelowMinimum) {
                 AudioBitrateProvenance.EXPLICIT_BELOW_MINIMUM_FALLBACK
             } else {

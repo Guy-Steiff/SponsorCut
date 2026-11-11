@@ -130,15 +130,15 @@ data class OutputPreferences(
     }
 }
 
-data class ResolvedOutputPreferences(
-    val videoEncoder: String?,
-    val audioEncoder: String?,
-    val container: String,
-    val qualityMode: QualityMode,
-    val crf: Int?,
-    val videoBitrate: Long?,
-    val preset: String?,
-    val videoFrameRate: String?,
-    val audioSampleRate: Int?,
-    val rationale: List<String>
-)
+//data class ResolvedOutputPreferences(
+//    val videoEncoder: String?,
+//    val audioEncoder: String?,
+//    val container: String,
+//    val qualityMode: QualityMode,
+//    val crf: Int?,
+//    val videoBitrate: Long?,
+//    val preset: String?,
+//    val videoFrameRate: String?,
+//    val audioSampleRate: Int?,
+//    val rationale: List<String>
+//)

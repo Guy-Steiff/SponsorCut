@@ -22,7 +22,6 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.GridLayout
 import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
@@ -44,7 +43,9 @@ import android.os.Looper
 import androidx.core.content.edit
 import androidx.core.content.withStyledAttributes
 import androidx.core.net.toUri
+import androidx.core.view.isEmpty
 import androidx.core.view.isVisible
+import androidx.core.view.isNotEmpty
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
@@ -52,6 +53,7 @@ import android.text.style.URLSpan
 import com.sponsorcut.core.model.ExecutionMode
 import com.sponsorcut.core.model.StreamSelection
 import java.util.Locale
+import java.util.Calendar
 import kotlin.math.roundToLong
 //note:
 //a solution that I gave for that problem for other spinners was:
@@ -485,7 +487,11 @@ class MainActivity : Activity() {
                 android.Manifest.permission.POST_NOTIFICATIONS,
                 android.Manifest.permission.READ_MEDIA_VIDEO,
                 android.Manifest.permission.READ_MEDIA_AUDIO
-            ).filter {
+            ).apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    add(android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                }
+            }.filter {
                 checkSelfPermission(it) !=
                         android.content.pm.PackageManager.PERMISSION_GRANTED
             }
@@ -569,12 +575,24 @@ class MainActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
-        if (requestCode == 99 &&
-            pendingUri != null &&
-            grantResults.isNotEmpty() &&
-            grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }
-        ) {
-            inspectSelectedUri(pendingUri!!)
+        if (requestCode == 99 && pendingUri != null) {
+            val mediaPermissions = buildSet {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    add(android.Manifest.permission.READ_MEDIA_VIDEO)
+                    add(android.Manifest.permission.READ_MEDIA_AUDIO)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    add(android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                }
+            }
+            val mediaPermissionGranted = permissions.indices.any { index ->
+                permissions[index] in mediaPermissions &&
+                    grantResults.getOrNull(index) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+            if (mediaPermissionGranted) {
+                pendingUri?.let(::inspectSelectedUri)
+            }
         }
     }
 
@@ -630,8 +648,8 @@ class MainActivity : Activity() {
             try {
                 contentResolver.openOutputStream(uri)?.use { stream ->
                     stream.write(content.toByteArray())
-                
-            showSavedToast("${format} segmentation saved to home folder")}
+                    showSavedToast("$format segmentation saved to home folder")
+                }
                 setStatus(getString(R.string.segments_saved, uri))
             } catch (e: Exception) {
                 setStatus(getString(R.string.segments_save_failed, e.message))
@@ -1109,7 +1127,10 @@ class MainActivity : Activity() {
 
             // ── Selected segment total ────────────────────────────────
             selectedSegmentsTotalView = TextView(context).apply {
-                text = "Selected segments: 00:00:00.00"
+                text = getString(
+                    R.string.selected_segments_total,
+                    "00:00:00.00"
+                )
                 textSize = 13f
                 setPadding(0, p / 2, 0, p / 4)
                 visibility = View.GONE
@@ -2344,10 +2365,9 @@ class MainActivity : Activity() {
                     "MPEG-4 Part 2" -> listOf("mp4", "mkv", "avi")
                     else -> listOf("mp4", "mkv", "avi")
                 }
-                val resolvedContainerValue = resolvedAutoContainerValue
                 val canonicalContainers = listOf("mp4", "mkv", "mov", "avi", "webm")
                 val uniqueContainers = (canonicalContainers + listOfNotNull(
-                    resolvedContainerValue
+                    resolvedAutoContainerValue
                 ) + listOfNotNull(selectedContainer)).distinctBy { it.lowercase() }
                 val supportedContainerSet = supportedContainers
                     .map { it.lowercase() }
@@ -2358,7 +2378,7 @@ class MainActivity : Activity() {
                         normalized,
                         ignoreCase = true
                     ) == true
-                    val isResolvedInput = normalized == resolvedContainerValue
+                    val isResolvedInput = normalized == resolvedAutoContainerValue
                     val isSupported = normalized in supportedContainerSet
                     val label = when {
                         !isSupported -> "${container.uppercase()} — unavailable"
@@ -2374,7 +2394,7 @@ class MainActivity : Activity() {
                         originalIndex = index
                     )
                 }.let { rows ->
-                    val preferredContainer = selectedContainer ?: resolvedContainerValue
+                    val preferredContainer = selectedContainer ?: resolvedAutoContainerValue
                     rows.sortedBy {
                         !it.value.equals(preferredContainer, ignoreCase = true)
                     }
@@ -2383,7 +2403,7 @@ class MainActivity : Activity() {
                     containerSpinner,
                     videoContainerRows,
                     selectedContainer?.let { "container:${it.lowercase()}" }
-                        ?: resolvedContainerValue?.let { "container:$it" }
+                        ?: resolvedAutoContainerValue?.let { "container:$it" }
                 )
 
                 refreshStageName = "frame-rate-and-bitrate-controls"
@@ -3084,21 +3104,16 @@ class MainActivity : Activity() {
         }
 
         databaseSearchButton = Button(this@MainActivity).apply {
-            text = "Search"
+            text = getString(R.string.database_search)
             setOnClickListener {
                 goToDatabasePage(0)
             }
         }
 
         databaseAdvancedButton = Button(this@MainActivity).apply {
-            text = "Advanced search"
+            text = getString(R.string.database_advanced_search)
             setOnClickListener {
-                databaseAdvancedPanel.visibility =
-                    if (databaseAdvancedPanel.visibility == View.VISIBLE) {
-                        View.GONE
-                    } else {
-                        View.VISIBLE
-                    }
+                databaseAdvancedPanel.isVisible = !databaseAdvancedPanel.isVisible
             }
         }
 
@@ -3110,7 +3125,7 @@ class MainActivity : Activity() {
 
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Platform"
+                    text = getString(R.string.database_platform)
                     textSize = 12f
                     setTextColor(0xFFCCCCCC.toInt())
                 }
@@ -3138,7 +3153,7 @@ class MainActivity : Activity() {
 
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Variant"
+                    text = getString(R.string.database_variant)
                     textSize = 12f
                     setTextColor(0xFFCCCCCC.toInt())
                 }
@@ -3170,21 +3185,21 @@ class MainActivity : Activity() {
                     text = "📅"
                     setOnClickListener {
                         val parts = field.text?.toString()?.split("-")
-                        val today = java.util.Calendar.getInstance()
+                        val today = Calendar.getInstance()
 
                         val year = parts?.getOrNull(0)?.toIntOrNull()
-                            ?: today.get(java.util.Calendar.YEAR)
+                            ?: today.get(Calendar.YEAR)
                         val month = parts?.getOrNull(1)?.toIntOrNull()?.minus(1)
-                            ?: today.get(java.util.Calendar.MONTH)
+                            ?: today.get(Calendar.MONTH)
                         val day = parts?.getOrNull(2)?.toIntOrNull()
-                            ?: today.get(java.util.Calendar.DAY_OF_MONTH)
+                            ?: today.get(Calendar.DAY_OF_MONTH)
 
                         android.app.DatePickerDialog(
                             this@MainActivity,
                             { _, selectedYear, selectedMonth, selectedDay ->
-                                field.setText(
+                                field.text = Editable.Factory.getInstance().newEditable(
                                     String.format(
-                                        java.util.Locale.US,
+                                        Locale.US,
                                         "%04d-%02d-%02d",
                                         selectedYear,
                                         selectedMonth + 1,
@@ -3200,23 +3215,9 @@ class MainActivity : Activity() {
                 }
             }
 
-            val today = java.util.Calendar.getInstance()
-            val fromDate = today.clone() as java.util.Calendar
-            fromDate.add(java.util.Calendar.DAY_OF_YEAR, -2)
-
-            fun formatDate(calendar: java.util.Calendar): String {
-                return String.format(
-                    java.util.Locale.US,
-                    "%04d-%02d-%02d",
-                    calendar.get(java.util.Calendar.YEAR),
-                    calendar.get(java.util.Calendar.MONTH) + 1,
-                    calendar.get(java.util.Calendar.DAY_OF_MONTH)
-                )
-            }
-
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Submission date from"
+                    text = getString(R.string.database_submission_date_from)
                     textSize = 12f
                     setTextColor(0xFFCCCCCC.toInt())
                 }
@@ -3273,7 +3274,7 @@ class MainActivity : Activity() {
 
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Submission date to"
+                    text = getString(R.string.database_submission_date_to)
                     textSize = 12f
                     setTextColor(0xFFCCCCCC.toInt())
                 }
@@ -3302,7 +3303,7 @@ class MainActivity : Activity() {
 
                 addView(
                     Button(this@MainActivity).apply {
-                        text = "Now"
+                        text = getString(R.string.database_date_to_now)
                         setOnClickListener {
                             databaseDateToInput.setText("")
                             goToDatabasePage(0)
@@ -3341,7 +3342,7 @@ class MainActivity : Activity() {
         }
 
         databasePreviousPageButton = Button(this@MainActivity).apply {
-            text = "← Previous"
+            text = getString(R.string.database_previous_page)
             isEnabled = false
             setOnClickListener {
                 goToDatabasePage(databaseCurrentPage - 1)
@@ -3349,14 +3350,14 @@ class MainActivity : Activity() {
         }
 
         databasePageLabel = TextView(this@MainActivity).apply {
-            text = "Page 1"
+            text = getString(R.string.database_page, 1)
             textSize = 14f
             gravity = android.view.Gravity.CENTER
             setPadding(8, 12, 8, 12)
         }
 
         databaseNextPageButton = Button(this@MainActivity).apply {
-            text = "Next →"
+            text = getString(R.string.database_next_page)
             isEnabled = false
             setOnClickListener {
                 goToDatabasePage(databaseCurrentPage + 1)
@@ -3503,7 +3504,7 @@ class MainActivity : Activity() {
         }
 
         val aboutBackButton = Button(this).apply {
-            text = "← Back to About"
+            text = getString(R.string.back_to_about)
             setOnClickListener {
                 returnToAboutLanding()
             }
@@ -3552,7 +3553,7 @@ class MainActivity : Activity() {
 
         fun openAboutUrl(url: String) {
             try {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
             } catch (_: ActivityNotFoundException) {
                 Toast.makeText(
                     this,
@@ -3630,7 +3631,7 @@ class MainActivity : Activity() {
         )
 
         val websiteLink = TextView(this).apply {
-            text = "Visit the MegaCut website"
+            text = getString(R.string.visit_megacut_website)
             textSize = 15f
             setTextColor(0xFF64B5F6.toInt())
             paint.isUnderlineText = true
@@ -4225,6 +4226,7 @@ This summary does not replace those notices or the license terms of individual c
         setContentView(rootLayout)
     }
 
+    @Suppress("DEPRECATION")
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         val backAction = aboutBackAction
@@ -5768,10 +5770,10 @@ This summary does not replace those notices or the license terms of individual c
         setViewTreeEnabled(segmentCategoryContainer, enabled)
     }
 
-    private fun setViewTreeEnabled(view: android.view.View, enabled: Boolean) {
+    private fun setViewTreeEnabled(view: View, enabled: Boolean) {
         view.isEnabled = enabled
 
-        if (view is android.view.ViewGroup) {
+        if (view is ViewGroup) {
             for (index in 0 until view.childCount) {
                 setViewTreeEnabled(view.getChildAt(index), enabled)
             }
@@ -5818,8 +5820,8 @@ This summary does not replace those notices or the license terms of individual c
             progressBar.visibility = if (active) View.VISIBLE else View.GONE
             loadSegmentsButton.isEnabled = !active
             loadSegmentsButton.alpha = if (active) 0.5f else 1f
-            addSegmentButton?.isEnabled = !active
-            addSegmentButton?.alpha = if (active) 0.45f else 1f
+            addSegmentButton.isEnabled = !active
+            addSegmentButton.alpha = if (active) 0.45f else 1f
             if (!active) {
                 progressBar.progress = 0
                 // Re-enable controls; retryButton state managed by updateCards()
@@ -6329,7 +6331,9 @@ This summary does not replace those notices or the license terms of individual c
                 .filter { it.isDigit() }
                 .take(8)
 
-            setText(formattedDate(existingDigits))
+            text = Editable.Factory.getInstance().newEditable(
+                formattedDate(existingDigits)
+            )
             addTextChangedListener(watcher)
         }
     }
@@ -6370,7 +6374,7 @@ This summary does not replace those notices or the license terms of individual c
         val requestedOffset = databaseNextOffset
 
         databaseResultsContainer.removeAllViews()
-        databaseStatusView.text = "Loading MegaCut entries…"
+        databaseStatusView.text = getString(R.string.database_loading)
 
         val searchQuery = databaseSearchInput.text?.toString()?.trim().orEmpty()
 
@@ -6427,7 +6431,7 @@ This summary does not replace those notices or the license terms of individual c
                     if (requestedOffset == 0) {
                         databaseResultsContainer.removeAllViews()
                         databaseStatusView.text =
-                            "Could not load MegaCut Web entries.\n\nCheck that the local MegaCut API is running."
+                            getString(R.string.database_load_failed)
                     }
 
                     databasePreviousPageButton.isEnabled = databaseCurrentPage > 0
@@ -6464,14 +6468,14 @@ This summary does not replace those notices or the license terms of individual c
                     }
 
                     if (thumbnailUrl.isNotBlank()) {
-                        val thumbnail = android.widget.ImageView(this@MainActivity).apply {
+                        val thumbnail = ImageView(this@MainActivity).apply {
                             layoutParams = LinearLayout.LayoutParams(
                                 (120 * density).toInt(),
                                 (68 * density).toInt()
                             ).also {
                                 it.rightMargin = (12 * density).toInt()
                             }
-                            scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                            scaleType = ImageView.ScaleType.CENTER_CROP
                             setBackgroundColor(0xFF333333.toInt())
                         }
 
@@ -6486,7 +6490,7 @@ This summary does not replace those notices or the license terms of individual c
 
                     actionRow.addView(
                         Button(this@MainActivity).apply {
-                            text = "Open link"
+                            text = getString(R.string.database_open_link)
                             textSize = 12f
                             setCompoundDrawablesRelativeWithIntrinsicBounds(
                                 android.R.drawable.ic_menu_send,
@@ -6502,7 +6506,7 @@ This summary does not replace those notices or the license terms of individual c
 
                     actionRow.addView(
                         Button(this@MainActivity).apply {
-                            text = "Share"
+                            text = getString(R.string.database_share)
                             textSize = 12f
                             setCompoundDrawablesRelativeWithIntrinsicBounds(
                                 android.R.drawable.ic_menu_share,
@@ -6525,7 +6529,7 @@ This summary does not replace those notices or the license terms of individual c
                         )
                     )
 
-                    if (headerRow.childCount > 0) {
+                    if (headerRow.isNotEmpty()) {
                         row.addView(headerRow)
                     }
 
@@ -6584,19 +6588,36 @@ This summary does not replace those notices or the license terms of individual c
                 databaseCurrentPage = requestedOffset / 20
                 databaseHasNextPage = count == 20
 
-                databasePageLabel.text = "Page ${databaseCurrentPage + 1}"
+                databasePageLabel.text =
+                    getString(R.string.database_page, databaseCurrentPage + 1)
                 databasePreviousPageButton.isEnabled = databaseCurrentPage > 0
                 databaseNextPageButton.isEnabled = databaseHasNextPage
 
                 databaseStatusView.text = when {
-                    databaseResultsContainer.childCount == 0 ->
-                        "No approved MegaCut entries found."
+                    databaseResultsContainer.isEmpty() ->
+                        getString(R.string.database_no_entries)
 
                     databaseHasNextPage ->
-                        "Page ${databaseCurrentPage + 1} — showing the latest ${databaseResultsContainer.childCount} entries."
+                        getString(
+                            R.string.database_page_status_has_more,
+                            databaseCurrentPage + 1,
+                            resources.getQuantityString(
+                                R.plurals.database_entry_count,
+                                databaseResultsContainer.childCount,
+                                databaseResultsContainer.childCount
+                            )
+                        )
 
                     else ->
-                        "Page ${databaseCurrentPage + 1} — showing ${databaseResultsContainer.childCount} entr${if (databaseResultsContainer.childCount == 1) "y" else "ies"}. No more results."
+                        getString(
+                            R.string.database_page_status_no_more,
+                            databaseCurrentPage + 1,
+                            resources.getQuantityString(
+                                R.plurals.database_entry_count,
+                                databaseResultsContainer.childCount,
+                                databaseResultsContainer.childCount
+                            )
+                        )
                 }
             }
         }.start()
@@ -6609,7 +6630,7 @@ This summary does not replace those notices or the license terms of individual c
 
         if (sourceText.isBlank()) {
             databaseStatusView.text =
-                "This entry does not provide a usable source link."
+                getString(R.string.database_entry_missing_source)
             return
         }
 
@@ -6617,7 +6638,7 @@ This summary does not replace those notices or the license terms of individual c
 
         if (parsed == null) {
             databaseStatusView.text =
-                "Could not recognize the selected source."
+                getString(R.string.database_source_not_recognized)
             return
         }
 
@@ -6648,7 +6669,7 @@ This summary does not replace those notices or the license terms of individual c
     private fun openDatabaseSourceUrl(url: String) {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             Toast.makeText(
                 this,
                 "No browser available.",
@@ -6673,7 +6694,7 @@ This summary does not replace those notices or the license terms of individual c
 
     private fun loadDatabaseThumbnail(
         url: String,
-        imageView: android.widget.ImageView
+        imageView: ImageView
     ) {
         Thread {
             val bitmap = try {
@@ -6936,7 +6957,7 @@ This summary does not replace those notices or the license terms of individual c
     }
 
     private fun loadMegaCutVariant(variant: MegaCutVariant) {
-        val lookup = activeMegaCutLookup ?: return
+        if (activeMegaCutLookup == null) return
         selectedMegaCutVariantId = variant.id
 
         Thread {
@@ -6948,7 +6969,8 @@ This summary does not replace those notices or the license terms of individual c
                 }
 
                 if (detail == null) {
-                    statusView.text = "MegaCut variant could not be loaded."
+                    statusView.text =
+                        getString(R.string.database_variant_load_failed)
                     return@runOnUiThread
                 }
 
@@ -7017,8 +7039,9 @@ This summary does not replace those notices or the license terms of individual c
                 retryButton.alpha = if (processingActive) 0.35f else 1f
                 retryButton.text = getString(R.string.process_with_id_button)
                 val totalCut = segments.sumOf { it.end - it.start }
-                val note = getString(
-                    R.string.segments_to_cut,
+                val note = resources.getQuantityString(
+                    R.plurals.segments_to_cut_count,
+                    segments.size,
                     segments.size,
                     formatSegmentTimestamp(totalCut)
                 )
@@ -7084,13 +7107,11 @@ This summary does not replace those notices or the license terms of individual c
                 View.GONE
             }
 
-        selectedSegmentsTotalView.text = buildString {
-            append("Selected segments: ")
-            append(formatSegmentTotal(totalSeconds))
-
-            if (hasUnresolvedOpenEnded) {
-                append(" (+open-ended)")
-            }
+        val formattedTotal = formatSegmentTotal(totalSeconds)
+        selectedSegmentsTotalView.text = if (hasUnresolvedOpenEnded) {
+            getString(R.string.selected_segments_total_open_ended, formattedTotal)
+        } else {
+            getString(R.string.selected_segments_total, formattedTotal)
         }
     }
 
@@ -7244,7 +7265,7 @@ This summary does not replace those notices or the license terms of individual c
         if (segment.category == "manual") {
             val categoryEditor = EditText(this).apply {
                 hint = getString(R.string.category_hint)
-                setText(segment.category)
+                text = Editable.Factory.getInstance().newEditable(segment.category)
                 textSize = 12f
                 isSingleLine = true
                 setPadding(4, 1, 4, 1)
@@ -7383,7 +7404,9 @@ This summary does not replace those notices or the license terms of individual c
             setPadding(4, 1, 4, 1)
             setBackgroundColor(0xFF333333.toInt())
             setTextColor(0xFFFFFFFF.toInt())
-            setText(formatMaskedDigits(digits.toString()))
+            text = Editable.Factory.getInstance().newEditable(
+                formatMaskedDigits(digits.toString())
+            )
         }
 
         val maskWatcher = object : TextWatcher {
@@ -7466,7 +7489,7 @@ This summary does not replace those notices or the license terms of individual c
                 // reattach before moving the cursor.
                 suppressMaskUpdate = true
                 editor.removeTextChangedListener(this)
-                editor.setText(formatted)
+                editor.text = Editable.Factory.getInstance().newEditable(formatted)
                 editor.addTextChangedListener(this)
                 suppressMaskUpdate = false
 
@@ -7638,7 +7661,8 @@ This summary does not replace those notices or the license terms of individual c
                     contentResolver.openOutputStream(documentUri)?.use { stream ->
                         stream.write(content.toByteArray())
                     
-            showSavedToast("${format} segmentation saved to home folder")}
+            showSavedToast("$format segmentation saved to home folder")
+                    }
 
                     setStatus("Segments saved:\n$documentUri")
                     return

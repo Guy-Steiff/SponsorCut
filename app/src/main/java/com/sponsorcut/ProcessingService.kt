@@ -317,9 +317,9 @@ class ProcessingService : Service() {
                 val outputExt = processingPlan.outputExtension
 
                 val outputMethod = when (processingPlan.executionMode) {
-                    com.sponsorcut.core.model.ExecutionMode.FAST -> "fast"
-                    com.sponsorcut.core.model.ExecutionMode.HW_ACCURATE -> "hw"
-                    com.sponsorcut.core.model.ExecutionMode.SW_ACCURATE -> "sw"
+                    ExecutionMode.FAST -> "fast"
+                    ExecutionMode.HW_ACCURATE -> "hw"
+                    ExecutionMode.SW_ACCURATE -> "sw"
                 }
 
                 val outputCatalog = EncoderCatalog.discover()
@@ -401,7 +401,7 @@ class ProcessingService : Service() {
                 outputTarget = if (!outputFolderUri.isNullOrBlank()) {
                     FileResolver.createOutputTargetInTree(this, outputFolderUri.toUri(), outputFileName)
                 } else {
-                    FileResolver.createOutputTarget(this, uri, outputFileName, inputFile)
+                    FileResolver.createOutputTarget(this, uri, outputFileName)
                 }
                 DiagLog.append("Job", "job=$jobId owns output target: ${outputTarget.label}")
                 tempOutput = File(cacheDir, "processed_${System.currentTimeMillis()}.$outputExt")

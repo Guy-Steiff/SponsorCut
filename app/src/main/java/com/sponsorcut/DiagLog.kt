@@ -11,8 +11,6 @@ import android.util.Log
  */
 object DiagLog {
 
-    @Volatile
-    var suppressGlobalLogs: Boolean = false
     private const val TAG = "DiagLog"
     private val buf = StringBuilder()
 
@@ -52,4 +50,3 @@ object DiagLog {
         }
     }
 }
-

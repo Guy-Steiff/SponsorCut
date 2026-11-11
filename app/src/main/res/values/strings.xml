@@ -13,12 +13,10 @@
     <string name="segment_file_selected_parsing">Segment file selected. Parsing segments…</string>
     <string name="file_selected_no_youtube_id">File selected ✓\nNo YouTube ID — paste URL or 11-char ID below, then tap Process.</string>
     <string name="file_selected_fetching_segments">File selected ✓\nID: %1$s\nFetching title and segments…</string>
-    <string name="youtube_id_entered_source_discarded">YouTube ID entered — previous TXT/JSON segment source discarded.\nChecking SponsorBlock…</string>
     <string name="share_downloaded_video">Share a downloaded YouTube video here from PipePipe/NewPipe.</string>
     <string name="youtube_url_or_id_hint">Paste YouTube, Rumble, or Spotify URL/ID</string>
     <string name="media_source_entered_source_discarded">Previous segments discarded.\nChecking YouTube, Rumble, and Spotify…</string>
     <string name="checking_segments">Checking YouTube, Rumble, or Spotify segments…</string>
-    <string name="no_database_segments_for_id">\n\n⚠️ No approved MegaCut segments found for this Rumble or Spotify source.</string>
     <string name="megacut_removal">MegaCut segment removal</string>
     <string name="no_media_source_found">\n\n⚠️ No matching YouTube, Rumble, or Spotify entry found for ID: %1$s</string>
     <string name="verified_source_no_segments">\n\n⚠️ Source verified, but no segment set is available yet.</string>
@@ -62,14 +60,11 @@
     <string name="output_streams_video_only_unavailable">Output streams: Video only — no usable audio stream</string>
     <string name="output_streams_detecting">Output streams: detecting…</string>
     <string name="output_streams_both">Output streams: Video and audio</string>
-    <string name="audio_bitrate_with_unit">%1$sk</string>
-    <string name="audio_bitrate_128k">128k</string>
     <string name="audio_bitrate_fallback">128k - fallback</string>
     <string name="input_bitrate">Input</string>
     <string name="custom">Custom</string>
     <string name="input_summary">Input: %1$s</string>
     <string name="audio_input_summary">Input: %1$s %2$s %3$s</string>
-    <string name="media_loaded_output_options_failed">Media loaded, but output options failed: %1$s</string>
     <string name="media_loaded_segment_reload_failed">Media loaded, but segment reload failed: %1$s</string>
     <string name="media_loaded_stream_ui_failed">Media loaded, but stream UI failed: %1$s</string>
     <string name="output_policy_preview_failed">Output settings could not be resolved: %1$s</string>
@@ -119,7 +114,6 @@
     <string name="no_segments_cannot_process">No segments — cannot process</string>
     <string name="process_with_id_button">Process with this ID</string>
     <string name="no_sponsorblock_segments_for_id">\n\n⚠️ No SponsorBlock segments found for ID: %1$s</string>
-    <string name="segments_to_cut">🔍 %1$d segment(s) to cut (~%2$s):</string>
     <string name="segment_status">%1$s%2$s%3$s</string>
     <string name="status_with_title">%1$s%2$s</string>
     <string name="segments_to_remove">Segments to remove:</string>
@@ -132,6 +126,36 @@
     <string name="nav_process">Process</string>
     <string name="nav_database">Database</string>
     <string name="nav_about">About</string>
-    <string name="database_placeholder">MegaCut Web database search will appear here.</string>
-    <string name="about_placeholder">SponsorCut information will appear here.</string>
+    <string name="selected_segments_total">Selected segments: %1$s</string>
+    <string name="selected_segments_total_open_ended">Selected segments: %1$s (+open-ended)</string>
+    <string name="database_search">Search</string>
+    <string name="database_advanced_search">Advanced search</string>
+    <string name="database_platform">Platform</string>
+    <string name="database_variant">Variant</string>
+    <string name="database_submission_date_from">Submission date from</string>
+    <string name="database_submission_date_to">Submission date to</string>
+    <string name="database_date_to_now">Now</string>
+    <string name="database_previous_page">← Previous</string>
+    <string name="database_page">Page %1$d</string>
+    <string name="database_next_page">Next →</string>
+    <string name="back_to_about">← Back to About</string>
+    <string name="visit_megacut_website">Visit the MegaCut website</string>
+    <string name="database_loading">Loading MegaCut entries…</string>
+    <string name="database_load_failed">Could not load MegaCut Web entries.\n\nCheck connection or try again later…</string>
+    <string name="database_open_link">Open link</string>
+    <string name="database_share">Share</string>
+    <string name="database_no_entries">No approved MegaCut entries found.</string>
+    <string name="database_page_status_has_more">Page %1$d — showing the latest %2$s.</string>
+    <string name="database_page_status_no_more">Page %1$d — showing %2$s. No more results.</string>
+    <plurals name="database_entry_count">
+        <item quantity="one">%1$d entry</item>
+        <item quantity="other">%1$d entries</item>
+    </plurals>
+    <plurals name="segments_to_cut_count">
+        <item quantity="one">🔍 %1$d segment to cut (~%2$s):</item>
+        <item quantity="other">🔍 %1$d segments to cut (~%2$s):</item>
+    </plurals>
+    <string name="database_entry_missing_source">This entry does not provide a usable source link.</string>
+    <string name="database_source_not_recognized">Could not recognize the selected source.</string>
+    <string name="database_variant_load_failed">MegaCut variant could not be loaded.</string>
 </resources>

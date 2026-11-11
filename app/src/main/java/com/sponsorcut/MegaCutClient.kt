@@ -50,7 +50,8 @@ data class MegaCutVariant(
  * It must not become a user-editable UI field or a frontend-visible setting.
  */
 class MegaCutClient(
-    private val baseUrl: String = "http://192.168.231.86:8787/api"
+    private val baseUrl: String = "http://192.168.18.86:8787/api"
+//    private val baseUrl: String = "http://192.168.15.2:8787/api"
 ) {
 
     private val client = OkHttpClient()
@@ -340,73 +341,73 @@ class MegaCutClient(
      * identifier is used as q, then results are filtered locally according to
      * the kind of identifier supplied.
      */
-    fun findSegmentSetSummary(source: MediaSource): JSONObject? {
-        val url = baseUrl.toHttpUrlOrNull()
-            ?.newBuilder()
-            ?.addPathSegment("segment-sets")
-            ?.apply {
-                if (source.platform != "unknown") {
-                    addQueryParameter("platform", source.platform)
-                }
-            }
-            ?.addQueryParameter("q", source.externalId)
-            ?.addQueryParameter("limit", "100")
-            ?.addQueryParameter("offset", "0")
-            ?.build()
-            ?: return null
+//    fun findSegmentSetSummary(source: MediaSource): JSONObject? {
+//        val url = baseUrl.toHttpUrlOrNull()
+//            ?.newBuilder()
+//            ?.addPathSegment("segment-sets")
+//            ?.apply {
+//                if (source.platform != "unknown") {
+//                    addQueryParameter("platform", source.platform)
+//                }
+//            }
+//            ?.addQueryParameter("q", source.externalId)
+//            ?.addQueryParameter("limit", "100")
+//            ?.addQueryParameter("offset", "0")
+//            ?.build()
+//            ?: return null
+//
+//        val request = Request.Builder().url(url).build()
+//        client.newCall(request).execute().use { response ->
+//            if (!response.isSuccessful) {
+//                Log.w(tag, "MegaCut search failed: code=${response.code}")
+//                return null
+//            }
+//
+//            val body = response.body?.string() ?: return null
+//            val root = runCatching { JSONArray(body) }.getOrNull() ?: return null
+//
+//            for (i in 0 until root.length()) {
+//                val item = root.optJSONObject(i) ?: continue
+//                if (summaryMatchesSource(item, source)) return item
+//            }
+//        }
+//
+//        return null
+//    }
 
-        val request = Request.Builder().url(url).build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                Log.w(tag, "MegaCut search failed: code=${response.code}")
-                return null
-            }
-
-            val body = response.body?.string() ?: return null
-            val root = runCatching { JSONArray(body) }.getOrNull() ?: return null
-
-            for (i in 0 until root.length()) {
-                val item = root.optJSONObject(i) ?: continue
-                if (summaryMatchesSource(item, source)) return item
-            }
-        }
-
-        return null
-    }
-
-    private fun summaryMatchesSource(item: JSONObject, source: MediaSource): Boolean {
-        val itemExternalId = item.optString("externalId")
-        val itemSourceUrl = item.optString("sourceUrl")
-        val itemEmbedUrl = item.optString("embedUrl")
-
-        return when (source.identifierKind) {
-            "rumble-page" ->
-                itemSourceUrl.contains(source.externalId) ||
-                        itemExternalId == source.externalId ||
-                        itemEmbedUrl.contains(source.externalId) ||
-                        (source.oEmbedExternalId != null && (
-                            itemExternalId == source.oEmbedExternalId ||
-                                    itemEmbedUrl.contains(source.oEmbedExternalId)
-                        ))
-
-            "rumble-embed" ->
-                itemExternalId == source.externalId ||
-                        itemEmbedUrl.contains(source.externalId)
-
-            "ambiguous-id" ->
-                itemExternalId == source.externalId ||
-                        itemSourceUrl.contains(source.externalId) ||
-                        itemEmbedUrl.contains(source.externalId)
-
-            "episode" ->
-                itemExternalId == source.externalId ||
-                        itemSourceUrl.contains(source.externalId)
-
-            else ->
-                itemExternalId == source.externalId ||
-                        itemSourceUrl.contains(source.externalId)
-        }
-    }
+//    private fun summaryMatchesSource(item: JSONObject, source: MediaSource): Boolean {
+//        val itemExternalId = item.optString("externalId")
+//        val itemSourceUrl = item.optString("sourceUrl")
+//        val itemEmbedUrl = item.optString("embedUrl")
+//
+//        return when (source.identifierKind) {
+//            "rumble-page" ->
+//                itemSourceUrl.contains(source.externalId) ||
+//                        itemExternalId == source.externalId ||
+//                        itemEmbedUrl.contains(source.externalId) ||
+//                        (source.oEmbedExternalId != null && (
+//                            itemExternalId == source.oEmbedExternalId ||
+//                                    itemEmbedUrl.contains(source.oEmbedExternalId)
+//                        ))
+//
+//            "rumble-embed" ->
+//                itemExternalId == source.externalId ||
+//                        itemEmbedUrl.contains(source.externalId)
+//
+//            "ambiguous-id" ->
+//                itemExternalId == source.externalId ||
+//                        itemSourceUrl.contains(source.externalId) ||
+//                        itemEmbedUrl.contains(source.externalId)
+//
+//            "episode" ->
+//                itemExternalId == source.externalId ||
+//                        itemSourceUrl.contains(source.externalId)
+//
+//            else ->
+//                itemExternalId == source.externalId ||
+//                        itemSourceUrl.contains(source.externalId)
+//        }
+//    }
 
     /**
      * Fetches the complete approved segment set, including its segments array.

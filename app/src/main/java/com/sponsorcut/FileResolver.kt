@@ -16,7 +16,7 @@ import java.io.File
 sealed class OutputTarget {
     abstract val label: String
     data class FileTarget(val file: File) : OutputTarget() {
-        override val label get() = file.absolutePath
+        override val label: String get() = file.absolutePath
     }
     data class UriTarget(val uri: Uri, override val label: String) : OutputTarget()
 }
@@ -109,7 +109,7 @@ object FileResolver {
         return OutputTarget.UriTarget(doc.uri, path)
     }
 
-    fun createOutputTarget(context: Context, sourceUri: Uri, fileName: String, inputFile: File): OutputTarget {
+    fun createOutputTarget(context: Context, sourceUri: Uri, fileName: String): OutputTarget {
         val realPath = tryGetRealPath(context, sourceUri)
         if (realPath != null) {
             val parent = File(realPath).parentFile
