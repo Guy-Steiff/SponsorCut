@@ -692,7 +692,7 @@ class ProcessingService : Service() {
                     encodeStats.audioRecoveryProfileUsed
                 )
                 val result = "✓ Done — $segmentSourceLabel\n\n" +
-                    "Removed ${segments.size} segment(s) (~%.1fs):\n".format(totalCut) +
+                    "Removed ${segments.size} segment(s) (${formatElapsedHms(totalCut)}):\n" +
                     "$segSummary\n\n" +
                     "Media: ${videoInfo.summaryLine}\n" +
                     "Mode: ${processingPlan.rationale}\n" +

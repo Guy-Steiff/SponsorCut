@@ -1,15 +1,17 @@
+import com.android.build.api.dsl.ApplicationExtension
+
 plugins {
     id("com.android.application")
 }
 
-android {
+extensions.configure<ApplicationExtension> {
     namespace = "com.sponsorcut"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.sponsorcut"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 5
         versionName = "1.1.0"
 
@@ -63,10 +65,10 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
 
     // ffmpeg-kit AAR — built from source by F-Droid via InfinityLoop1308/ffmpeg-kit srclib,
     // or placed manually in app/libs/ for local development.

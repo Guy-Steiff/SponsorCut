@@ -3,6 +3,7 @@
 package com.sponsorcut
 
 import android.app.Activity
+import android.annotation.SuppressLint
 import androidx.core.content.ContextCompat
 import android.content.BroadcastReceiver
 import android.content.ActivityNotFoundException
@@ -21,6 +22,7 @@ import android.text.TextWatcher
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.window.OnBackInvokedCallback
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
@@ -423,6 +425,13 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
+            ) {
+                if (!handleAboutArticleBack()) finish()
+            }
+        }
 
         // Show launch crashes even when statusView does not yet exist.
         val previousExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -4226,18 +4235,22 @@ This summary does not replace those notices or the license terms of individual c
         setContentView(rootLayout)
     }
 
+    // API 33+ is handled by the OnBackInvokedCallback registered in onCreate.
+    @SuppressLint("GestureBackNavigation")
     @Suppress("DEPRECATION")
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        val backAction = aboutBackAction
-
-        if (aboutArticleVisible && backAction != null) {
-            aboutArticleVisible = false
-            backAction()
-            return
-        }
-
+        if (handleAboutArticleBack()) return
         super.onBackPressed()
+    }
+
+    private fun handleAboutArticleBack(): Boolean {
+        val backAction = aboutBackAction
+        if (!aboutArticleVisible || backAction == null) return false
+
+        aboutArticleVisible = false
+        backAction()
+        return true
     }
 
     private var pendingVideoInfo: FFProbeInspector.VideoInfo? = null
@@ -4482,13 +4495,33 @@ This summary does not replace those notices or the license terms of individual c
                     return@runOnUiThread
                 }
 
-                inspectionFailure?.let {
-                    setStatus("Media inspection failed:\n${it.message}")
+                // FFprobe returns a non-null minimal VideoInfo even when it cannot
+                // inspect the input. Treat that as invalid only when neither a
+                // usable video nor audio stream was identified; audio-only and
+                // video-only inputs remain valid.
+                val inspectionValid = info?.let { inspected ->
+                    val videoUnknown = inspected.videoCodec
+                        .trim()
+                        .equals("unknown", ignoreCase = true)
+                    val audioUnknown = inspected.audioCodec
+                        ?.trim()
+                        ?.equals("unknown", ignoreCase = true)
+                        ?: true
+
+                    !(videoUnknown && audioUnknown)
+                } ?: false
+
+                if (inspectionFailure != null) {
+                    setStatus("Media inspection failed:\n${inspectionFailure.message}")
+                } else if (!inspectionValid) {
+                    setStatus("Media inspection failed: no usable audio or video stream was found.")
                 }
-                pendingVideoInfo = info
+
+                pendingVideoInfo = if (inspectionValid) info else null
+                updateCards()
                 DiagLog.append(
                     "ColdOpen",
-                    "inspection completed info=${info != null} " +
+                    "inspection completed valid=$inspectionValid info=${info != null} " +
                         "summary=${info?.summaryLine} " +
                         "video=${info?.videoCodec} audio=${info?.audioCodec}"
                 )
@@ -5553,6 +5586,11 @@ This summary does not replace those notices or the license terms of individual c
 
     private fun startProcessing(uri: Uri, videoId: String) {
         if (rejectIfBusy(source = "startProcessing")) return
+
+        if (pendingVideoInfo == null) {
+            setStatus("Media inspection failed or is still in progress.")
+            return
+        }
 
         if (!canReadUri(uri)) {
             pendingUri = null
@@ -7035,8 +7073,13 @@ This summary does not replace those notices or the license terms of individual c
                 renderSegmentList(segments, preserveSelection = preserveSelection)
                 renderDetectedCategories()
                 val processingActive = ProcessingService.isProcessingActive
-                retryButton.isEnabled = !processingActive
-                retryButton.alpha = if (processingActive) 0.35f else 1f
+                val canProcess = pendingVideoInfo != null
+                retryButton.isEnabled = canProcess && !processingActive
+                retryButton.alpha = when {
+                    processingActive -> 0.35f
+                    canProcess -> 1f
+                    else -> 0.5f
+                }
                 retryButton.text = getString(R.string.process_with_id_button)
                 val totalCut = segments.sumOf { it.end - it.start }
                 val note = resources.getQuantityString(
@@ -7563,7 +7606,7 @@ This summary does not replace those notices or the license terms of individual c
 
         val imm = getSystemService(INPUT_METHOD_SERVICE)
                 as android.view.inputmethod.InputMethodManager
-        imm.showSoftInput(editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        imm.showSoftInput(editor, 0)
     }
 
     private fun maskedDigitsFromSeconds(seconds: Double): String {
@@ -7852,7 +7895,9 @@ This summary does not replace those notices or the license terms of individual c
 
             val localSourceReady = segmentationEnabled && localSegments != null
             val manualSourceReady = segmentationEnabled && currentSegments.isNotEmpty()
-            val mediaReady = fileCardState == CardState.OK
+            // ensure ffprobe ran succesfully before alllowing processing button to be clickable
+            val mediaReady = fileCardState == CardState.OK &&
+                    pendingVideoInfo != null
             val hasInvalidSegments = invalidSegmentIndexes.isNotEmpty() ||
                     (segmentationEnabled && currentSegments.any { !isSegmentRowValid(it) })
 
