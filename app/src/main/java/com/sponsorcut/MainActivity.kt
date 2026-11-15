@@ -22,7 +22,6 @@ import android.text.TextWatcher
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import android.window.OnBackInvokedCallback
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
@@ -2933,7 +2932,7 @@ class MainActivity : Activity() {
 
             // Signature
             val sig = TextView(context).apply {
-                val url = "https://megacut.onrender.com/"
+                val url = "https://megacut-web.onrender.com/"
                 val textContent = "By: Guy Steiff\nAbout: $url"
 
                 val spannable = SpannableString(textContent)
@@ -3646,7 +3645,7 @@ class MainActivity : Activity() {
             paint.isUnderlineText = true
             setPadding(4, 14, 4, 14)
             setOnClickListener {
-                openAboutUrl("https://megacut.onrender.com")
+                openAboutUrl("https://megacut-web.onrender.com")
             }
         }
 
@@ -6451,6 +6450,8 @@ This summary does not replace those notices or the license terms of individual c
             return
         }
 
+        startColdStartWait(databaseStatusView)
+
         Thread {
             val response = megaCutClient.fetchRecentSegmentSummaries(
                 limit = 20,
@@ -6459,10 +6460,12 @@ This summary does not replace those notices or the license terms of individual c
                 platform = platformChoice.ifBlank { null },
                 variant = variantChoice,
                 submittedFrom = dateFromChoice,
-                submittedTo = dateToChoice
+                submittedTo = dateToChoice,
+                onWaiting = { startColdStartWait(databaseStatusView) }
             )
 
             runOnUiThread {
+                stopColdStartWait(databaseStatusView)
                 databaseIsLoading = false
 
                 if (response == null) {
@@ -6904,15 +6907,25 @@ This summary does not replace those notices or the license terms of individual c
             // For a Rumble page URL, oEmbed supplies that embed ID.
             val variantExternalId = oEmbedExternalId ?: source.externalId
 
+            startColdStartWait(statusView)
+
             val variants = megaCutClient.fetchMegaCutVariants(
                 platform = source.platform,
-                externalId = variantExternalId
+                externalId = variantExternalId,
+                onWaiting = { startColdStartWait(statusView) }
             )
 
             val selectedVariant = variants.firstOrNull()
             val detail = selectedVariant?.id
                 ?.takeIf { it.isNotBlank() }
-                ?.let { megaCutClient.fetchSegmentSetDetail(it) }
+                ?.let {
+                    megaCutClient.fetchSegmentSetDetail(
+                        id = it,
+                        onWaiting = { startColdStartWait(statusView) }
+                    )
+                }
+
+            stopColdStartWait(statusView)
 
             MediaLookupResult(
                 source = effectiveSource,
@@ -6923,6 +6936,7 @@ This summary does not replace those notices or the license terms of individual c
                 variants = variants
             )
         } catch (e: Exception) {
+            stopColdStartWait(statusView)
             Log.w(tag, "MegaCut source lookup failed: ${e.message}")
             null
         }
@@ -6998,10 +7012,17 @@ This summary does not replace those notices or the license terms of individual c
         if (activeMegaCutLookup == null) return
         selectedMegaCutVariantId = variant.id
 
+        startColdStartWait(statusView)
+
         Thread {
-            val detail = megaCutClient.fetchSegmentSetDetail(variant.id)
+            val detail = megaCutClient.fetchSegmentSetDetail(
+                id = variant.id,
+                onWaiting = { startColdStartWait(statusView) }
+            )
 
             runOnUiThread {
+                stopColdStartWait(statusView)
+
                 if (selectedMegaCutVariantId != variant.id) {
                     return@runOnUiThread
                 }
@@ -8057,8 +8078,48 @@ This summary does not replace those notices or the license terms of individual c
         return "%d:%02d:%02d.%03d".format(h, m, s, ms)
     }
 
+    private fun startColdStartWait(target: TextView) {
+        runOnUiThread {
+            stopColdStartWait(target)
+
+            var phase = 0
+            val waitingPrefix = getString(R.string.megacut_cold_start_waiting, "")
+            val tick = object : Runnable {
+                override fun run() {
+                    if (target.tag !== this) return
+
+                    // Stop as soon as a final status message replaces the
+                    // waiting state, including messages assigned directly to
+                    // the TextView rather than through setStatus().
+                    if (!target.text.toString().startsWith(waitingPrefix)) {
+                        target.tag = null
+                        return
+                    }
+
+                    target.text = getString(
+                        R.string.megacut_cold_start_waiting,
+                        dotPhases[phase]
+                    )
+                    phase = (phase + 1) % dotPhases.size
+                    target.postDelayed(this, 500)
+                }
+            }
+
+            target.tag = tick
+            target.post(tick)
+        }
+    }
+
+    private fun stopColdStartWait(target: TextView) {
+        runOnUiThread {
+            (target.tag as? Runnable)?.let { target.removeCallbacks(it) }
+            target.tag = null
+        }
+    }
+
     private fun setStatus(text: String) {
         runOnUiThread {
+            stopColdStartWait(statusView)
             stopDotAnim()
             statusView.text = text
         }

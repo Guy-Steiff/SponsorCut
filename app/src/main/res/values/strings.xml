@@ -158,4 +158,5 @@
     <string name="database_entry_missing_source">This entry does not provide a usable source link.</string>
     <string name="database_source_not_recognized">Could not recognize the selected source.</string>
     <string name="database_variant_load_failed">MegaCut variant could not be loaded.</string>
+    <string name="megacut_cold_start_waiting">Hold while the MegaCut service wakes up%1$s</string>
 </resources>

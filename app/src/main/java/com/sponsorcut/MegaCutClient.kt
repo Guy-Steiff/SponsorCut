@@ -8,7 +8,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+import java.util.Timer
+import java.util.TimerTask
 
 data class MediaSource(
     val platform: String,
@@ -51,10 +55,16 @@ data class MegaCutVariant(
  */
 class MegaCutClient(
 //    private val baseUrl: String = "http://192.168.18.86:8787/api"
-    private val baseUrl: String = "http://192.168.15.19:8787/api"
+//    private val baseUrl: String = "http://192.168.15.19:8787/api"
+    private val baseUrl: String = "https://megacut-web.onrender.com/api"
 ) {
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(90, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
+        .build()
     private val tag = "MegaCutClient"
 
     fun parseMediaSource(rawInput: String): MediaSource? {
@@ -190,6 +200,78 @@ class MegaCutClient(
     }
 
     /**
+     * Executes a MegaCut API request with retries for Render free-tier cold starts.
+     *
+     * Render may take about one minute to wake after inactivity. The first request
+     * can therefore fail or time out; retrying gives the service time to become
+     * available.
+     */
+    private fun executeApiRequest(
+        request: Request,
+        label: String,
+        maxAttempts: Int = 3,
+        onWaiting: ((attempt: Int) -> Unit)? = null
+    ): String? {
+        // Preserve the caller's initial loading state for the first five
+        // seconds. After that, show the cold-start waiting state until the
+        // operation either succeeds or exhausts its retry attempts.
+        val waitTimer = Timer("MegaCutColdStartWait", true)
+
+        try {
+            waitTimer.schedule(
+                object : TimerTask() {
+                    override fun run() {
+                        onWaiting?.invoke(1)
+                    }
+                },
+                5_000L
+            )
+
+            for (attempt in 1..maxAttempts) {
+                try {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            return response.body.string()
+                        }
+
+                        Log.w(
+                            tag,
+                            "$label failed: attempt=$attempt code=${response.code}"
+                        )
+
+                        // Retry transient server/cold-start responses.
+                        if (response.code == 502 ||
+                            response.code == 503 ||
+                            response.code == 504
+                        ) {
+                            if (attempt < maxAttempts) {
+                                Thread.sleep(5_000L)
+                                continue
+                            }
+                        }
+
+                        return null
+                    }
+                } catch (exception: IOException) {
+                    Log.w(
+                        tag,
+                        "$label connection failed: attempt=$attempt error=${exception.message}"
+                    )
+
+                    if (attempt < maxAttempts) {
+                        Thread.sleep(5_000L)
+                    }
+                }
+            }
+
+            Log.w(tag, "$label failed after $maxAttempts attempts")
+            return null
+        } finally {
+            waitTimer.cancel()
+        }
+    }
+
+    /**
      * Returns every approved variant for one logical MegaCut source.
      *
      * MegaCut groups variants by platform plus externalId and returns them in
@@ -197,7 +279,8 @@ class MegaCutClient(
      */
     fun fetchMegaCutVariants(
         platform: String,
-        externalId: String
+        externalId: String,
+        onWaiting: ((attempt: Int) -> Unit)? = null
     ): List<MegaCutVariant> {
         val url = baseUrl.toHttpUrlOrNull()
             ?.newBuilder()
@@ -210,60 +293,50 @@ class MegaCutClient(
 
         val request = Request.Builder().url(url).build()
 
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(
-                        tag,
-                        "MegaCut variants failed: code=${response.code}"
-                    )
-                    return emptyList()
-                }
+        val body = executeApiRequest(
+            request = request,
+            label = "MegaCut variants lookup",
+            onWaiting = onWaiting
+        ) ?: return emptyList()
 
-                val body = response.body.string()
-                val root = runCatching { JSONArray(body) }.getOrNull()
-                    ?: return emptyList()
+        val root = runCatching { JSONArray(body) }.getOrNull()
+            ?: return emptyList()
 
-                val variants = mutableListOf<MegaCutVariant>()
+        val variants = mutableListOf<MegaCutVariant>()
 
-                for (i in 0 until root.length()) {
-                    val item = root.optJSONObject(i) ?: continue
-                    val id = item.optString("id")
+        for (i in 0 until root.length()) {
+            val item = root.optJSONObject(i) ?: continue
+            val id = item.optString("id")
 
-                    if (id.isBlank()) continue
+            if (id.isBlank()) continue
 
-                    variants += MegaCutVariant(
-                        id = id,
-                        platform = item.optString("platform"),
-                        externalId = item.optString("externalId"),
-                        variant = item.optInt("variant", 1),
-                        variantDescription = item
-                            .optString("variantDescription")
-                            .ifBlank { null },
-                        segmentCount = item.optInt("segmentCount", 0),
-                        durationSeconds = if (item.isNull("durationSeconds")) {
-                            null
-                        } else {
-                            item.optDouble("durationSeconds")
-                        },
-                        segmentedDurationSeconds = if (
-                            item.isNull("segmentedDurationSeconds")
-                        ) {
-                            null
-                        } else {
-                            item.optDouble("segmentedDurationSeconds")
-                        },
-                        status = item.optString("status", "approved"),
-                        createdAt = item.optString("createdAt").ifBlank { null }
-                    )
-                }
-
-                variants
-            }
-        } catch (e: Exception) {
-            Log.w(tag, "MegaCut variants lookup failed: ${e.message}")
-            emptyList()
+            variants += MegaCutVariant(
+                id = id,
+                platform = item.optString("platform"),
+                externalId = item.optString("externalId"),
+                variant = item.optInt("variant", 1),
+                variantDescription = item
+                    .optString("variantDescription")
+                    .ifBlank { null },
+                segmentCount = item.optInt("segmentCount", 0),
+                durationSeconds = if (item.isNull("durationSeconds")) {
+                    null
+                } else {
+                    item.optDouble("durationSeconds")
+                },
+                segmentedDurationSeconds = if (
+                    item.isNull("segmentedDurationSeconds")
+                ) {
+                    null
+                } else {
+                    item.optDouble("segmentedDurationSeconds")
+                },
+                status = item.optString("status", "approved"),
+                createdAt = item.optString("createdAt").ifBlank { null }
+            )
         }
+
+        return variants
     }
 
     /**
@@ -279,7 +352,8 @@ class MegaCutClient(
         platform: String? = null,
         variant: Int? = null,
         submittedFrom: String? = null,
-        submittedTo: String? = null
+        submittedTo: String? = null,
+        onWaiting: ((attempt: Int) -> Unit)? = null
     ): JSONArray? {
         val urlBuilder = baseUrl.toHttpUrlOrNull()?.newBuilder() ?: return null
 
@@ -315,29 +389,22 @@ class MegaCutClient(
 
         val request = Request.Builder().url(url).build()
 
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(
-                        tag,
-                        "MegaCut recent summaries failed: code=${response.code}"
-                    )
-                    return null
-                }
+        val body = executeApiRequest(
+            request = request,
+            label = "MegaCut recent summaries",
+            onWaiting = onWaiting
+        ) ?: return null
 
-                val body = response.body.string()
-                runCatching { JSONArray(body) }.getOrNull()
-            }
-        } catch (e: Exception) {
-            Log.w(tag, "MegaCut recent summaries lookup failed: ${e.message}")
-            null
-        }
+        return runCatching { JSONArray(body) }.getOrNull()
     }
 
     /**
      * Fetches the complete approved segment set, including its segments array.
      */
-    fun fetchSegmentSetDetail(id: String): MegaCutSegmentSet? {
+    fun fetchSegmentSetDetail(
+        id: String,
+        onWaiting: ((attempt: Int) -> Unit)? = null
+    ): MegaCutSegmentSet? {
         val url = baseUrl.toHttpUrlOrNull()
             ?.newBuilder()
             ?.addPathSegment("segment-sets")
@@ -346,16 +413,15 @@ class MegaCutClient(
             ?: return null
 
         val request = Request.Builder().url(url).build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                Log.w(tag, "MegaCut detail failed: id=$id code=${response.code}")
-                return null
-            }
 
-            val body = response.body.string()
-            val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
-            return parseSegmentSet(root)
-        }
+        val body = executeApiRequest(
+            request = request,
+            label = "MegaCut detail",
+            onWaiting = onWaiting
+        ) ?: return null
+
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        return parseSegmentSet(root)
     }
 
     private fun parseSegmentSet(root: JSONObject): MegaCutSegmentSet? {
