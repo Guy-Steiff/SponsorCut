@@ -29,3 +29,8 @@ build/reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local diagnostic artifacts
+*.bak
+*.bak-*
+*.bak.*

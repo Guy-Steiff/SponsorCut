@@ -3,7 +3,6 @@ package com.sponsorcut
 
 import org.json.JSONArray
 import org.json.JSONException
-import org.json.JSONObject
 
 data class SegmentWarning(
     val code: String,
