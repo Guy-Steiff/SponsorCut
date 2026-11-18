@@ -1101,7 +1101,7 @@ class MainActivity : Activity() {
             }
             addView(segmentCategoryContainer, lp)
 
-            // ── MegaCut variant selector ───────────────────────────────
+            // ── MuxCut variant selector ───────────────────────────────
             megaCutVariantSpinner = Spinner(context).apply {
                 visibility = View.GONE
 
@@ -3106,7 +3106,7 @@ class MainActivity : Activity() {
         }
 
         databaseSearchInput = EditText(this@MainActivity).apply {
-            hint = "Search MegaCut entries"
+            hint = "Search MuxCut entries"
             maxLines = 1
             setPadding(16, 12, 16, 12)
         }
@@ -3829,11 +3829,11 @@ Open, share, or move the completed media from your selected results folder.
             showAboutArticle(
                 "Support development",
                 """
-SponsorCut and MegaCut are independently maintained open-source projects.
+SponsorCut and MuxCut are independently maintained open-source projects.
 
 If these tools are useful to you, you can support ongoing development through Buy Me a Coffee or Bitcoin.
 
-Sharing SponsorCut, reporting issues, contributing segment files, or integrating MegaCut Core are equally valuable ways to support the project.
+Sharing SponsorCut, reporting issues, contributing segment files, or integrating MuxCut Core are equally valuable ways to support the project.
                 """.trimIndent(),
                 listOf(
                     getString(R.string.buy_me_a_coffee) to {
@@ -3894,9 +3894,9 @@ Sharing SponsorCut, reporting issues, contributing segment files, or integrating
                 """
 Last updated 4 November 2026
 
-Guy Steiff is an electrical engineer with around nine years of industrial experience and the sole developer of MegaCut and SponsorCut.
+Guy Steiff is an electrical engineer with around nine years of industrial experience and the sole developer of MuxCut and SponsorCut.
 
-He builds offline, privacy-respecting media-processing tools, including SponsorCut for removing selected sponsor segments from local video and audio, and MegaCut Core for FFmpeg-oriented integration into other applications and infrastructure.
+He builds offline, privacy-respecting media-processing tools, including SponsorCut for removing selected sponsor segments from local video and audio, and MuxCut Core for FFmpeg-oriented integration into other applications and infrastructure.
 
 He is available for remote and flexible work involving:
 
@@ -3906,15 +3906,15 @@ He is available for remote and flexible work involving:
 • Test automation
 • Media encoding and transcoding
 • FFmpeg integration
-• MegaCut Core integration
+• MuxCut Core integration
 
 Contact:
-guy.steiff-megacuthire@bytz.me
+guy.steiff-muxcuthire@bytz.me
                 """.trimIndent(),
                 listOf(
                     "Contact the developer" to {
                         openAboutUrl(
-                            "mailto:guy.steiff-megacuthire@bytz.me"
+                            "mailto:guy.steiff-muxcuthire@bytz.me"
                         )
                     },
                     getString(R.string.buy_me_a_coffee) to {
@@ -3926,7 +3926,7 @@ guy.steiff-megacuthire@bytz.me
 
         val licenseTile = addAboutTile(
             "License",
-            "Licensing information for SponsorCut and MegaCut.",
+            "Licensing information for SponsorCut and MuxCut.",
             R.drawable.ic_about_license
         ) {
             showAboutArticle(
@@ -3946,15 +3946,15 @@ These releases are licensed under the GNU General Public License version 3.0 or 
 
 You may use, study, modify, and redistribute the GPL-licensed application under the terms of that license.
 
-MegaCut
+MuxCut
 
-The future MegaCut end-user application is intended to use GPL-3.0-or-later.
+The future MuxCut end-user application is intended to use GPL-3.0-or-later.
 
-MegaCut Core
+MuxCut Core
 
 The reusable local-first media-processing platform is intended to use GPL-3.0-or-later.
 
-MegaCut Web
+MuxCut Web
 
 The web platform, including its server-side code, APIs, editorial infrastructure, and database schema, is intended to use AGPL-3.0-or-later.
 
@@ -3966,13 +3966,14 @@ Commercial integration
 
 Closed-source commercial integration opportunities are welcome through a separate specialized agreement.
 
-Such an agreement cannot override the license obligations of GPL-covered SponsorCut or MegaCut code, AGPL-covered MegaCut Web code, or separately licensed third-party components.
+Such an agreement cannot override the license obligations of GPL-covered SponsorCut or MuxCut code, AGPL-covered MuxCut Web code, or separately licensed third-party components.
 
 This page is an overview, not a replacement for the complete license texts accompanying a particular release.
                 """.trimIndent(),
                 listOf(
                     "GNU GPL version 3" to {
-                        openAboutUrl("https://www.gnu.org/licenses/gpl-3.0.html")
+//                        openAboutUrl("https://www.gnu.org/licenses/gpl-3.0.html")
+                        openAboutUrl("https://spdx.org/licenses/GPL-3.0-or-later.html")
                     }
                 )
             )
@@ -4011,19 +4012,34 @@ The FFmpegKit distribution also includes OpenSSL, cpu-features, and GMP. Each co
 
 SponsorBlock
 
-SponsorCut uses the external SponsorBlock community API and database to retrieve community-submitted segment information for supported YouTube media.
+SponsorCut uses the external SponsorBlock community API to retrieve
+community-submitted segment information for supported YouTube media.
 
 SponsorCut does not incorporate SponsorBlock source code.
 
+SponsorBlock segment data is provided by the SponsorBlock community and
+is used by SponsorCut under the Creative Commons Attribution-NonCommercial-
+ShareAlike 4.0 International License (CC BY-NC-SA 4.0).
+
+SponsorBlock is created by Ajay Ramachandran and SponsorBlock contributors.
+SponsorCut is not affiliated with, endorsed by, or sponsored by SponsorBlock
+or its contributors.
+
+For more information, visit:
+https://sponsor.ajay.app/
+
+License:
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
 PostgreSQL and Neon
 
-MegaCut's community segment database for Rumble and Spotify uses PostgreSQL hosted by Neon.
+MuxCut's community segment database for Rumble and Spotify uses PostgreSQL hosted by Neon.
 
-These are server-side components of MegaCut Web, not libraries distributed inside the SponsorCut Android application.
+These are server-side components of MuxCut Web, not libraries distributed inside the SponsorCut Android application.
 
 Other software
 
-The wider MegaCut ecosystem also uses or plans to use Android MediaCodec, React, React Router, Vite, Tailwind CSS, and Frappe Gantt.
+The wider MuxCut ecosystem also uses or plans to use Android MediaCodec, React, React Router, Vite, Tailwind CSS, and Frappe Gantt.
 
 Each third-party project retains its own licensing terms.
 
@@ -6138,7 +6154,7 @@ This summary does not replace those notices or the license terms of individual c
 
         // Each user-initiated lookup supersedes any older background lookup.
         // This prevents a delayed cold-open restoration result from replacing
-        // a newer successful Rumble/Spotify/MegaCut result.
+        // a newer successful Rumble/Spotify/MuxCut result.
         val lookupGeneration = ++mediaLookupGeneration
         activeMediaLookupKey = fetchKey
         lastFetchedId = fetchKey
@@ -6179,7 +6195,7 @@ This summary does not replace those notices or the license terms of individual c
                 }
 
                 // Non-null means platform identification succeeded.
-                // Save even when SponsorBlock/MegaCut returned no segments.
+                // Save even when SponsorBlock/MuxCut returned no segments.
                 if (result != null) {
                     saveMediaSource(result.source)
                 }
@@ -6449,8 +6465,6 @@ This summary does not replace those notices or the license terms of individual c
             databaseNextPageButton.isEnabled = databaseHasNextPage
             return
         }
-
-        startColdStartWait(databaseStatusView)
 
         Thread {
             val response = megaCutClient.fetchRecentSegmentSummaries(
@@ -6907,8 +6921,6 @@ This summary does not replace those notices or the license terms of individual c
             // For a Rumble page URL, oEmbed supplies that embed ID.
             val variantExternalId = oEmbedExternalId ?: source.externalId
 
-            startColdStartWait(statusView)
-
             val variants = megaCutClient.fetchMegaCutVariants(
                 platform = source.platform,
                 externalId = variantExternalId,
@@ -6937,7 +6949,7 @@ This summary does not replace those notices or the license terms of individual c
             )
         } catch (e: Exception) {
             stopColdStartWait(statusView)
-            Log.w(tag, "MegaCut source lookup failed: ${e.message}")
+            Log.w(tag, "MuxCut source lookup failed: ${e.message}")
             null
         }
     }
@@ -7011,8 +7023,6 @@ This summary does not replace those notices or the license terms of individual c
     private fun loadMegaCutVariant(variant: MegaCutVariant) {
         if (activeMegaCutLookup == null) return
         selectedMegaCutVariantId = variant.id
-
-        startColdStartWait(statusView)
 
         Thread {
             val detail = megaCutClient.fetchSegmentSetDetail(
@@ -8078,23 +8088,32 @@ This summary does not replace those notices or the license terms of individual c
         return "%d:%02d:%02d.%03d".format(h, m, s, ms)
     }
 
+    private val coldStartSavedProcessStatus = mutableMapOf<TextView, String>()
+
     private fun startColdStartWait(target: TextView) {
         runOnUiThread {
             stopColdStartWait(target)
 
             var phase = 0
+            var started = false
             val waitingPrefix = getString(R.string.megacut_cold_start_waiting, "")
+            val currentText = target.text?.toString().orEmpty()
+            if (target === statusView && !currentText.startsWith(waitingPrefix)) {
+                coldStartSavedProcessStatus[target] = currentText
+            }
             val tick = object : Runnable {
                 override fun run() {
                     if (target.tag !== this) return
 
-                    // Stop as soon as a final status message replaces the
-                    // waiting state, including messages assigned directly to
-                    // the TextView rather than through setStatus().
-                    if (!target.text.toString().startsWith(waitingPrefix)) {
+                    // The first tick initializes the waiting state. Later ticks
+                    // stop if a final status message has replaced it, including
+                    // messages assigned directly to the TextView rather than
+                    // through setStatus().
+                    if (started && !target.text.toString().startsWith(waitingPrefix)) {
                         target.tag = null
                         return
                     }
+                    started = true
 
                     target.text = getString(
                         R.string.megacut_cold_start_waiting,
@@ -8114,6 +8133,11 @@ This summary does not replace those notices or the license terms of individual c
         runOnUiThread {
             (target.tag as? Runnable)?.let { target.removeCallbacks(it) }
             target.tag = null
+            if (target === statusView) {
+                coldStartSavedProcessStatus.remove(target)?.let { restored ->
+                    target.text = restored
+                }
+            }
         }
     }
 

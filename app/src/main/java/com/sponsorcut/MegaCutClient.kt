@@ -295,7 +295,7 @@ class MegaCutClient(
 
         val body = executeApiRequest(
             request = request,
-            label = "MegaCut variants lookup",
+            label = "MuxCut variants lookup",
             onWaiting = onWaiting
         ) ?: return emptyList()
 
@@ -391,7 +391,7 @@ class MegaCutClient(
 
         val body = executeApiRequest(
             request = request,
-            label = "MegaCut recent summaries",
+            label = "MuxCut recent summaries",
             onWaiting = onWaiting
         ) ?: return null
 
@@ -416,7 +416,7 @@ class MegaCutClient(
 
         val body = executeApiRequest(
             request = request,
-            label = "MegaCut detail",
+            label = "MuxCut detail",
             onWaiting = onWaiting
         ) ?: return null
 
