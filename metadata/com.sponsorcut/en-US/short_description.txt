@@ -1,1 +1,1 @@
-Remove sponsor segments from local video and audio files using SponsorBlock.
+Remove unwanted segments from local video and audio files, with optional segment lookup.

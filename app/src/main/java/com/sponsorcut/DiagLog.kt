@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/DiagLog.kt
+
 package com.sponsorcut
 
 import android.util.Log
@@ -8,11 +10,23 @@ import android.util.Log
  * Cleared at the start of each new run.
  */
 object DiagLog {
+
     private const val TAG = "DiagLog"
     private val buf = StringBuilder()
 
+    @Volatile
+    private var runSummary: String = ""
+
     @Synchronized
-    fun clear() { buf.clear() }
+    fun clear() {
+        buf.clear()
+        runSummary = ""
+    }
+
+    @Synchronized
+    fun setRunSummary(summary: String) {
+        runSummary = summary.trim()
+    }
 
     @Synchronized
     fun append(tag: String, msg: String) {
@@ -21,6 +35,18 @@ object DiagLog {
     }
 
     @Synchronized
-    fun get(): String = buf.toString()
+    fun get(): String {
+        val details = buf.toString()
+        return if (runSummary.isBlank()) {
+            details
+        } else {
+            buildString {
+                appendLine("=== RUN SUMMARY ===")
+                appendLine(runSummary)
+                appendLine()
+                appendLine("=== DIAGNOSTICS ===")
+                append(details)
+            }
+        }
+    }
 }
-

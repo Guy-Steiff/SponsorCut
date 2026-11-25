@@ -1,0 +1,92 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "maintainer",
+    "name": "Guy Steiff",
+    "email": "guy.steiff-sponsorcutfunding@bytz.me",
+    "description": "Maintainer of SponsorCut, a local Android media-processing application.",
+    "webpageUrl": {
+      "url": "https://github.com/Guy-Steiff/SponsorCut"
+    }
+  },
+  "projects": [
+    {
+      "guid": "sponsorcut",
+      "name": "SponsorCut",
+      "description": "SponsorCut processes media files locally. It supports processing without segmentation, local TXT/JSON segment imports, manual segment creation and editing, and offline use of locally stored segment sets. Optional external database lookup may provide segmentation data, but is not required.",
+      "webpageUrl": {
+        "url": "https://github.com/Guy-Steiff/SponsorCut"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Guy-Steiff/SponsorCut"
+      },
+      "licenses": [
+        "spdx:GPL-3.0-or-later"
+      ],
+      "tags": [
+        "android",
+        "media",
+        "video",
+        "audio",
+        "privacy",
+        "offline",
+        "local-processing"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "buy-me-a-coffee",
+        "type": "payment-provider",
+        "address": "https://buymeacoffee.com/steiff",
+        "description": "One-time or recurring support through Buy Me a Coffee."
+      },
+      {
+        "guid": "bitcoin",
+        "type": "other",
+        "address": "bc1qqz6dxwc38lrhmp6u9880alkvretwv2d6ds5had",
+        "description": "One-time Bitcoin donations."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "any-amount",
+        "status": "active",
+        "name": "One-time support",
+        "description": "Contribute any amount to support ongoing development, testing, documentation, and maintenance.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": [
+          "buy-me-a-coffee",
+          "bitcoin"
+        ]
+      },
+      {
+        "guid": "monthly-support",
+        "status": "active",
+        "name": "Monthly support",
+        "description": "Provide recurring support for continued development, testing, documentation, and maintenance.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "monthly",
+        "channels": [
+          "buy-me-a-coffee"
+        ]
+      },
+      {
+        "guid": "annual-development-grant",
+        "status": "proposed",
+        "name": "Annual development and maintenance support",
+        "description": "Requested support for continued SponsorCut development, testing, native-build maintenance, documentation, test devices, hosting, and domain costs.",
+        "amount": 10000,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": []
+      }
+    ]
+  }
+}

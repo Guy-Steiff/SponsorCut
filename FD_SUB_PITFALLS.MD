@@ -20,7 +20,7 @@ scanignore:
 # RIGHT – nested under the build entry
 Builds:
   - versionName: '1.0'
-    ...
+    # ... other build keys ...
     scanignore:
       - app/libs
 ```

@@ -1,18 +1,21 @@
+import com.android.build.api.dsl.ApplicationExtension
+
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
-android {
+extensions.configure<ApplicationExtension> {
     namespace = "com.sponsorcut"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.sponsorcut"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 4
-        versionName = "1.0.3"
+        targetSdk = 37
+        versionCode = 5
+        versionName = "1.1.0"
+
+        ndkVersion = "30.0.14904198"
     }
 
     compileOptions {
@@ -20,13 +23,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
 
-    kotlinOptions {
-        jvmTarget = "21"
-    }
-
     signingConfigs {
         create("release") {
             val keystorePath = System.getenv("KEYSTORE_PATH")
+
             if (keystorePath != null) {
                 storeFile = file(keystorePath)
                 storePassword = System.getenv("KEYSTORE_PASS")
@@ -43,9 +43,7 @@ android {
     }
 
     dependenciesInfo {
-        // Disables dependency metadata when building APKs.
         includeInApk = false
-        // Disables dependency metadata when building Android App Bundles.
         includeInBundle = false
     }
 
@@ -54,6 +52,7 @@ android {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
+
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -65,19 +64,17 @@ android {
     }
 }
 
-kotlin {
-    jvmToolchain(21)
-}
-
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.core:core-ktx:1.19.1")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
+    implementation("androidx.documentfile:documentfile:1.1.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
 
     // ffmpeg-kit AAR — built from source by F-Droid via InfinityLoop1308/ffmpeg-kit srclib,
     // or placed manually in app/libs/ for local development.
     implementation(files("libs/ffmpeg-kit.aar"))
-    // Required transitive dependency of ffmpeg-kit (NativeLoader references it at runtime)
-    implementation("com.arthenica:smart-exception-java:0.2.1")
-}
 
+    // Required transitive dependency of ffmpeg-kit.
+    implementation("com.arthenica:smart-exception-java:0.2.1")
+
+}

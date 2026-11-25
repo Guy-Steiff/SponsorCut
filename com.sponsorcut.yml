@@ -1,9 +1,6 @@
-AntiFeatures:
-  TetheredNet:
-    en-US: Rely on SponsorBlock API.
 Categories:
   - Multimedia
-License: MIT
+License: GPL-3.0-or-later
 AuthorName: Guy Steiff
 SourceCode: https://github.com/Guy-Steiff/SponsorCut
 IssueTracker: https://github.com/Guy-Steiff/SponsorCut/issues

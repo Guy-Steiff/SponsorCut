@@ -1,9 +1,17 @@
 package com.sponsorcut
 
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.sponsorcut.core.model.ExecutionMode
+import com.sponsorcut.core.model.StreamSelection
 import com.arthenica.ffmpegkit.ReturnCode
 import android.util.Log
 import java.io.File
+
+private fun ExecutionMode.processingProgressLabel(): String = when (this) {
+    ExecutionMode.HW_ACCURATE -> "HW - Accurate Processing"
+    ExecutionMode.SW_ACCURATE -> "SW - Accurate processing"
+    ExecutionMode.FAST -> "Fast copy Processing"
+}
 
 /**
  * Execution layer only.
@@ -15,7 +23,8 @@ data class ProcessingResult(
     /** processing_time = a × duration + b  (per-segment regression) */
     val regressionA: Double? = null,
     /** Fixed overhead per segment (seconds). Null for single-pass or < 2 data points. */
-    val regressionB: Double? = null
+    val regressionB: Double? = null,
+    val audioRecoveryProfileUsed: Boolean = false
 )
 
 object FfmpegEngine {
@@ -32,6 +41,11 @@ object FfmpegEngine {
         onProgress: ((text: String) -> Unit)? = null,
         onProgressNumeric: ((current: Int, total: Int) -> Unit)? = null
     ): ProcessingResult {
+        if (!plan.removeSegments) {
+            processStreamSelection(input, output, plan, onProgress)
+            return ProcessingResult()
+        }
+
         if (segments.isEmpty()) return ProcessingResult()
 
         Log.i(TAG, "Input: ${input.absolutePath} exists=${input.exists()} size=${input.length()} plan.useSlowSeek=${plan.useSlowSeek} plan.canCopyVideo=${plan.canCopyVideo}")
@@ -52,7 +66,7 @@ object FfmpegEngine {
         // Builds one filter_complex with trim+setpts+concat, runs a single FFmpeg
         // command so h264_mediacodec is initialised exactly once across all segments.
         if (plan.singlePassFilter) {
-            processSinglePass(input, output, keepRanges, plan, fileDurationSec, onProgress, onProgressNumeric)
+            processSinglePass(input, output, keepRanges, plan, onProgress, onProgressNumeric)
             return ProcessingResult()  // regression computed in ProcessingService for single-pass
         }
 
@@ -60,6 +74,7 @@ object FfmpegEngine {
         val total = keepRanges.size
         val jobStartMs = System.currentTimeMillis()
         var completedCount = 0
+        var audioRecoveryProfileUsed = false
 
         var regN  = 0
         var regSX = 0.0
@@ -88,9 +103,9 @@ object FfmpegEngine {
 
                 val elapsed = System.currentTimeMillis() - jobStartMs
 
-                val (regA, regB) = when {
-                    regN == 0 -> null to null
-                    regN == 1 -> (regSY / regSX) to 0.0
+                val (regA, regB) = when (regN) {
+                    0 -> null to null
+                    1 -> (regSY / regSX) to 0.0
                     else -> {
                         val denom = regN * regSX2 - regSX * regSX
                         if (denom == 0.0) null to null
@@ -219,6 +234,9 @@ object FfmpegEngine {
                         useFallbackAudioArgs = true
                     )
                     if (rc == RETURN_CANCEL) error("CANCELLED")
+                    if (rc == RETURN_SUCCESS && !plan.canCopyAudio && !plan.dropAudio) {
+                        audioRecoveryProfileUsed = true
+                    }
                 }
 
                 // HW-Accurate: do NOT silently fall back — surface the error for the user to see.
@@ -265,6 +283,7 @@ object FfmpegEngine {
                 onProgressNumeric?.invoke(total, total)
                 parts[0].copyTo(output, overwrite = true)
                 return buildRegressionResult(regN, regSX, regSY, regSXY, regSX2)
+                    .copy(audioRecoveryProfileUsed = audioRecoveryProfileUsed)
             }
 
             onProgress?.invoke("Merging ${parts.size} parts...")
@@ -286,6 +305,7 @@ object FfmpegEngine {
             parts.forEach { it.delete() }
         }
         return buildRegressionResult(regN, regSX, regSY, regSXY, regSX2)
+            .copy(audioRecoveryProfileUsed = audioRecoveryProfileUsed)
     }
 
     private fun buildRegressionResult(regN: Int, regSX: Double, regSY: Double, regSXY: Double, regSX2: Double): ProcessingResult {
@@ -323,6 +343,167 @@ object FfmpegEngine {
     }
 
     /**
+     * FFmpegKit's native opus and vorbis encoders are experimental and require
+     * explicit experimental-codec permission. Apply this only to transcoding
+     * arguments, never to stream-copy arguments.
+     */
+    private fun audioEncoderArgsWithCompatibility(args: List<String>): List<String> {
+        val codecIndex = args.indexOf("-c:a")
+        val codec = codecIndex.takeIf { it >= 0 }
+            ?.let { args.getOrNull(it + 1) }
+            ?.lowercase()
+
+        return when (codec) {
+            "opus" -> args + listOf("-strict", "-2")
+
+            // FFmpeg's native Vorbis encoder supports stereo only. Upgrade mono
+            // sources to stereo rather than failing the job.
+            "vorbis" -> args + listOf("-strict", "-2", "-ac", "2")
+
+            else -> args
+        }
+    }
+
+    private fun runExtraction(
+        input: File,
+        output: File,
+        plan: TranscodePolicy.ProcessingPlan,
+        onProgress: ((String) -> Unit)?,
+        label: String
+    ) {
+        val args = mutableListOf("-y", "-i", input.absolutePath)
+
+        if (plan.streamSelection == StreamSelection.AUDIO_ONLY) {
+            args += "-vn"
+            args += if (plan.canCopyAudio) {
+                listOf("-c:a", "copy")
+            } else {
+                audioEncoderArgsWithCompatibility(plan.audioEncoderArgs)
+            }
+        } else {
+            args += "-an"
+            args += if (plan.canCopyVideo) {
+                listOf("-c:v", "copy")
+            } else {
+                plan.videoEncoderArgs
+            }
+        }
+
+        plan.outputMuxer?.let { args += listOf("-f", it) }
+        args += output.absolutePath
+
+        val command = args.joinToString(" ")
+        Log.i(TAG, "$label args: $command")
+        DiagLog.append("Engine", "$label args: $command")
+        onProgress?.invoke("$label…")
+
+        val session = FFmpegKit.execute(command)
+        val rc = session.returnCode
+
+        when {
+            ReturnCode.isCancel(rc) -> {
+                output.delete()
+                error("CANCELLED")
+            }
+            !ReturnCode.isSuccess(rc) -> {
+                val rcValue = rc?.value ?: -1
+                DiagLog.append("Engine", "$label FAILED rc=$rcValue")
+                output.delete()
+                error("$label failed (rc=$rcValue)")
+            }
+            else -> {
+                onProgress?.invoke("$label complete")
+            }
+        }
+    }
+
+    private fun processStreamSelection(
+        input: File,
+        output: File,
+        plan: TranscodePolicy.ProcessingPlan,
+        onProgress: ((String) -> Unit)?
+    ) {
+        if (plan.streamSelection == StreamSelection.BOTH) {
+            processBothNoSegments(
+                input = input,
+                output = output,
+                plan = plan,
+                onProgress = onProgress
+            )
+            return
+        }
+
+        val label = when {
+            plan.streamSelection == StreamSelection.AUDIO_ONLY ->
+                if (plan.canCopyAudio) "Extracting audio"
+                else "Extracting and transcoding audio"
+            else ->
+                if (plan.canCopyVideo) "Extracting video"
+                else "Extracting and transcoding video"
+        }
+
+        runExtraction(
+            input = input,
+            output = output,
+            plan = plan,
+            onProgress = onProgress,
+            label = label
+        )
+    }
+
+    private fun processBothNoSegments(
+        input: File,
+        output: File,
+        plan: TranscodePolicy.ProcessingPlan,
+        onProgress: ((String) -> Unit)?
+    ) {
+        val args = mutableListOf("-y", "-i", input.absolutePath)
+
+        args += if (plan.canCopyVideo) {
+            listOf("-c:v", "copy")
+        } else {
+            plan.videoEncoderArgs
+        }
+
+        args += if (plan.canCopyAudio) {
+            listOf("-c:a", "copy")
+        } else {
+            audioEncoderArgsWithCompatibility(plan.audioEncoderArgs)
+        }
+
+        plan.outputMuxer?.let { args += listOf("-f", it) }
+        args += output.absolutePath
+
+        val command = args.joinToString(" ")
+        Log.i(TAG, "Processing media args: $command")
+        DiagLog.append("Engine", "Processing media args: $command")
+        val progressLabel = when (plan.streamSelection) {
+            StreamSelection.AUDIO_ONLY -> "Extracting audio"
+            StreamSelection.VIDEO_ONLY -> "Extracting video"
+            StreamSelection.BOTH -> plan.executionMode.processingProgressLabel()
+        }
+        onProgress?.invoke(progressLabel)
+
+        val session = FFmpegKit.execute(command)
+        val rc = session.returnCode
+
+        when {
+            ReturnCode.isCancel(rc) -> {
+                output.delete()
+                error("CANCELLED")
+            }
+            !ReturnCode.isSuccess(rc) -> {
+                val rcValue = rc?.value ?: -1
+                DiagLog.append("Engine", "Processing media FAILED rc=$rcValue")
+                output.delete()
+                error("Processing media failed (rc=$rcValue)")
+            }
+            else -> {
+            }
+        }
+    }
+
+    /**
      * Processes all keepRanges in a single FFmpeg filter_complex command.
      * h264_mediacodec is initialised once → eliminates per-segment init overhead.
      */
@@ -331,68 +512,242 @@ object FfmpegEngine {
      * jumps directly to the right position — no wasted decoding of discarded frames.
      * The h264_mediacodec encoder is initialised exactly once for all segments combined.
      *
-     * e.g. 2 keep ranges → command:
-     *   ffmpeg -y -i input -ss 449.236 -i input
-     *     -filter_complex "[0:v]trim=end=395.883,...[v0]; [0:a]...[a0];
-     *                      [1:v]setpts=PTS-STARTPTS[v1]; [1:a]...[a1];
-     *                      [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
-     *     -map [outv] -map [outa] -c:v h264_mediacodec -b:v Nk -c:a aac -b:a 128k out.mp4
+     * For example, two keep ranges:
+     * ```text
+     * ffmpeg -y -i input -ss 449.236 -i input
+     *   -filter_complex "[0:v]trim=end=395.883,...[v0]; [0:a]...[a0];
+     *                    [1:v]setpts=PTS-STARTPTS[v1]; [1:a]...[a1];
+     *                    [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+     *   -map [outv] -map [outa] -c:v h264_mediacodec -b:v Nk -c:a aac -b:a 128k out.mp4
+     * ```
      */
-    private fun processSinglePass(
+private fun validateSinglePassGraph(
+        filters: List<String>,
+        expectedBranchCount: Int,
+        slowSeek: Boolean,
+        isAudioOnly: Boolean,
+        keepAudio: Boolean
+    ) {
+        val graph = filters.joinToString(";")
+
+        // Validate concat wiring for both Fast and slow-seek modes.
+        require(graph.contains("concat=n=$expectedBranchCount:")) {
+            "Single-pass graph invalid: expected concat n=$expectedBranchCount. Graph=$graph"
+        }
+
+        if (slowSeek) {
+            // Slow-seek mode does not pre-seek inputs with -ss. Therefore every
+            // branch must trim from absolute source timestamps. A bare
+            // setpts/asetpts branch would consume the entire source and duplicate
+            // it during concat.
+            if (!isAudioOnly) {
+                val videoTrimCount = Regex("""\[\d+:v]trim=""")
+                    .findAll(graph)
+                    .count()
+
+                require(videoTrimCount == expectedBranchCount) {
+                    "Single-pass slow-seek graph invalid: expected $expectedBranchCount " +
+                        "video trim branches, found $videoTrimCount. Graph=$graph"
+                }
+
+                val untrimmedVideoBranch = Regex("""\[\d+:v]setpts=""")
+                    .containsMatchIn(graph)
+
+                require(!untrimmedVideoBranch) {
+                    "Single-pass slow-seek graph contains an untrimmed video branch. Graph=$graph"
+                }
+            }
+
+            if (keepAudio) {
+                val audioTrimCount = Regex("""\[\d+:a]atrim=""")
+                    .findAll(graph)
+                    .count()
+
+                require(audioTrimCount == expectedBranchCount) {
+                    "Single-pass slow-seek graph invalid: expected $expectedBranchCount " +
+                        "audio trim branches, found $audioTrimCount. Graph=$graph"
+                }
+
+                val untrimmedAudioBranch = Regex("""\[\d+:a]asetpts=""")
+                    .containsMatchIn(graph)
+
+                require(!untrimmedAudioBranch) {
+                    "Single-pass slow-seek graph contains an untrimmed audio branch. Graph=$graph"
+                }
+            }
+        } else {
+            // Fast mode pre-seeks each input with -ss. A finite range uses trim
+            // relative to the seeked input; the final EOF range may legitimately
+            // use bare setpts/asetpts because its input begins at the requested
+            // seek position.
+            if (!isAudioOnly) {
+                val videoBranchCount = Regex("""\[\d+:v](?:trim=|setpts=)""")
+                    .findAll(graph)
+                    .count()
+
+                require(videoBranchCount == expectedBranchCount) {
+                    "Single-pass Fast graph invalid: expected $expectedBranchCount " +
+                        "video branches, found $videoBranchCount. Graph=$graph"
+                }
+            }
+
+            if (keepAudio) {
+                val audioBranchCount = Regex("""\[\d+:a](?:atrim=|asetpts=)""")
+                    .findAll(graph)
+                    .count()
+
+                require(audioBranchCount == expectedBranchCount) {
+                    "Single-pass Fast graph invalid: expected $expectedBranchCount " +
+                        "audio branches, found $audioBranchCount. Graph=$graph"
+                }
+            }
+        }
+    }
+
+private fun processSinglePass(
         input: File,
         output: File,
         keepRanges: List<Pair<Double, Double>>,
         plan: TranscodePolicy.ProcessingPlan,
-        fileDurationSec: Double?,
         onProgress: ((String) -> Unit)?,
         onProgressNumeric: ((Int, Int) -> Unit)?
     ) {
-        val isAudioOnly = plan.rationale.contains("audio-only")
+        val isAudioOnly = plan.dropVideo
+        val keepAudio = !plan.dropAudio
         val ext = output.extension.ifBlank { plan.outputExtension.ifBlank { "mp4" } }
         val tempOut = File(output.parent ?: output.absolutePath, "singlepass_${System.currentTimeMillis()}.$ext")
 
         fun buildSinglePassArgs(useFallbackProfile: Boolean): List<String> {
             val args = mutableListOf("-y")
+            val slowSeek = plan.useSlowSeek
 
-            // Each keep range = one seeked input. Decoder jumps directly to (start).
+            // Fast path: each keep range gets its own input-level seek. This is
+            // fast, but MPEG-TS can land video and audio at different demux
+            // points, producing A/V boundary drift.
+            //
+            // Slow/TS path: do not pre-seek. Trim video and audio from the same
+            // absolute source timestamps so their kept ranges cannot diverge.
             for ((start, _) in keepRanges) {
-                if (start > 0.001) args += listOf("-ss", "%.3f".format(start))
+                if (!slowSeek && start > 0.001) {
+                    args += listOf("-ss", "%.3f".format(start))
+                }
                 args += listOf("-i", input.absolutePath)
             }
 
-            // Build filter_complex using duration-relative trim (from 0, since input is seeked).
             val videoFilters = mutableListOf<String>()
             val audioFilters = mutableListOf<String>()
             for ((idx, range) in keepRanges.withIndex()) {
                 val (start, end) = range
                 val duration = if (end == Double.MAX_VALUE) null else end - start
+
+                DiagLog.append(
+                    "Engine",
+                    "Single-pass branch $idx: " +
+                        "start=$start, " +
+                        "end=${if (end == Double.MAX_VALUE) "EOF" else end}, " +
+                        "duration=${duration ?: "EOF"}, " +
+                        "slowSeek=$slowSeek, " +
+                        "isFinal=${idx == keepRanges.lastIndex}"
+                )
+
                 if (!isAudioOnly) {
-                    videoFilters += if (duration != null)
-                        "[$idx:v]trim=start=0:end=%.3f,setpts=PTS-STARTPTS[v$idx]".format(duration)
-                    else
-                        "[$idx:v]setpts=PTS-STARTPTS[v$idx]"
+                    videoFilters += when {
+                        slowSeek && duration != null ->
+                            "[$idx:v]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS[v$idx]".format(start, end)
+                        slowSeek ->
+                            "[$idx:v]trim=start=%.3f,setpts=PTS-STARTPTS[v$idx]".format(start)
+                        duration != null ->
+                            "[$idx:v]trim=start=0:end=%.3f,setpts=PTS-STARTPTS[v$idx]".format(duration)
+                        else ->
+                            "[$idx:v]setpts=PTS-STARTPTS[v$idx]"
+                    }
                 }
-                audioFilters += if (duration != null)
-                    "[$idx:a]atrim=start=0:end=%.3f,asetpts=PTS-STARTPTS[a$idx]".format(duration)
-                else
-                    "[$idx:a]asetpts=PTS-STARTPTS[a$idx]"
+
+                audioFilters += when {
+                    slowSeek && duration != null ->
+                        "[$idx:a]atrim=start=%.3f:end=%.3f,asetpts=PTS-STARTPTS[a$idx]".format(start, end)
+                    slowSeek ->
+                        "[$idx:a]atrim=start=%.3f,asetpts=PTS-STARTPTS[a$idx]".format(start)
+                    duration != null ->
+                        "[$idx:a]atrim=start=0:end=%.3f,asetpts=PTS-STARTPTS[a$idx]".format(duration)
+                    else ->
+                        "[$idx:a]asetpts=PTS-STARTPTS[a$idx]"
+                }
             }
 
             val n = keepRanges.size
             val concatV = if (!isAudioOnly) 1 else 0
+            val concatA = if (keepAudio) 1 else 0
             // Interleaved inputs required by concat: [v0][a0][v1][a1]...
-            val concatInputs = buildString { for (i in 0 until n) { if (!isAudioOnly) append("[v$i]"); append("[a$i]") } }
-            val outLabels = if (!isAudioOnly) "[outv][outa]" else "[outa]"
-            val concatFilter = "${concatInputs}concat=n=$n:v=$concatV:a=1$outLabels"
-
-            val allFilters = (if (!isAudioOnly) videoFilters else emptyList()) + audioFilters + listOf(concatFilter)
-            args += listOf("-filter_complex", allFilters.joinToString(";"))
-            if (!isAudioOnly) args += listOf("-map", "[outv]")
-            args += listOf("-map", "[outa]")
-            if (!isAudioOnly) {
-                args += if (useFallbackProfile) plan.fallbackVideoEncoderArgs else plan.videoEncoderArgs
+            val concatInputs = buildString {
+                for (i in 0 until n) {
+                    if (!isAudioOnly) append("[v$i]")
+                    if (keepAudio) append("[a$i]")
+                }
             }
-            args += if (useFallbackProfile) plan.fallbackAudioEncoderArgs else plan.audioEncoderArgs
+            val outLabels = buildString {
+                if (!isAudioOnly) append("[outv]")
+                if (keepAudio) append("[outa]")
+            }
+            val concatFilter = "${concatInputs}concat=n=$n:v=$concatV:a=$concatA$outLabels"
+
+            val allFilters = (
+                (if (!isAudioOnly) videoFilters else emptyList()) +
+                    audioFilters +
+                    listOf(concatFilter)
+            ).toMutableList()
+
+            // A stream fed by filter_complex cannot also receive -vf. Move any
+            // policy-generated downscale operation into the same graph, after
+            // concatenation, and map its output label instead.
+            val encoderArgs = (
+                if (useFallbackProfile) plan.fallbackVideoEncoderArgs
+                else plan.videoEncoderArgs
+            ).toMutableList()
+
+            var videoOutputLabel = "outv"
+            if (!isAudioOnly) {
+                val scaleIndex = encoderArgs.indexOfFirst { it == "-vf" }
+                if (scaleIndex >= 0 && scaleIndex + 1 < encoderArgs.size) {
+                    val videoFilter = encoderArgs[scaleIndex + 1]
+                    val scaleHeight = Regex("""scale=-2:(\d+)""")
+                        .find(videoFilter)
+                        ?.groupValues
+                        ?.get(1)
+
+                    if (scaleHeight != null) {
+                        encoderArgs.removeAt(scaleIndex + 1)
+                        encoderArgs.removeAt(scaleIndex)
+
+                        allFilters += "[outv]scale=-2:$scaleHeight[outv_scaled]"
+                        videoOutputLabel = "outv_scaled"
+                    }
+                }
+            }
+
+            validateSinglePassGraph(
+                filters = allFilters,
+                expectedBranchCount = n,
+                slowSeek = slowSeek,
+                isAudioOnly = isAudioOnly,
+                keepAudio = keepAudio
+            )
+
+            args += listOf("-filter_complex", allFilters.joinToString(";"))
+            if (!isAudioOnly) args += listOf("-map", "[$videoOutputLabel]")
+            if (keepAudio) args += listOf("-map", "[outa]")
+            if (!isAudioOnly) {
+                args += encoderArgs
+            }
+            if (keepAudio) {
+                args += audioEncoderArgsWithCompatibility(
+                    if (useFallbackProfile) {
+                        plan.fallbackAudioEncoderArgs
+                    } else {
+                        plan.audioEncoderArgs
+                    }
+                )
+            }
             plan.outputMuxer?.let { args += listOf("-f", it) }
             args += tempOut.absolutePath
             return args
@@ -407,30 +762,28 @@ object FfmpegEngine {
         onProgressNumeric?.invoke(0, 1)
 
         // Ticker: elapsed only — no ETA for a single opaque ffmpeg call
-        val modeLabel = if (plan.videoEncoderArgs.contains("mpeg4")) "SW" else "HW"
+        val modeLabel = plan.executionMode.processingProgressLabel()
         val tickerActive = java.util.concurrent.atomic.AtomicBoolean(true)
         val tickerThread = Thread {
             while (tickerActive.get()) {
                 try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
                 if (!tickerActive.get()) break
                 val elapsed = System.currentTimeMillis() - jobStartMs
-                onProgress?.invoke("$modeLabel single-pass encoding…\n${formatDuration(elapsed)} elapsed")
+                onProgress?.invoke("$modeLabel…\n${formatDuration(elapsed)} elapsed")
             }
         }
         tickerThread.isDaemon = true
         tickerThread.start()
 
-        var session = FFmpegKit.execute(cmdString)
-        val hasFallbackProfile =
-            (!plan.canCopyVideo && plan.fallbackVideoEncoderArgs != plan.videoEncoderArgs) ||
-            (!plan.canCopyAudio && plan.fallbackAudioEncoderArgs != plan.audioEncoderArgs)
+        var session = FFmpegKit.executeWithArguments(cmdArgs.toTypedArray())
+        val hasFallbackProfile = false
         if (!ReturnCode.isSuccess(session.returnCode) && !ReturnCode.isCancel(session.returnCode) && hasFallbackProfile) {
             DiagLog.append("Engine", "Single-pass primary profile failed, retrying with fallback profile")
             cmdArgs = buildSinglePassArgs(useFallbackProfile = true).toMutableList()
             cmdString = cmdArgs.joinToString(" ")
             Log.d(TAG, "Single-pass fallback args: $cmdString")
             DiagLog.append("Engine", "Single-pass fallback args: $cmdString")
-            session = FFmpegKit.execute(cmdString)
+            session = FFmpegKit.executeWithArguments(cmdArgs.toTypedArray())
         }
         tickerActive.set(false)
         tickerThread.join(200)
@@ -439,10 +792,28 @@ object FfmpegEngine {
             ReturnCode.isCancel(session.returnCode) -> { tempOut.delete(); error("CANCELLED") }
             !ReturnCode.isSuccess(session.returnCode) -> {
                 val rc = session.returnCode?.value ?: -1
-                val modeLabel2 = if (plan.videoEncoderArgs.contains("mpeg4")) "SW-Accurate" else "HW-Accurate"
-                DiagLog.append("Engine", "Single-pass FAILED rc=$rc")
-                tempOut.delete()
-                error("$modeLabel2 single-pass failed (rc=$rc).\n\nCheck the diagnostic log.\nTry Fast mode as a fallback.")
+        val modeLabel2 = when (plan.executionMode) {
+            ExecutionMode.HW_ACCURATE -> "HW-Accurate"
+            ExecutionMode.SW_ACCURATE -> "SW-Accurate"
+            ExecutionMode.FAST -> "Fast"
+        }
+
+        DiagLog.append("ffkit", "\n--- FFmpeg session failed (rc=$rc) ---")
+        session.output?.takeIf { it.isNotBlank() }?.let {
+            DiagLog.append("ffkit", it)
+        }
+        session.allLogs.forEach { log ->
+            log.message?.takeIf { it.isNotBlank() }?.let {
+                DiagLog.append("ffkit", it)
+            }
+        }
+        session.failStackTrace?.let {
+            DiagLog.append("ffkit", "failStackTrace:\n$it")
+        }
+        DiagLog.append("ffkit", "--- end failed FFmpeg session ---")
+        DiagLog.append("Engine", "Single-pass FAILED rc=$rc; see FFmpeg output")
+        tempOut.delete()
+        error("$modeLabel2 failed (rc=$rc). See FFmpeg output below.")
             }
             else -> {
                 onProgressNumeric?.invoke(1, 1)
@@ -462,8 +833,10 @@ object FfmpegEngine {
         useFallbackVideoArgs: Boolean = false,
         useFallbackAudioArgs: Boolean = false
     ): Int {
-        val isCopy = plan.canCopyVideo && plan.canCopyAudio
-        val audioOnly = plan.rationale.contains("audio-only")
+        val keepVideo = !plan.dropVideo
+        val keepAudio = !plan.dropAudio
+        val isCopy = (!keepVideo || plan.canCopyVideo) &&
+            (!keepAudio || plan.canCopyAudio)
 
         val args = mutableListOf("-y")
 
@@ -487,23 +860,38 @@ object FfmpegEngine {
         }
 
         if (isCopy) {
-            if (audioOnly) {
-                args += listOf("-vn", "-c:a", "copy", "-avoid_negative_ts", "make_zero")
+            if (!keepVideo) args += "-vn"
+            if (!keepAudio) args += "-an"
+            if (keepVideo && keepAudio) {
+                args += listOf("-c", "copy")
             } else {
-                args += listOf("-c", "copy", "-avoid_negative_ts", "make_zero")
+                if (keepVideo) args += listOf("-c:v", "copy")
+                if (keepAudio) args += listOf("-c:a", "copy")
             }
+            args += listOf("-avoid_negative_ts", "make_zero")
         } else {
-            if (plan.canCopyVideo) {
+            if (!keepVideo) {
+                args += "-vn"
+            } else if (plan.canCopyVideo) {
                 args += listOf("-c:v", "copy")
             } else {
                 args += if (useFallbackVideoArgs) plan.fallbackVideoEncoderArgs else plan.videoEncoderArgs
             }
-            if (plan.canCopyAudio) {
+
+            if (!keepAudio) {
+                args += "-an"
+            } else if (plan.canCopyAudio) {
                 args += listOf("-c:a", "copy")
             } else {
-                args += if (useFallbackAudioArgs) plan.fallbackAudioEncoderArgs else plan.audioEncoderArgs
+                args += audioEncoderArgsWithCompatibility(
+                    if (useFallbackAudioArgs) {
+                        plan.fallbackAudioEncoderArgs
+                    } else {
+                        plan.audioEncoderArgs
+                    }
+                )
             }
-            if (audioOnly) args += listOf("-vn")
+
             args += listOf("-avoid_negative_ts", "make_zero")
         }
 

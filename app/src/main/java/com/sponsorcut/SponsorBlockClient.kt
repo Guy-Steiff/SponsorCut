@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/SponsorBlockClient.kt
+
 package com.sponsorcut
 
 import android.util.Log
@@ -10,7 +12,8 @@ import java.security.MessageDigest
 data class SponsorSegmentInfo(
     val category: String,
     val start: Double,
-    val end: Double
+    val end: Double,
+    val endIsOpen: Boolean = false
 )
 
 class SponsorBlockClient {
@@ -27,14 +30,19 @@ class SponsorBlockClient {
 
         val hashPrefix = sha256Hex(videoId).take(4)
         val effectiveCategories = categories.ifEmpty { listOf("sponsor") }
-        val categoriesJson = effectiveCategories.joinToString(",", "[", "]") { "\"$it\"" }
 
-        val url = "https://sponsor.ajay.app/api/skipSegments/$hashPrefix"
+        val urlBuilder = "https://sponsor.ajay.app/api/skipSegments/$hashPrefix"
             .toHttpUrlOrNull()
             ?.newBuilder()
-            ?.addQueryParameter("categories", categoriesJson)
-            ?.build()
             ?: return emptyList()
+
+        // The API documents repeated category parameters; use that form so
+        // every requested category is requested explicitly.
+        effectiveCategories.forEach { category ->
+            urlBuilder.addQueryParameter("category", category)
+        }
+
+        val url = urlBuilder.build()
 
         Log.i(tag, "Fetching segments for videoId=$videoId hashPrefix=$hashPrefix categories=$effectiveCategories")
 

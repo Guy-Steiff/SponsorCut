@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/FFProbeInspector.kt
+
 package com.sponsorcut
 
 import android.util.Log
@@ -6,6 +8,8 @@ import com.arthenica.ffmpegkit.ReturnCode
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 /**
  * Single source of truth for media file characteristics.
@@ -16,6 +20,22 @@ import java.io.File
 object FFProbeInspector {
 
     private const val TAG = "FFProbeInspector"
+
+    data class RationalFrameRate(val numerator: Long, val denominator: Long) {
+        init {
+            require(denominator > 0)
+        }
+
+        val value: Double get() = numerator.toDouble() / denominator
+
+        fun decimal(places: Int = 6): String =
+            BigDecimal.valueOf(numerator)
+                .divide(BigDecimal.valueOf(denominator), places, RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString()
+
+        override fun toString(): String = "$numerator/$denominator"
+    }
 
     data class VideoInfo(
         val videoCodec: String,
@@ -33,26 +53,46 @@ object FFProbeInspector {
         val durationSec: Double?,
         val containerBitrate: Long?,
         val containerFormat: String?,
-        val isTsEncapsulated: Boolean = false
+        val isTsEncapsulated: Boolean = false,
+        val nominalFrameRate: RationalFrameRate? = null,
+        val averageFrameRate: RationalFrameRate? = null,
+        val preferredFrameRate: RationalFrameRate? = null
     ) {
         val pixels: Int? get() = if (width != null && height != null) width * height else null
+
+        val frameRateSummary: String?
+            get() {
+                val nominal = nominalFrameRate
+                val average = averageFrameRate
+                return when {
+                    nominal != null && average != null &&
+                        kotlin.math.abs(nominal.value - average.value) > 0.000001 ->
+                        "avg ${average.decimal(3)} fps; nominal ${nominal.decimal(3)} fps"
+                    preferredFrameRate != null ->
+                        "${preferredFrameRate.decimal(3)} fps"
+                    fps != null -> "${"%.2f".format(fps)} fps"
+                    else -> null
+                }
+            }
 
         val summaryLine: String get() = buildString {
             append(videoCodec.uppercase())
             if (width != null && height != null) append(" ${width}x${height}")
-            if (fps != null) append(" @${"%.2f".format(fps)}fps")
+            frameRateSummary?.let { append(" @$it") }
             val vbr = videoBitrate ?: containerBitrate
-            if (vbr != null) append(" ${"%.0f".format(vbr / 1000.0)}kbps")
+            if (vbr != null) append(" ${formatBitrateKbps(vbr).removeSuffix("k")}kbps")
             if (audioCodec != null) {
                 append(" | ${audioCodec.uppercase()}")
                 if (sampleRate != null) append(" ${sampleRate}Hz")
-                if (audioBitrate != null) append(" ${"%.0f".format(audioBitrate / 1000.0)}kbps")
+                if (audioBitrate != null) {
+                    append(" ${formatBitrateKbps(audioBitrate).removeSuffix("k")}kbps")
+                }
             }
             if (!containerFormat.isNullOrBlank()) append(" | ${containerFormat.uppercase()}")
         }
     }
 
-    fun inspect(file: File): VideoInfo? {
+    fun inspect(file: File): VideoInfo {
         // Primary: structured API — parses ffprobe JSON internally
         val fromApi = inspectViaApi(file)
         // JSON path provides additional fields (container format, TS hint). Merge both.
@@ -73,11 +113,10 @@ object FFProbeInspector {
             return merged
         }
 
-        val best = merged
-        if (best != null) {
-            Log.w(TAG, "Both methods uncertain, returning best result: ${best.summaryLine}")
-            DiagLog.append("FFProbe", "uncertain result: ${best.summaryLine}")
-            return best
+        if (merged != null) {
+            Log.w(TAG, "Both methods uncertain, returning best result: ${merged.summaryLine}")
+            DiagLog.append("FFProbe", "uncertain result: ${merged.summaryLine}")
+            return merged
         }
 
         Log.w(TAG, "All inspection methods failed — returning minimal VideoInfo")
@@ -95,23 +134,58 @@ object FFProbeInspector {
     private fun merge(primary: VideoInfo?, secondary: VideoInfo?): VideoInfo? {
         if (primary == null) return secondary
         if (secondary == null) return primary
+
+        // The structured API can report embedded album art (mjpeg/png/etc.) as
+        // a video stream. The JSON path explicitly excludes attached pictures,
+        // so use it to reject cover art when it found no real video stream.
+        val imageLikeCodecs = setOf("mjpeg", "png", "bmp", "gif", "webp", "tiff")
+        val primaryVideoCodec =
+            if (
+                primary.videoCodec.lowercase() in imageLikeCodecs &&
+                secondary.videoCodec == "unknown"
+            ) {
+                "unknown"
+            } else {
+                primary.videoCodec
+            }
+
+        val videoBitrateSource =
+            if (secondary.videoBitrate != null) "JSON"
+            else if (primary.videoBitrate != null) "API"
+            else "none"
+
+        val audioBitrateSource =
+            if (secondary.audioBitrate != null) "JSON"
+            else if (primary.audioBitrate != null) "API"
+            else "none"
+
+        Log.i(
+            TAG,
+            "FFProbe bitrate inference: " +
+                "video=$videoBitrateSource(${secondary.videoBitrate ?: primary.videoBitrate ?: "null"}), " +
+                "audio=$audioBitrateSource(${secondary.audioBitrate ?: primary.audioBitrate ?: "null"})"
+        )
+
         return VideoInfo(
-            videoCodec = if (primary.videoCodec != "unknown") primary.videoCodec else secondary.videoCodec,
+            videoCodec = if (primaryVideoCodec != "unknown") primaryVideoCodec else secondary.videoCodec,
             width = primary.width ?: secondary.width,
             height = primary.height ?: secondary.height,
             fps = primary.fps ?: secondary.fps,
             pixFmt = primary.pixFmt ?: secondary.pixFmt,
-            videoBitrate = primary.videoBitrate ?: secondary.videoBitrate,
+            videoBitrate = secondary.videoBitrate ?: primary.videoBitrate,
             videoIndex = primary.videoIndex ?: secondary.videoIndex,
             audioCodec = primary.audioCodec ?: secondary.audioCodec,
             sampleRate = primary.sampleRate ?: secondary.sampleRate,
-            audioBitrate = primary.audioBitrate ?: secondary.audioBitrate,
+            audioBitrate = secondary.audioBitrate ?: primary.audioBitrate,
             audioChannels = primary.audioChannels ?: secondary.audioChannels,
             audioIndex = primary.audioIndex ?: secondary.audioIndex,
             durationSec = primary.durationSec ?: secondary.durationSec,
             containerBitrate = primary.containerBitrate ?: secondary.containerBitrate,
             containerFormat = primary.containerFormat ?: secondary.containerFormat,
-            isTsEncapsulated = primary.isTsEncapsulated || secondary.isTsEncapsulated
+            isTsEncapsulated = primary.isTsEncapsulated || secondary.isTsEncapsulated,
+            nominalFrameRate = secondary.nominalFrameRate ?: primary.nominalFrameRate,
+            averageFrameRate = primary.averageFrameRate ?: secondary.averageFrameRate,
+            preferredFrameRate = primary.preferredFrameRate ?: secondary.preferredFrameRate
         )
     }
 
@@ -126,9 +200,10 @@ object FFProbeInspector {
 
             var videoCodec = "unknown"
             var width: Int? = null; var height: Int? = null; var fps: Float? = null
-            var pixFmt: String? = null; var videoBitrate: Long? = null; var videoIndex: Int? = null
+            var averageFrameRate: RationalFrameRate? = null
+            var videoBitrate: Long? = null; var videoIndex: Int? = null
             var audioCodec: String? = null; var sampleRate: Int? = null
-            var audioBitrate: Long? = null; var audioChannels: Int? = null; var audioIndex: Int? = null
+            var audioBitrate: Long? = null; var audioIndex: Int? = null
 
             info.streams?.forEach { stream ->
                 when (stream.type?.lowercase()) {
@@ -136,7 +211,8 @@ object FFProbeInspector {
                         videoCodec = stream.codec?.lowercase() ?: "unknown"
                         width = stream.width?.toInt()
                         height = stream.height?.toInt()
-                        fps = parseFraction(stream.averageFrameRate)
+                        averageFrameRate = parseRationalFrameRate(stream.averageFrameRate)
+                        fps = averageFrameRate?.value?.toFloat()
                         videoBitrate = stream.bitrate?.toLongOrNull()
                         videoIndex = 0
                         // isTsEncapsulated not available via this API; defaults false
@@ -153,10 +229,12 @@ object FFProbeInspector {
             val durationSec = info.duration?.toDoubleOrNull()
             val containerBitrate = info.bitrate?.toLongOrNull()
             VideoInfo(
-                videoCodec, width, height, fps, pixFmt,
+                videoCodec, width, height, fps, null,
                 videoBitrate, videoIndex,
-                audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
-                durationSec, containerBitrate, null
+                audioCodec, sampleRate, audioBitrate, null, audioIndex,
+                durationSec, containerBitrate, null,
+                averageFrameRate = averageFrameRate,
+                preferredFrameRate = averageFrameRate
             )
         } catch (e: Exception) {
             Log.e(TAG, "inspectViaApi failed: ${e.message}")
@@ -168,7 +246,7 @@ object FFProbeInspector {
     private fun inspectViaJson(file: File): VideoInfo? {
         return try {
             val session = FFprobeKit.execute(
-                "-v quiet -print_format json -show_streams -show_format ${file.absolutePath}"
+                "-v quiet -print_format json -show_streams -show_format -show_entries stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,bit_rate,sample_rate,channels,channel_layout,duration:format=bit_rate,duration,format_name ${file.absolutePath}"
             )
 
             if (!ReturnCode.isSuccess(session.returnCode)) {
@@ -197,13 +275,15 @@ object FFProbeInspector {
         }
     }
 
-    private fun parseJson(json: String): VideoInfo? {
+    private fun parseJson(json: String): VideoInfo {
         val root = JSONObject(json)
 
         var videoCodec = "unknown"
         var width: Int? = null
         var height: Int? = null
         var fps: Float? = null
+        var nominalFrameRate: RationalFrameRate? = null
+        var averageFrameRate: RationalFrameRate? = null
         var pixFmt: String? = null
         var videoBitrate: Long? = null
         var videoIndex: Int? = null
@@ -217,19 +297,36 @@ object FFProbeInspector {
         val streams = root.optJSONArray("streams") ?: JSONArray()
         for (i in 0 until streams.length()) {
             val s = streams.optJSONObject(i) ?: continue
+            val attachedPic = s.optJSONObject("disposition")
+                ?.optInt("attached_pic", 0) == 1
+
             when (s.optString("codec_type")) {
-                "video" -> if (videoIndex == null) {
+                "video" -> {
+                    if (attachedPic || videoIndex != null) {
+                        continue
+                    }
+
                     videoCodec = s.optString("codec_name", "unknown").lowercase()
                     width = s.optInt("width").takeIf { it > 0 }
                     height = s.optInt("height").takeIf { it > 0 }
-                    fps = parseFraction(s.optString("r_frame_rate"))
-                        ?: parseFraction(s.optString("avg_frame_rate"))
+                    nominalFrameRate = parseRationalFrameRate(s.optString("r_frame_rate"))
+                    averageFrameRate = parseRationalFrameRate(s.optString("avg_frame_rate"))
+                    fps = (nominalFrameRate ?: averageFrameRate)?.value?.toFloat()
                     pixFmt = s.optString("pix_fmt").ifBlank { null }
                     videoBitrate = s.optString("bit_rate").toLongOrNull()
                     videoIndex = s.optInt("index")
+                    // H.264 Annex B detection. Annex B is common in MPEG-TS and
+                    // streamed inputs; it can require slower, more conservative
+                    // seeking. Future: add an equivalent HEVC Annex B detection
+                    // and handling path; do not treat this H.264-only field as
+                    // a generic TS/HEVC indicator.
                     isTsEncapsulated = s.optString("is_avc") == "false"
                 }
-                "audio" -> if (audioIndex == null) {
+                "audio" -> {
+                    if (audioIndex != null) {
+                        continue
+                    }
+
                     audioCodec = s.optString("codec_name").lowercase().ifBlank { null }
                     sampleRate = s.optString("sample_rate").toIntOrNull()
                     audioBitrate = s.optString("bit_rate").toLongOrNull()
@@ -239,26 +336,62 @@ object FFProbeInspector {
             }
         }
 
+        DiagLog.append(
+            "FFProbe",
+            "JSON selected video: index=$videoIndex codec=$videoCodec bitrate=$videoBitrate"
+        )
+        DiagLog.append(
+            "FFProbe",
+            "JSON selected audio: index=$audioIndex codec=$audioCodec bitrate=$audioBitrate " +
+                "sampleRate=$sampleRate channels=$audioChannels"
+        )
         val fmt = root.optJSONObject("format")
         val durationSec = fmt?.optString("duration")?.toDoubleOrNull()
         val containerBitrate = fmt?.optString("bit_rate")?.toLongOrNull()
         val containerFormat = fmt?.optString("format_name")?.lowercase()?.ifBlank { null }
 
+        // MPEG-TS is the authoritative signal for TS-style seeking. The older
+        // is_avc check alone missed real MPEG-TS inputs whose JSON did not
+        // expose that field as expected.
+        if (containerFormat?.contains("mpegts") == true) {
+            isTsEncapsulated = true
+        }
+
         return VideoInfo(
             videoCodec, width, height, fps, pixFmt, videoBitrate, videoIndex,
             audioCodec, sampleRate, audioBitrate, audioChannels, audioIndex,
-            durationSec, containerBitrate, containerFormat, isTsEncapsulated
+            durationSec, containerBitrate, containerFormat, isTsEncapsulated,
+            nominalFrameRate = nominalFrameRate,
+            averageFrameRate = averageFrameRate,
+            preferredFrameRate = nominalFrameRate ?: averageFrameRate
         )
     }
 
-    private fun parseFraction(raw: String?): Float? {
+    private fun parseRationalFrameRate(raw: String?): RationalFrameRate? {
         if (raw.isNullOrBlank() || raw == "0/0") return null
         return try {
             if ('/' in raw) {
                 val (n, d) = raw.trim().split('/')
-                val den = d.toFloat()
-                if (den == 0f) null else n.toFloat() / den
-            } else raw.trim().toFloat()
-        } catch (e: Exception) { null }
+                val numerator = n.toLong()
+                val denominator = d.toLong()
+                if (numerator <= 0L || denominator <= 0L) null
+                else RationalFrameRate(numerator, denominator)
+            } else {
+                val decimal = BigDecimal(raw.trim()).stripTrailingZeros()
+                val scale = decimal.scale().coerceAtLeast(0)
+                val numerator = decimal.movePointRight(scale).longValueExact()
+                val denominator = BigDecimal.TEN.pow(scale).longValueExact()
+                if (numerator <= 0L || denominator <= 0L) null
+                else {
+                    val divisor = gcd(numerator, denominator)
+                    RationalFrameRate(numerator / divisor, denominator / divisor)
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
+
+    private fun gcd(a: Long, b: Long): Long =
+        if (b == 0L) a else gcd(b, a % b)
 }

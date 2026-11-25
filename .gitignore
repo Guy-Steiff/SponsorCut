@@ -20,6 +20,7 @@ local.properties
 .idea/
 *.iml
 .gradle/
+.kotlin/
 gradle/wrapper/gradle-wrapper.jar
 
 # Build reports
@@ -28,3 +29,8 @@ build/reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local diagnostic artifacts
+*.bak
+*.bak-*
+*.bak.*

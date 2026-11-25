@@ -1,3 +1,5 @@
+// app/src/main/java/com/sponsorcut/FileResolver.kt
+
 package com.sponsorcut
 
 import android.content.ContentValues
@@ -14,7 +16,7 @@ import java.io.File
 sealed class OutputTarget {
     abstract val label: String
     data class FileTarget(val file: File) : OutputTarget() {
-        override val label get() = file.absolutePath
+        override val label: String get() = file.absolutePath
     }
     data class UriTarget(val uri: Uri, override val label: String) : OutputTarget()
 }
@@ -45,21 +47,54 @@ object FileResolver {
         return uri.lastPathSegment ?: "video.mp4"
     }
 
-    fun outputFileNameFromSource(sourceName: String): String {
+    fun outputFileNameFromSource(
+        sourceName: String,
+        descriptor: String? = null,
+        stage: String = "clean",
+        outputExtension: String? = null
+    ): String {
         val dot = sourceName.lastIndexOf('.')
         val base = if (dot > 0) sourceName.substring(0, dot) else sourceName
-        val ext = if (dot > 0) sourceName.substring(dot) else ".mp4"
+
+        val normalizedOutputExtension = outputExtension
+            ?.trim()
+            ?.removePrefix(".")
+            ?.takeIf { it.isNotBlank() }
+
+        val ext = normalizedOutputExtension
+            ?.let { ".$it" }
+            ?: if (dot > 0) sourceName.substring(dot) else ".mp4"
         val ts = System.currentTimeMillis() / 1000
-        return "${base}_clean_${ts}${ext}"
+
+        val descriptorPart = descriptor
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { value ->
+                value.replace(Regex("[^A-Za-z0-9_-]+"), "-")
+                    .trim('-')
+                    .takeIf { it.isNotBlank() }
+                    ?.let { "${it}_" }
+            }
+            ?: ""
+
+        return "${base}_${descriptorPart}${stage}_${ts}${ext}"
     }
 
     private fun mimeTypeFor(fileName: String): String = when {
+        fileName.endsWith(".ts", ignoreCase = true) -> "video/mp2t"
+        fileName.endsWith(".mts", ignoreCase = true) -> "video/mp2t"
+        fileName.endsWith(".m2ts", ignoreCase = true) -> "video/mp2t"
         fileName.endsWith(".mkv", ignoreCase = true) -> "video/x-matroska"
         fileName.endsWith(".webm", ignoreCase = true) -> "video/webm"
         fileName.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
         fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+        fileName.endsWith(".adts", ignoreCase = true) -> "audio/aac"
         fileName.endsWith(".aac", ignoreCase = true) -> "audio/aac"
         fileName.endsWith(".opus", ignoreCase = true) -> "audio/ogg"
+        fileName.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
+        fileName.endsWith(".oga", ignoreCase = true) -> "audio/ogg"
+        fileName.endsWith(".flac", ignoreCase = true) -> "audio/flac"
+        fileName.endsWith(".wav", ignoreCase = true) -> "audio/x-wav"
         else -> "video/mp4"
     }
 
@@ -74,7 +109,7 @@ object FileResolver {
         return OutputTarget.UriTarget(doc.uri, path)
     }
 
-    fun createOutputTarget(context: Context, sourceUri: Uri, fileName: String, inputFile: File): OutputTarget {
+    fun createOutputTarget(context: Context, sourceUri: Uri, fileName: String): OutputTarget {
         val realPath = tryGetRealPath(context, sourceUri)
         if (realPath != null) {
             val parent = File(realPath).parentFile
@@ -167,5 +202,24 @@ object FileResolver {
                 } ?: error("Cannot open output URI for writing: ${target.uri}")
             }
         }
+    }
+
+    fun saveTextToOutputFolder(
+        context: Context,
+        treeUri: Uri,
+        fileName: String,
+        text: String
+    ) {
+        val tree = DocumentFile.fromTreeUri(context, treeUri)
+            ?: error("Cannot open output folder")
+
+        tree.findFile(fileName)?.delete()
+
+        val document = tree.createFile("text/plain", fileName)
+            ?: error("Cannot create diagnostic log file: $fileName")
+
+        context.contentResolver.openOutputStream(document.uri)?.use { output ->
+            output.write(text.toByteArray(Charsets.UTF_8))
+        } ?: error("Cannot open diagnostic log file for writing: $fileName")
     }
 }
