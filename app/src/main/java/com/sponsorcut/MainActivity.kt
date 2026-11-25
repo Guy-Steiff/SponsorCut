@@ -77,6 +77,11 @@ import kotlin.math.roundToLong
 //sinmilarly for fallback, this is what should appear in the spinner, resorted for the fallback / input, but with its original identity preserved
 class MainActivity : Activity() {
 
+    private companion object {
+        private const val SEGMENT_END_DURATION_TOLERANCE_SEC = 0.05
+    }
+
+
     private lateinit var statusView: TextView
     private lateinit var idInput: EditText
     private lateinit var retryButton: Button
@@ -7168,7 +7173,7 @@ This summary does not replace those notices or the license terms of individual c
             val end = if (segment.endIsOpen) {
                 mediaDuration ?: segment.start
             } else {
-                segment.end
+                segment.end.coerceAtMost(mediaDuration ?: segment.end)
             }
 
             (end - segment.start).coerceAtLeast(0.0)
@@ -7254,15 +7259,26 @@ This summary does not replace those notices or the license terms of individual c
 }
 
     private fun isSegmentRowValid(segment: SponsorSegmentInfo): Boolean {
+        val duration = pendingVideoInfo?.durationSec
+
         if (segment.endIsOpen) {
-            val duration = pendingVideoInfo?.durationSec ?: return false
+            duration ?: return false
             return segment.start < duration
         }
 
         if (segment.end <= segment.start) return false
 
-        val duration = pendingVideoInfo?.durationSec
-        return !(duration != null && segment.end > duration)
+        duration ?: return true
+
+        if (segment.start >= duration) return false
+
+        val effectiveEnd = if (segment.end <= duration + SEGMENT_END_DURATION_TOLERANCE_SEC) {
+            duration
+        } else {
+            segment.end.coerceAtMost(duration)
+        }
+
+        return effectiveEnd > segment.start
     }
 
     private fun circularControl(label: String, onClick: () -> Unit): TextView {
@@ -8302,11 +8318,13 @@ This summary does not replace those notices or the license terms of individual c
 
         val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
         val activeId = prefs.getString(keyActiveProcessingId, "").orEmpty()
-        if (activeId.isBlank()) return
 
         val activeUri = prefs.getString(keyActiveProcessingUri, null)?.let {
             runCatching { it.toUri() }.getOrNull()
         }
+
+        // An active URI is sufficient: no-segmentation jobs have no video ID.
+        if (activeUri == null) return
         val activeFileName = prefs.getString(keyActiveProcessingFileName, null)
         val activeTitle = prefs.getString(keyActiveProcessingTitle, null)
         val activeAuthor = prefs.getString(keyActiveProcessingAuthor, null)
@@ -8317,12 +8335,14 @@ This summary does not replace those notices or the license terms of individual c
         cachedFileName = activeFileName
 
         // Restore media probing and output-field state for the active file.
-        if (activeUri != null && pendingVideoInfo == null) {
+        if (pendingVideoInfo == null) {
             inspectSelectedUri(activeUri)
         }
 
         runOnUiThread {
-            setIdInputProgrammatically(activeId)
+            if (activeId.isNotBlank()) {
+                setIdInputProgrammatically(activeId)
+            }
             idCardState = CardState.OK
 
             if (!activeFileName.isNullOrBlank()) {
