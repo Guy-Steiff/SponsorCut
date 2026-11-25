@@ -79,7 +79,7 @@
       },
       {
         "guid": "annual-development-grant",
-        "status": "proposed",
+        "status": "active",
         "name": "Annual development and maintenance support",
         "description": "Requested support for continued SponsorCut development, testing, native-build maintenance, documentation, test devices, hosting, and domain costs.",
         "amount": 10000,
