@@ -1,0 +1,10 @@
+Major update: local-first segmentation.
+
+- Process media without segmentation
+- Import segmentation data from local TXT or JSON files
+- Create and edit segments manually
+- Store imported segment sets locally for offline use
+- Make external SponsorBlock database lookup optional
+- Add Rumble.com and Spotify support through a separate database unrelated to SponsorBlock
+- Add media file unload action
+- Improve audio-only segmentation workflow
