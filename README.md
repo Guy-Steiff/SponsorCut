@@ -108,4 +108,4 @@ NIA is a sample/reference application rather than a drop-in SponsorCut template.
 
 ## License
 
-MIT.
+GPL-3.0-or-later.
